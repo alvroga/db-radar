@@ -37,14 +37,6 @@ A GPS waypoint radar application for the Waveshare ESP32-S3-Touch-LCD-2.1 round 
 
 ---
 
-## 🖼️ Gallery
-
-| Radar Screen | Waypoint List | Settings |
-|:---:|:---:|:---:|
-| *(photo)* | *(photo)* | *(photo)* |
-
----
-
 ## 🔩 Bill of Materials
 
 | # | Part | Notes |
