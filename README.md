@@ -11,7 +11,7 @@ A GPS waypoint radar application for the Waveshare ESP32-S3-Touch-LCD-2.1 round 
 
 ## 🎯 What Is This?
 
-**cc-radar** is a self-contained GPS navigation tool built on the ESP32-S3. It runs entirely on the device — no phone required. Load GPX waypoints over WiFi, step outside, and the radar shows where each waypoint is relative to where you're facing.
+**db-radar** is a self-contained GPS navigation tool built on the ESP32-S3. It runs entirely on the device — no phone required. Load GPX waypoints over WiFi, step outside, and the radar shows where each waypoint is relative to where you're facing.
 
 ### Features
 
