@@ -1,4 +1,4 @@
-# db-radar — GPS Radar for Waveshare ESP32-S3-Touch-LCD-2.1
+# GPS Radar for Waveshare ESP32-S3-Touch-LCD-2.1
 
 [![PlatformIO](https://img.shields.io/badge/PlatformIO-Compatible-blue.svg)](https://platformio.org/)
 [![License: CC BY-NC-SA 4.0](https://img.shields.io/badge/License-CC_BY--NC--SA_4.0-lightgrey.svg)](https://creativecommons.org/licenses/by-nc-sa/4.0/)
@@ -34,6 +34,11 @@ A GPS waypoint radar application for the Waveshare ESP32-S3-Touch-LCD-2.1 round 
 - ⚙️ **Settings screen** — GPS, WiFi, Display, Sound, Beacon, Dev tabs; all settings NVS-persisted
 - 🛡️ **Hardware watchdog** + crash logging to RTC memory
 - 🖥️ **DEV mode serial commands** — memory, task, beacon, battery, config diagnostics
+
+---
+## 🖼️ Gallery
+
+<img width="600" height="650" alt="db-radar" src="https://github.com/user-attachments/assets/60f3c0b0-2c00-4b6f-a752-2aa3e1485c16" />
 
 ---
 
