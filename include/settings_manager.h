@@ -55,9 +55,9 @@ struct RadarSettings {
     bool button_sound_enabled = false;   // Button press sound enabled (default: OFF, for diagnostics)
 
     // Developer settings
-    bool dev_mode = true;                // Master dev mode toggle (default: ON during development)
-    bool dev_tab_visible = true;         // DEV tab visible in settings (default: ON)
-    bool logging_enabled = true;         // System event logging enabled (default: ON)
+    bool dev_mode = false;               // Master dev mode toggle (default: OFF for release)
+    bool dev_tab_visible = false;        // DEV tab visible in settings (default: OFF for release)
+    bool logging_enabled = false;        // System event logging enabled (default: OFF for release)
 
     // Compass calibration (hard iron offsets)
     int16_t compass_cal_x = 0;
