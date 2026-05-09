@@ -1,0 +1,88 @@
+#include "lcd_st7701.h"
+#include <string.h>
+#include <freertos/FreeRTOS.h>
+#include <freertos/task.h>
+
+static inline bool st_send(spi_device_handle_t spi, bool isData, uint8_t val) {
+  spi_transaction_t t;
+  memset(&t, 0, sizeof(t));
+  t.cmd  = isData ? 1 : 0;   // 1=data, 0=cmd
+  t.addr = val;
+  esp_err_t err = spi_device_transmit(spi, &t);
+  return err == ESP_OK;
+}
+
+bool st7701_send_cmd(spi_device_handle_t spi, uint8_t cmd)  { return st_send(spi, false, cmd); }
+bool st7701_send_data(spi_device_handle_t spi, uint8_t data){ return st_send(spi, true , data); }
+
+bool st7701_init(spi_device_handle_t st_spi) {
+  auto C = [&](uint8_t c){ return st7701_send_cmd(st_spi, c); };
+  auto D = [&](uint8_t d){ return st7701_send_data(st_spi, d); };
+
+  // ----- Full init table (your proven sequence) -----
+  if(!C(0xFF) || !D(0x77) || !D(0x01) || !D(0x00) || !D(0x00) || !D(0x10)) return false;
+  if(!C(0xC0) || !D(0x3B) || !D(0x00)) return false;
+  if(!C(0xC1) || !D(0x0B) || !D(0x02)) return false;
+  if(!C(0xC2) || !D(0x07) || !D(0x02)) return false;
+  if(!C(0xCC) || !D(0x10)) return false;
+  if(!C(0xCD) || !D(0x08)) return false;
+
+  { const uint8_t B0[]={0x00,0x11,0x16,0x0e,0x11,0x06,0x05,0x09,0x08,0x21,0x06,0x13,0x10,0x29,0x31,0x18};
+    if(!C(0xB0)) return false; for (auto v:B0) if(!D(v)) return false; }
+  { const uint8_t B1[]={0x00,0x11,0x16,0x0e,0x11,0x07,0x05,0x09,0x09,0x21,0x05,0x13,0x11,0x2a,0x31,0x18};
+    if(!C(0xB1)) return false; for (auto v:B1) if(!D(v)) return false; }
+
+  if(!C(0xFF) || !D(0x77) || !D(0x01) || !D(0x00) || !D(0x00) || !D(0x11)) return false;
+  if(!C(0xB0) || !D(0x6d)) return false;
+  if(!C(0xB1) || !D(0x37)) return false;
+  if(!C(0xB2) || !D(0x81)) return false;
+  if(!C(0xB3) || !D(0x80)) return false;
+  if(!C(0xB5) || !D(0x43)) return false;
+  if(!C(0xB7) || !D(0x85)) return false;
+  if(!C(0xB8) || !D(0x20)) return false;
+  if(!C(0xC1) || !D(0x78)) return false;
+  if(!C(0xC2) || !D(0x78)) return false;
+  if(!C(0xD0) || !D(0x88)) return false;
+
+  if(!C(0xE0) || !D(0x00) || !D(0x00) || !D(0x02)) return false;
+
+  { const uint8_t E1[]={0x03,0xA0,0x00,0x00,0x04,0xA0,0x00,0x00,0x00,0x20,0x20};
+    if(!C(0xE1)) return false; for (auto v:E1) if(!D(v)) return false; }
+
+  if(!C(0xE2)) return false;  // 13 zeros
+  for (int i=0;i<13;i++) if(!D(0x00)) return false;
+
+  if(!C(0xE3) || !D(0x00) || !D(0x00) || !D(0x11) || !D(0x00)) return false;
+  if(!C(0xE4) || !D(0x22) || !D(0x00)) return false;
+
+  { const uint8_t E5[]={0x05,0xEC,0xA0,0xA0,0x07,0xEE,0xA0,0xA0,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00};
+    if(!C(0xE5)) return false; for (auto v:E5) if(!D(v)) return false; }
+
+  if(!C(0xE6) || !D(0x00) || !D(0x00) || !D(0x11) || !D(0x00)) return false;
+  if(!C(0xE7) || !D(0x22) || !D(0x00)) return false;
+
+  { const uint8_t E8[]={0x06,0xED,0xA0,0xA0,0x08,0xEF,0xA0,0xA0,0x00,0x00,0x00,0x00,0x00,0x00,0x00,0x00};
+    if(!C(0xE8)) return false; for (auto v:E8) if(!D(v)) return false; }
+
+  if(!C(0xEB) || !D(0x00) || !D(0x00) || !D(0x40) || !D(0x40) || !D(0x00) || !D(0x00) || !D(0x00)) return false;
+
+  { const uint8_t ED[]={0xFF,0xFF,0xFF,0xBA,0x0A,0xBF,0x45,0xFF,0xFF,0x54,0xFB,0xA0,0xAB,0xFF,0xFF,0xFF};
+    if(!C(0xED)) return false; for (auto v:ED) if(!D(v)) return false; }
+
+  if(!C(0xEF) || !D(0x10) || !D(0x0D) || !D(0x04) || !D(0x08) || !D(0x3F) || !D(0x1F)) return false;
+
+  if(!C(0xFF) || !D(0x77) || !D(0x01) || !D(0x00) || !D(0x00) || !D(0x13)) return false;
+  if(!C(0xEF) || !D(0x08)) return false;
+  if(!C(0xFF) || !D(0x77) || !D(0x01) || !D(0x00) || !D(0x00) || !D(0x00)) return false;
+  if(!C(0x36) || !D(0x00)) return false;   // Memory Access Control
+  if(!C(0x3A) || !D(0x66)) return false;   // RGB565
+
+  if(!C(0x11)) return false;               // Sleep Out
+  vTaskDelay(pdMS_TO_TICKS(480));
+  if(!C(0x20)) return false;               // Inversion OFF
+  vTaskDelay(pdMS_TO_TICKS(120));
+  if(!C(0x29)) return false;               // Display ON
+  
+
+  return true;
+}

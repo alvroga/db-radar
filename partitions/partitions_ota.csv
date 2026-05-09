@@ -1,0 +1,10 @@
+# Name,     Type, SubType,  Offset,    Size,     Flags
+# 16MB flash: 2x2MB OTA app slots + 11.7MB FFat + 256KB coredump
+# Replaces the single factory slot in partitions.csv
+# Binary size as of 2026-04-13: ~1.56MB — 2MB slots give 440KB headroom
+nvs,        data, nvs,      0x9000,    0x4000,
+otadata,    data, ota,      0xE000,    0x2000,
+ota_0,      app,  ota_0,    0x10000,   0x200000,
+ota_1,      app,  ota_1,    0x210000,  0x200000,
+ffat,       data, fat,      0x410000,  0xBB0000,
+coredump,   data, coredump, 0xFC0000,  0x40000,
