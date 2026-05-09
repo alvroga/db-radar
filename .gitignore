@@ -1,0 +1,124 @@
+# PlatformIO Project .gitignore
+
+# Working / design files — not for public repo
+tickets/
+assets/
+CLAUDE.md.bak2
+
+# PlatformIO Build Files
+.pio/
+.pioenvs/
+.piolibdeps/
+pioenvs/
+piolibdeps/
+.clang_complete
+.gcc-flags.json
+.ccls
+
+# Build artifacts
+build/
+dist/
+*.bin
+*.hex
+*.elf
+*.map
+*.lst
+
+# IDE and Editor Files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+Thumbs.db
+
+# OS Generated Files
+*.log
+*.tmp
+*.temp
+.cache/
+
+# Environment and Secrets
+.env
+.env.local
+.env.production
+credentials.json
+secrets.h
+config_secret.h
+
+# Debug Files
+*.dmp
+core
+debug/
+*.pdb
+
+# Documentation Build
+docs/_build/
+docs/.doctrees/
+site/
+
+# Python (if using Python scripts)
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# ESP32 Specific
+sdkconfig
+sdkconfig.old
+partition_table/
+fatfs_image/
+spiffs_image/
+
+# Test Files
+test_results/
+*.junit
+coverage/
+*.gcov
+*.gcda
+*.gcno
+
+# Libraries (ignore installed libraries, not custom ones)
+lib/!custom_*/
+
+# Backup Files
+*.bak
+*.backup
+*.orig
+
+# Temporary Files
+*.tmp
+*.temp
+*~
+
+# Log Files
+*.log
+logs/
+
+# IDE Project Files (keep platformio.ini)
+*.sublime-*
+*.code-workspace
+
+# Hardware Documentation (optional - uncomment if you don't want to share)
+# hardware/
+# schematics/
+# datasheets/
+
+# Personal Development Notes (optional)
+notes/
+TODO_personal.md
+NOTES_personal.md
+
+# Claude Code assistant config (local paths, not for public repo)
+.claude/
+!src/core/
+!src/core/**
+!include/core/
+!include/core/**
