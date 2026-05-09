@@ -1,4 +1,4 @@
-# cc-radar — GPS Radar for Waveshare ESP32-S3-Touch-LCD-2.1
+# db-radar — GPS Radar for Waveshare ESP32-S3-Touch-LCD-2.1
 
 [![PlatformIO](https://img.shields.io/badge/PlatformIO-Compatible-blue.svg)](https://platformio.org/)
 [![License: CC BY-NC-SA 4.0](https://img.shields.io/badge/License-CC_BY--NC--SA_4.0-lightgrey.svg)](https://creativecommons.org/licenses/by-nc-sa/4.0/)
