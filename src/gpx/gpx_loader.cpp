@@ -55,19 +55,19 @@ int loadAllGPXFiles() {
 
     struct dirent* entry;
     while ((entry = readdir(dir)) != nullptr) {
-        if (entry->d_type == DT_REG) {
-            const char* fname = entry->d_name;
-            size_t nl = strlen(fname);
-            if (nl >= 4 && strcasecmp(fname + nl - 4, ".gpx") == 0) {
-                char filepath[256];
-                snprintf(filepath, sizeof(filepath), "%s/%s", GPX_FOLDER, fname);
-                Serial.printf("[GPX_LOADER] Found GPX file: %s\n", fname);
+        const char* fname = entry->d_name;
+        size_t nl = strlen(fname);
+        if (nl >= 4 && strcasecmp(fname + nl - 4, ".gpx") == 0) {
+            char filepath[256];
+            snprintf(filepath, sizeof(filepath), "%s/%s", GPX_FOLDER, fname);
+            Serial.printf("[GPX_LOADER] Found GPX file: %s\n", fname);
 
-                int parsed = parseGPXFile(filepath);
-                if (parsed > 0) {
-                    files_loaded++;
-                    Serial.printf("[GPX_LOADER] Loaded %d waypoints from %s\n", parsed, fname);
-                }
+            int parsed = parseGPXFile(filepath);
+            if (parsed > 0) {
+                files_loaded++;
+                Serial.printf("[GPX_LOADER] Loaded %d waypoints from %s\n", parsed, fname);
+            } else {
+                Serial.printf("[GPX_LOADER] WARNING: %s yielded 0 waypoints\n", fname);
             }
         }
     }
@@ -165,11 +165,14 @@ int parseGPXFile(const char* filepath) {
     bool in_short_desc = false;
     bool in_long_desc = false;
 
+    // Geocaching.com GPX files end with </wpt></gpx> with NO trailing newline.
+    // Treat EOF as a final newline so the last buffered chunk is always processed.
     int _ch;
-    while ((_ch = fgetc(file)) != EOF && waypoints_loaded < ui_manager::RadarConfig::MAX_WAYPOINTS) {
-        char c = (char)_ch;
+    while (waypoints_loaded < ui_manager::RadarConfig::MAX_WAYPOINTS) {
+        _ch = fgetc(file);
+        char c = (_ch == EOF) ? '\n' : (char)_ch;
 
-        if (c == '\n' || c == '\r' || line_len >= 511) {
+        if (_ch == EOF || c == '\n' || c == '\r' || line_len >= 511) {
             line[line_len] = '\0';
 
             if (strstr(line, "<wpt") && strstr(line, "lat=")) {
@@ -363,6 +366,7 @@ int parseGPXFile(const char* filepath) {
             }
 
             line_len = 0;
+            if (_ch == EOF) break;  // Exit after flushing final line (no trailing newline in geocaching GPX)
         } else {
             line[line_len++] = c;
         }

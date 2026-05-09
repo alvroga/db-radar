@@ -2,9 +2,12 @@
 // Replaces WebServer/SD_MMC/WiFi.h Arduino dependencies.
 
 #include "gpx/gpx_server.h"
+#include "gpx/gpx_loader.h"
+#include "ui/ui_manager.h"
 #include "hardware/connectivity/wifi_manager.h"
 #include "core/arduino_compat.h"
 #include "settings_manager.h"
+#include "utils/task_manager.h"
 
 #include "esp_http_server.h"
 #include "esp_wifi.h"
@@ -145,11 +148,20 @@ static const char UPLOAD_HTML[] = R"rawliteral(
             color: #ff4444;
             display: block;
         }
+        .wp-status {
+            background: #1f1f1f;
+            border: 1px solid #333;
+            padding: 10px 14px;
+            border-radius: 4px;
+            margin-top: 16px;
+            font-size: 0.9em;
+            color: #e0e0e0;
+        }
         .info-box {
             background: #1f1f1f;
             border-left: 3px solid #00aa44;
             padding: 10px 14px;
-            margin-top: 20px;
+            margin-top: 12px;
             border-radius: 4px;
             font-size: 0.85em;
             color: #aaa;
@@ -178,8 +190,10 @@ static const char UPLOAD_HTML[] = R"rawliteral(
 
         <div class="file-list" id="fileList"></div>
 
+        <div id="wpStatus" class="wp-status">Waypoints: loading...</div>
+
         <div class="info-box">
-            <strong>Auto-load:</strong> All GPX files in /gpx/ are loaded on boot. Delete files to remove waypoints.
+            <strong>Auto-load:</strong> Files are loaded automatically when uploaded. Reload the page to refresh the count.
         </div>
     </div>
 
@@ -189,8 +203,9 @@ static const char UPLOAD_HTML[] = R"rawliteral(
         const status = document.getElementById('status');
         const fileList = document.getElementById('fileList');
 
-        // Load existing files on page load
+        // Load existing files and waypoint count on page load
         loadFileList();
+        loadWaypointCount();
 
         // Click to browse
         uploadArea.addEventListener('click', () => fileInput.click());
@@ -233,6 +248,7 @@ static const char UPLOAD_HTML[] = R"rawliteral(
                     if (response.ok) {
                         showStatus(`+ ${file.name} uploaded successfully`, 'success');
                         loadFileList();
+                        loadWaypointCount();
                     } else {
                         const text = await response.text();
                         showStatus(`! Upload failed: ${text}`, 'error');
@@ -284,6 +300,17 @@ static const char UPLOAD_HTML[] = R"rawliteral(
                 }
             } catch (error) {
                 showStatus(`! Delete error: ${error.message}`, 'error');
+            }
+        }
+
+        async function loadWaypointCount() {
+            try {
+                const r = await fetch('/waypoints');
+                const d = await r.json();
+                document.getElementById('wpStatus').textContent =
+                    `Waypoints loaded: ${d.count} / ${d.max}`;
+            } catch(e) {
+                document.getElementById('wpStatus').textContent = 'Waypoints: (unavailable)';
             }
         }
 
@@ -788,6 +815,16 @@ static esp_err_t upload_handler(httpd_req_t* req) {
     fclose(f);
 
     Serial.printf("[GPX_SERVER] Upload OK: %s (%d bytes)\n", filename, (int)req->content_len);
+
+    // Reload all GPX files so the new waypoints are immediately active
+    int reloaded = gpx_loader::refreshGPXFiles();
+    Serial.printf("[GPX_SERVER] Auto-reload after upload: %d waypoints\n", reloaded);
+
+    // Ask the UI Task to redraw the radar with updated waypoints
+    task_manager::UIUpdate upd = {};
+    upd.type = task_manager::UIUpdateType::RADAR_REFRESH;
+    task_manager::queueUIUpdate(upd);
+
     httpd_resp_send(req, "OK", 2);
     return ESP_OK;
 }
@@ -819,6 +856,17 @@ static esp_err_t list_handler(httpd_req_t* req) {
 
     httpd_resp_send_chunk(req, "]}", 2);
     httpd_resp_send_chunk(req, nullptr, 0);
+    return ESP_OK;
+}
+
+static esp_err_t waypoints_handler(httpd_req_t* req) {
+    int count = gpx_loader::getWaypointCount();
+    int max   = ui_manager::RadarConfig::MAX_WAYPOINTS;
+
+    char buf[48];
+    int len = snprintf(buf, sizeof(buf), "{\"count\":%d,\"max\":%d}", count, max);
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_send(req, buf, len);
     return ESP_OK;
 }
 
@@ -1031,7 +1079,7 @@ bool start() {
 
     httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
     cfg.uri_match_fn    = httpd_uri_match_wildcard;
-    cfg.max_uri_handlers = 12;
+    cfg.max_uri_handlers = 13;
     cfg.lru_purge_enable = true; // evict stuck half-open connections so httpd_start succeeds on retry
 
     if (httpd_start(&g_server, &cfg) != ESP_OK) {
@@ -1043,6 +1091,7 @@ bool start() {
         { "/",           HTTP_GET,    root_handler,       nullptr },
         { "/upload",     HTTP_POST,   upload_handler,     nullptr },
         { "/list",       HTTP_GET,    list_handler,       nullptr },
+        { "/waypoints",  HTTP_GET,    waypoints_handler,  nullptr },
         { "/logs",       HTTP_GET,    logs_page_handler,  nullptr },
         { "/logs-list",  HTTP_GET,    logs_list_handler,  nullptr },
         { "/delete/*",   HTTP_DELETE, delete_handler,     nullptr },
