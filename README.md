@@ -7,6 +7,7 @@
 
 A GPS waypoint radar application for the Waveshare ESP32-S3-Touch-LCD-2.1 round touch display. Shows your position and saved waypoints on a live compass-driven radar, with GPX file management over WiFi, BLE beacon proximity detection, and robust field navigation features.
 
+https://www.reddit.com/r/arduino/comments/1scpmaw/dragon_ball_radar/
 ---
 
 ## 🎯 What Is This?
