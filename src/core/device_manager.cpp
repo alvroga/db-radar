@@ -38,6 +38,23 @@ static volatile bool g_lvgl_unlocked = false;
 static lv_color_t *lv_buf1 = nullptr, *lv_buf2 = nullptr;
 static lv_disp_draw_buf_t draw_buf;
 static lv_disp_t* g_lv_disp = nullptr;   // Captured at register; needed by applyPendingSwRotate()
+
+// Staging buffers for the tiled 90° rotation (RotMode::TILED).
+//
+// One per LVGL draw buffer, paired by pointer. That pairing is what makes the DMA
+// safe: LVGL never re-renders into a draw buffer whose flush is still outstanding,
+// so a staging buffer tied to that draw buffer inherits the same guarantee and can
+// never be overwritten while esp_lcd is reading it.
+static lv_color_t* g_rot_buf[2] = { nullptr, nullptr };
+static size_t      g_lv_buf_px  = 0;     // Pixels per draw buffer (for the range check)
+
+static volatile int g_rot_mode_request = -1;   // -1 = none pending
+
+// Default is TILED: measured 64.3ms/frame vs 162ms for LVGL's own in-place transpose
+// (230400px, on-device 2026-07-28). initLVGL() overrides this if the staging buffers
+// could not be allocated, or if built with -DRADAR_SW_ROTATE=0. `rot on` restores the
+// LVGL path at runtime for A/B comparison.
+static RotMode g_rot_mode = RotMode::TILED;
 static lv_disp_drv_t disp_drv;
 static lv_indev_drv_t indev_drv;
 
@@ -540,6 +557,18 @@ bool initLVGL(const Config& config) {
         return false;
     }
 
+    g_lv_buf_px = (size_t)config.screen_width * config.buffer_lines;
+
+    // Staging buffers for tiled rotation. Failure is non-fatal — TILED mode simply
+    // refuses to engage and we stay on LVGL's own rotation.
+    g_rot_buf[0] = (lv_color_t*)heap_caps_malloc(buf_size, MALLOC_CAP_SPIRAM);
+    g_rot_buf[1] = (lv_color_t*)heap_caps_malloc(buf_size, MALLOC_CAP_SPIRAM);
+    if (!g_rot_buf[0] || !g_rot_buf[1]) {
+        Serial.println("[LVGL] WARN: rotation staging buffers unavailable — tiled rotation disabled");
+        if (g_rot_buf[0]) { heap_caps_free(g_rot_buf[0]); g_rot_buf[0] = nullptr; }
+        if (g_rot_buf[1]) { heap_caps_free(g_rot_buf[1]); g_rot_buf[1] = nullptr; }
+    }
+
     lv_disp_draw_buf_init(&draw_buf, lv_buf1, lv_buf2, config.screen_width * config.buffer_lines);
     lv_disp_drv_init(&disp_drv);
     disp_drv.hor_res = config.screen_width;
@@ -558,7 +587,17 @@ bool initLVGL(const Config& config) {
     // requires `sw_rotate`. Building with -DRADAR_SW_ROTATE=0 therefore renders sideways
     // while keeping touch correct — see the comment on SW_ROTATE in system_config.h.
     #if LV_VERSION_CHECK(8,0,0)
-        const uint8_t sw_rot = system_config::display::SW_ROTATE ? 1 : 0;
+        // Pick the rotation mode, then derive sw_rotate from it. These MUST agree:
+        // leaving sw_rotate=1 while g_rot_mode is TILED rotates the image twice.
+        if (!system_config::display::SW_ROTATE) {
+            g_rot_mode = RotMode::NONE;          // -DRADAR_SW_ROTATE=0 measurement build
+        } else if (g_rot_buf[0] && g_rot_buf[1]) {
+            g_rot_mode = RotMode::TILED;         // preferred — 64ms vs 162ms
+        } else {
+            g_rot_mode = RotMode::LVGL_SW;       // staging alloc failed, fall back
+        }
+        const uint8_t sw_rot = (g_rot_mode == RotMode::LVGL_SW) ? 1 : 0;
+        Serial.printf("[LVGL] Rotation mode: %s\n", rotModeName(g_rot_mode));
         if (system_config::display::ROTATION_DEGREES == 90) {
             disp_drv.sw_rotate = sw_rot;
             disp_drv.rotated = LV_DISP_ROT_90;
@@ -828,32 +867,82 @@ SemaphoreHandle_t getVsyncSemaphore() {
 // areas are reinterpreted under the new rotation. The screen is square, so its
 // resolution-swap path is a no-op here.
 // ---------------------------------------------------------------------------
-static volatile int g_sw_rotate_request = -1;   // -1 = none pending, 0/1 = requested
-
-void requestSwRotate(bool enable) {
-    g_sw_rotate_request = enable ? 1 : 0;
+void requestRotMode(RotMode mode) {
+    g_rot_mode_request = (int)mode;
 }
 
-bool isSwRotateEnabled() {
-    return disp_drv.sw_rotate != 0;
+RotMode getRotMode() { return g_rot_mode; }
+
+bool isTiledRotateAvailable() { return g_rot_buf[0] && g_rot_buf[1]; }
+
+const char* rotModeName(RotMode m) {
+    switch (m) {
+        case RotMode::LVGL_SW: return "LVGL sw_rotate (baseline)";
+        case RotMode::NONE:    return "no rotation (sideways — measurement only)";
+        case RotMode::TILED:   return "tiled transpose in flush_cb";
+    }
+    return "?";
 }
 
-bool applyPendingSwRotate() {
-    const int req = g_sw_rotate_request;
+bool applyPendingRotMode() {
+    const int req = g_rot_mode_request;
     if (req < 0) return false;
-    g_sw_rotate_request = -1;
+    g_rot_mode_request = -1;
 
-    const uint8_t want = req ? 1 : 0;
-    if (disp_drv.sw_rotate == want) return false;
+    RotMode want = (RotMode)req;
+    if (want == RotMode::TILED && !isTiledRotateAvailable()) {
+        Serial.println("[ROT] TILED unavailable (no staging buffers) — staying put");
+        return false;
+    }
+    if (want == g_rot_mode) return false;
     if (!g_lv_disp) return false;
 
-    disp_drv.sw_rotate = want;
+    g_rot_mode = want;
+
+    // LVGL only rotates pixels when sw_rotate is set; NONE and TILED both need it
+    // off, the difference being whether flush_cb puts the rotation back.
+    disp_drv.sw_rotate = (want == RotMode::LVGL_SW) ? 1 : 0;
     lv_disp_drv_update(g_lv_disp, &disp_drv);
     lv_obj_invalidate(lv_scr_act());
 
-    Serial.printf("[LVGL] sw_rotate -> %d (%s)\n", want,
-                  want ? "LVGL rotates pixels" : "NO pixel rotation — display sideways");
+    Serial.printf("[ROT] mode -> %s\n", rotModeName(want));
     return true;
+}
+
+/**
+ * @brief Cache-friendly 90° rotation, matching LVGL's LV_DISP_ROT_90 convention.
+ *
+ * Mapping (verified against lv_refr.c:1198-1222):
+ *     dst_x = src_y
+ *     dst_y = (ver_res - 1) - src_x
+ *
+ * In area-local terms, with i = sx-x1 (0..w-1) and j = sy-y1 (0..h-1), the
+ * destination is h wide and w tall:
+ *     dst[((w-1) - i) * h + j] = src[j * w + i]
+ *
+ * Why tiles: LVGL's draw_buf_rotate_90_sqr walks four points 960 bytes apart and
+ * misses the data cache on roughly three of every four accesses — each 2-byte
+ * pixel drags in a 32-byte line, a ~16x read amplification. Processing TILE×TILE
+ * blocks keeps both the source rows and destination columns of a tile resident
+ * (32×32×2B = 2KB each, trivially inside the 32KB dcache), so the same pixel count
+ * moves with near-full cache-line utilisation.
+ */
+static void rotate90_tiled(const lv_color_t* __restrict src,
+                           lv_color_t* __restrict dst,
+                           int w, int h) {
+    constexpr int TILE = 32;
+    for (int jj = 0; jj < h; jj += TILE) {
+        const int jmax = (jj + TILE < h) ? (jj + TILE) : h;
+        for (int ii = 0; ii < w; ii += TILE) {
+            const int imax = (ii + TILE < w) ? (ii + TILE) : w;
+            for (int j = jj; j < jmax; j++) {
+                const lv_color_t* srow = src + (size_t)j * w;
+                for (int i = ii; i < imax; i++) {
+                    dst[(size_t)(w - 1 - i) * h + j] = srow[i];
+                }
+            }
+        }
+    }
 }
 
 // Render-time monitor - LVGL calls this at the end of every refresh with the
@@ -876,8 +965,32 @@ static void lvgl_flush_cb(lv_disp_drv_t* drv, const lv_area_t* area, lv_color_t*
     // Store driver pointer for DMA callback
     g_current_disp_drv = drv;
 
-    // Start DMA transfer (asynchronous - callback will fire when done)
-    esp_lcd_panel_draw_bitmap(g_device_state.panel_handle, area->x1, area->y1, area->x2+1, area->y2+1, color_p);
+    if (g_rot_mode == RotMode::TILED && g_rot_buf[0] && g_rot_buf[1]) {
+        const int w = area->x2 - area->x1 + 1;
+        const int h = area->y2 - area->y1 + 1;
+
+        // Pair the staging buffer to the draw buffer we were handed, so an in-flight
+        // DMA can never be reading the buffer LVGL is about to render into.
+        lv_color_t* stage = g_rot_buf[0];
+        if (lv_buf2 && color_p >= lv_buf2 && color_p < lv_buf2 + g_lv_buf_px) {
+            stage = g_rot_buf[1];
+        }
+
+        const int64_t t0 = esp_timer_get_time();
+        rotate90_tiled(color_p, stage, w, h);
+        navigation::getNavState().rot_us = (uint32_t)(esp_timer_get_time() - t0);
+
+        // Destination is the transposed rectangle: h wide, w tall.
+        const int ver  = system_config::display::SCREEN_HEIGHT;
+        const int dx1  = area->y1;
+        const int dy1  = ver - 1 - area->x2;
+        esp_lcd_panel_draw_bitmap(g_device_state.panel_handle,
+                                  dx1, dy1, dx1 + h, dy1 + w, stage);
+    } else {
+        navigation::getNavState().rot_us = 0;
+        // Start DMA transfer (asynchronous - callback will fire when done)
+        esp_lcd_panel_draw_bitmap(g_device_state.panel_handle, area->x1, area->y1, area->x2+1, area->y2+1, color_p);
+    }
 
     // Increment FPS counter for navigation module
     navigation::getNavState().flush_count = navigation::getNavState().flush_count + 1;

@@ -155,7 +155,7 @@ static void uiTask(void* parameter) {
         if (xSemaphoreTake(display_mutex, pdMS_TO_TICKS(300)) == pdTRUE) {
             // Apply a pending runtime sw_rotate change before LVGL renders anything,
             // so the toggle never lands mid-refresh. UI Task + mutex = safe for LVGL.
-            device_manager::applyPendingSwRotate();
+            device_manager::applyPendingRotMode();
 
             // Process LVGL tasks (timer handlers, animations, etc.)
             if (device_manager::isLVGLUnlocked()) {

@@ -4,6 +4,7 @@
 #include "core/arduino_compat.h"
 #include <time.h>          // NimBLEAttValue.h uses time_t without including this itself
 #include <NimBLEDevice.h>
+#include <esp_log.h>       // esp_log_level_set — silence NimBLE's per-scan INFO chatter
 #include <cmath>
 
 namespace beacon_proximity {
@@ -257,6 +258,12 @@ void init() {
     Serial.printf("[BEACON] Free internal SRAM before BLE init: %u bytes\n", (unsigned)free_internal);
 
     if (!NimBLEDevice::getInitialized()) {
+        // Silence the stack's own INFO chatter before bringing it up. Beacon proximity
+        // restarts discovery roughly once a second while at 50m zoom, and NimBLE logs
+        // four lines per "GAP procedure initiated" — ~4 lines/sec of serial that carries
+        // no information we act on, on a console path where every write ends in fflush.
+        // Warnings and errors still come through.
+        esp_log_level_set("NimBLE", ESP_LOG_WARN);
         NimBLEDevice::init("");
     }
 

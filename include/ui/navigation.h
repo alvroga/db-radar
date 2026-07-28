@@ -24,6 +24,7 @@ struct NavState {
     //   refr_ms  -> LVGL refresh: canvas blit + 90 deg rotate + flush dispatch
     volatile uint32_t paint_us = 0;   // last updateRadarDisplay() duration, microseconds
     volatile uint32_t refr_ms  = 0;   // last LVGL refresh duration, milliseconds
+    volatile uint32_t rot_us   = 0;   // tiled transpose in flush_cb (0 when not in TILED mode)
     volatile uint32_t refr_px  = 0;   // pixels touched by last LVGL refresh
 
     // Per-stage breakdown of the paint half, so the dominant cost can be

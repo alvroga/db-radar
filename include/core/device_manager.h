@@ -114,26 +114,42 @@ bool isLVGLUnlocked();
 SemaphoreHandle_t getVsyncSemaphore();
 
 /**
- * @brief Request LVGL software pixel rotation on/off at runtime (thread-safe).
+ * @brief How the 90° display rotation is performed.
  *
- * EXPERIMENT (Option B viability): if sw_rotate can be toggled per screen, the radar
- * can run unrotated — drawing its geometry pre-rotated, which is free — while settings
- * and waypoint screens keep LVGL rotation and stay upright. That would remove the
- * measured 162ms/frame transpose without any of the DMA risk a tiled transpose carries.
+ * The panel is mounted 90° CCW (GPS module placement — see ROADMAP), so the image
+ * must be rotated. LVGL's own in-place transpose measured 162ms/frame; TILED
+ * replaces it with a cache-friendly blocked transpose in flush_cb.
  *
- * Safe to call from any task: this only records the request. The UI Task applies it via
- * applyPendingSwRotate() while holding display_mutex, since it touches LVGL state.
+ * NOTE on touch: LVGL's touch transform (lv_indev.c:346) keys off `rotated` and
+ * assumes the pixels were rotated. LVGL_SW and TILED both satisfy that, so touch
+ * is correct in either. NONE does not — it exists only for A/B measurement, and
+ * touch is misaligned by 90° while it is active.
  */
-void requestSwRotate(bool enable);
+enum class RotMode : uint8_t {
+    LVGL_SW = 0,   // LVGL does it (disp_drv.sw_rotate = 1) — the baseline
+    NONE    = 1,   // Nobody does it — sideways, measurement only
+    TILED   = 2,   // Blocked transpose in flush_cb
+};
 
 /**
- * @brief Apply a pending requestSwRotate(), if any. UI TASK ONLY, under display_mutex.
+ * @brief Request a rotation mode change at runtime (thread-safe, any task).
+ *
+ * Only records the request; the UI Task applies it via applyPendingRotMode() while
+ * holding display_mutex, so it never lands mid-refresh.
+ */
+void requestRotMode(RotMode mode);
+
+/**
+ * @brief Apply a pending requestRotMode(), if any. UI TASK ONLY, under display_mutex.
  * @return true if a change was applied this call.
  */
-bool applyPendingSwRotate();
+bool applyPendingRotMode();
 
-/** @brief Current LVGL software rotation state. */
-bool isSwRotateEnabled();
+RotMode     getRotMode();
+const char* rotModeName(RotMode m);
+
+/** @brief False if the staging buffers could not be allocated (TILED unavailable). */
+bool isTiledRotateAvailable();
 
 } // namespace device_manager
 

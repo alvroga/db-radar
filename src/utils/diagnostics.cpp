@@ -128,15 +128,20 @@ void parseCommand(const char* command) {
         const char* a = p + 3;
         while (*a == ' ') a++;
         if (strncmp(a, "on", 2) == 0) {
-            device_manager::requestSwRotate(true);
-            Serial.println("[ROT] Requested sw_rotate=1 (UI Task will apply)");
+            device_manager::requestRotMode(device_manager::RotMode::LVGL_SW);
+            Serial.println("[ROT] -> LVGL sw_rotate (baseline)");
         } else if (strncmp(a, "off", 3) == 0) {
-            device_manager::requestSwRotate(false);
-            Serial.println("[ROT] Requested sw_rotate=0 — display should go SIDEWAYS");
+            device_manager::requestRotMode(device_manager::RotMode::NONE);
+            Serial.println("[ROT] -> no rotation (SIDEWAYS, touch misaligned — measurement only)");
+        } else if (strncmp(a, "tiled", 5) == 0) {
+            device_manager::requestRotMode(device_manager::RotMode::TILED);
+            Serial.println("[ROT] -> tiled transpose in flush_cb");
         } else {
-            Serial.printf("[ROT] sw_rotate is currently %d\n",
-                          device_manager::isSwRotateEnabled() ? 1 : 0);
-            Serial.println("[ROT] Usage: rot on | rot off");
+            Serial.printf("[ROT] current: %s\n",
+                          device_manager::rotModeName(device_manager::getRotMode()));
+            Serial.printf("[ROT] tiled available: %s\n",
+                          device_manager::isTiledRotateAvailable() ? "yes" : "no (alloc failed)");
+            Serial.println("[ROT] Usage: rot on | rot off | rot tiled");
         }
     } else if (strncmp(p, "version", 7) == 0) {
         Serial.printf("DRAC OS %s\n", FW_VERSION);
@@ -1200,12 +1205,10 @@ void handlePerfCommand(const char* args) {
     // build as "rotation ON", which is precisely when the label is being relied on.
     if (system_config::display::ROTATION_DEGREES == 0) {
         Serial.println("Rotation:     OFF (rotated=NONE — touch transform also off)");
-    } else if (!system_config::display::SW_ROTATE) {
-        Serial.printf("Rotation:     PIXELS OFF / TOUCH ON (%d deg, sw_rotate=0) — measurement build\n",
-                      system_config::display::ROTATION_DEGREES);
     } else {
-        Serial.printf("Rotation:     ON (%d deg CW, sw_rotate=1)\n",
-                      system_config::display::ROTATION_DEGREES);
+        Serial.printf("Rotation:     %d deg — %s\n",
+                      system_config::display::ROTATION_DEGREES,
+                      device_manager::rotModeName(device_manager::getRotMode()));
     }
     Serial.println("--- paint stage (updateRadarDisplay) ---");
     Serial.printf("  fill_bg:    %8u us  (%5.1f ms)\n", (unsigned)bg,   bg   / 1000.0);
@@ -1216,6 +1219,13 @@ void handlePerfCommand(const char* args) {
     Serial.printf("  PAINT TOTAL:%8u us  (%5.1f ms)\n", (unsigned)paint, paint / 1000.0);
     Serial.println("--- refresh stage (LVGL blit + rotate + flush) ---");
     Serial.printf("  REFRESH:    %8u ms   (%u px)\n", (unsigned)refr, (unsigned)nav.refr_px);
+    // In TILED mode the transpose runs inside flush_cb, so it is already counted
+    // within REFRESH above. Broken out here to show what the rotation itself costs.
+    if (device_manager::getRotMode() == device_manager::RotMode::TILED) {
+        const uint32_t rot = nav.rot_us;
+        Serial.printf("    of which tiled rotate: %u us (%.1f ms)\n",
+                      (unsigned)rot, rot / 1000.0);
+    }
     Serial.printf("FRAME TOTAL:  %8.1f ms\n", paint / 1000.0 + refr);
     Serial.printf("Flushes since boot: %u\n", (unsigned)nav.flush_count);
     Serial.println("============================================");
