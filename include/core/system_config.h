@@ -167,7 +167,18 @@ namespace timing {
     // Sensor reading intervals
     constexpr uint32_t RTC_READ_INTERVAL_MS = 5000;      // RTC read every 5 seconds
     constexpr uint32_t TOUCH_POLL_INTERVAL_MS = 20;      // Touch poll every 20ms (50Hz)
-    constexpr uint32_t GPS_UPDATE_INTERVAL_MS = 1000;    // GPS read every 1 second
+    // GPS read gate. The BH-880 emits NAV-PVT at a fixed 10Hz and ignores every rate
+    // command (see device_manager.cpp:316), so this gate is the only thing controlling
+    // how often we sample it. At 1000ms it discarded 9 of every 10 real fixes and the
+    // radar translated in 1Hz jumps.
+    //
+    // 100ms means "every System Task tick" (SYSTEM_UPDATE_MS = 200) → 5Hz, matching the
+    // compass rate so translation and rotation update together. Raising this rate is only
+    // safe because render requests are coalesced (see requestRadarRender/flushRadarRender
+    // in task_manager.cpp) — otherwise 5Hz GPS + 5Hz compass would multiply renders.
+    //
+    // Also relieves the 2048-byte UART RX buffer, which held ~1000 bytes per 1s cycle.
+    constexpr uint32_t GPS_UPDATE_INTERVAL_MS = 100;     // Read every System Task tick (5Hz)
 
     // System monitoring
     constexpr uint32_t STATUS_UPDATE_INTERVAL_MS = 1000; // Status update every second

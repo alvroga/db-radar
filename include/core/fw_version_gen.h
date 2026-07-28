@@ -4,4 +4,4 @@
 #undef  FW_VERSION
 #define FW_VERSION "v26.07.28"
 #undef  FW_BUILD_TS
-#define FW_BUILD_TS 1785261235u
+#define FW_BUILD_TS 1785264573u
