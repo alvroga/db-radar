@@ -956,7 +956,12 @@ void updateRadarDisplay() {
     // whole frame. The radar canvas has no alpha channel, so set_px_alpha is a no-op
     // and a straight colour fill is equivalent. See docs/performance_optimization_backlog.md.
     const int64_t t_bg = esp_timer_get_time();
-    lv_canvas_fill_bg(ui.radar_canvas, lv_color_hex(colors.background), LV_OPA_COVER);
+    {
+        lv_img_dsc_t* dsc = lv_canvas_get_img(ui.radar_canvas);
+        lv_color_fill((lv_color_t*)dsc->data, lv_color_hex(colors.background),
+                      (uint32_t)dsc->header.w * (uint32_t)dsc->header.h);
+        lv_obj_invalidate(ui.radar_canvas);
+    }
     g_nav_state.bg_us = (uint32_t)(esp_timer_get_time() - t_bg);
 
     // Get grid spacing from current zoom level

@@ -7,6 +7,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [Unreleased]
+
+### Fixed
+
+**Radar frame time: canvas clear was 59% of every frame (205ms → 21ms)**
+
+`updateRadarDisplay()` cleared the 480×480 radar canvas with `lv_canvas_fill_bg()`. For
+`LV_IMG_CF_TRUE_COLOR` that LVGL function takes a per-pixel path — `lv_img_buf_set_px_color()` plus
+`lv_img_buf_set_px_alpha()` for every pixel, i.e. **460,800 out-of-line calls per frame**, each doing a
+colour-format switch and pointer arithmetic into PSRAM. Measured at 205ms, an effective 2.25 MB/s.
+
+The radar canvas has no alpha channel, so `set_px_alpha` was a no-op on every one of those calls.
+Replaced with `lv_color_fill()` over `dsc->data`, which is semantically identical for this format.
+
+- `fill_bg` 205.0ms → 21.3ms (9.6×); paint stage 215.3ms → 32.2ms (6.7×)
+- Frame time at unchanged rotation: ~499ms → 316ms
+- Found by measurement, not inspection — two prior hypotheses (both blaming software rotation) were wrong
+- Follow-up measured: software rotation costs ~153ms/frame; base refresh blit ~131ms
+- Files: `src/ui/navigation.cpp`, `docs/performance_optimization_backlog.md`
+
+### Added
+
+**DEV Render Timing HUD**
+
+On-screen render instrumentation for the performance work tracked in `docs/performance_optimization_backlog.md`. Splits a radar frame into its two measurable halves so the cost of software rotation can be attributed rather than guessed:
+
+- `paint` — time inside `updateRadarDisplay()` (canvas painting), microsecond resolution
+- `refr` — LVGL blit + 90° software rotate + flush dispatch, via `disp_drv.monitor_cb`
+- `total` and `fps` — FPS measured from real panel flushes (`NavState::flush_count`) over a 1s window
+
+Visible on the radar screen when dev mode is on; follows the same show/hide path as the DEV label (boot, `showHUD`/`hideHUD`, and runtime `DEV_MODE_CHANGE`).
+
+- Positioned `LV_ALIGN_CENTER, 0, 120` — absolute corners are clipped by the round bezel
+- Files: `include/ui/navigation.h`, `src/ui/navigation.cpp`, `src/core/device_manager.cpp`, `src/ui/ui_manager.cpp`, `include/ui/ui_manager.h`, `src/utils/task_manager.cpp`
+
+**Build-time rotation toggle for A/B testing**
+
+`-DRADAR_ROTATION_DEGREES=0` disables software rotation so the cost of `sw_rotate` can be measured directly. UI renders sideways — intended for measurement only.
+
+- Files: `include/core/system_config.h`
+
+### Changed
+
+**Disabled LVGL built-in perf monitor** (`LV_USE_PERF_MONITOR 0`)
+
+It was enabled but aligned to `LV_ALIGN_BOTTOM_RIGHT`, which sits behind the bezel on this round 480×480 panel — never visible, while still costing a label refresh every 300ms. Replaced by the DEV render timing HUD above.
+
+- Build impact: flash 1,660,864 → 1,660,803 bytes (−61), RAM unchanged at 193,408 bytes
+- Files: `include/ui/lv_conf.h`
+
+---
+
 ## [Beta] - 2026-04-13
 
 ### Added
