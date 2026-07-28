@@ -59,6 +59,8 @@ For completed features and history, see [CHANGELOG.md](CHANGELOG.md).
 - same 50 waypoints → ~6.8 KB instead of 70.8 KB (**frees ~64 KB SRAM**)
 - or the same ~70 KB budget buys **~500 waypoints**
 
+**⚠️ Implementation constraint**: allocate via `ps_malloc()` in `ui_manager::init()`. Do **not** use section attributes — `.ext_ram_noinit` causes a boot crash on this ESP-IDF version because constructors are not called for objects placed there. Keep the hot fields (LVGL pointers, zoom, heading, GPS centre — ~300 bytes) in SRAM and move only the `Waypoint[]` array.
+
 **Note on the render side**: the cap is *not* what limits drawing. `drawWaypoints()` culls by distance before drawing (`navigation.cpp:633`) and renders only the fixed waypoint when one is selected (`navigation.cpp:614`), so draw cost scales with *visible* waypoints. What does scale with the cap is the per-waypoint Haversine loop — and the ESP32-S3 FPU is single-precision only, so all that `double` trig is soft-float. Read `wpt_us` off the `perf` HUD before raising the cap; §3.6 of the perf backlog proposes an equirectangular approximation that would cut it.
 
 **Key files**: `include/ui/ui_manager.h` (`Waypoint`, `MAX_WAYPOINTS`), `src/gpx/gpx_loader.cpp`, `src/ui/waypoint_screen.cpp`
