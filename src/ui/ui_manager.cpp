@@ -267,6 +267,29 @@ void createRadarScreen() {
     lv_obj_add_flag(g_ui_state.log_indicator, LV_OBJ_FLAG_HIDDEN);
     Serial.println("[RADAR] Log indicator created (DEV mode)");
 
+    // Render timing HUD (DEV mode) — paint / refresh / FPS.
+    // Centered with a y-offset: absolute corners are clipped by the round bezel,
+    // which is why the LVGL built-in monitor (BOTTOM_RIGHT) was never visible.
+    g_ui_state.perf_label = lv_label_create(stage);
+    lv_obj_set_style_text_color(g_ui_state.perf_label, lv_color_hex(0x00FF88), 0);
+    lv_obj_set_style_text_font(g_ui_state.perf_label, &iosevka_16, 0);
+    lv_obj_set_style_bg_color(g_ui_state.perf_label, lv_color_black(), 0);
+    lv_obj_set_style_bg_opa(g_ui_state.perf_label, LV_OPA_60, 0);
+    lv_obj_set_style_pad_all(g_ui_state.perf_label, 3, 0);
+    lv_obj_set_style_text_align(g_ui_state.perf_label, LV_TEXT_ALIGN_CENTER, 0);
+    lv_label_set_text(g_ui_state.perf_label, "");
+    lv_obj_align(g_ui_state.perf_label, LV_ALIGN_CENTER, 0, 120);
+    #if RADAR_PERF_HUD
+        // Forced visible for A/B measurement builds — independent of dev_mode,
+        // which lives in NVS and is OFF on release units. Serial needs USB, so
+        // `dev on` is not an option when measuring on battery.
+        lv_obj_clear_flag(g_ui_state.perf_label, LV_OBJ_FLAG_HIDDEN);
+        Serial.println("[RADAR] Perf HUD label created (FORCED VISIBLE - measurement build)");
+    #else
+        lv_obj_add_flag(g_ui_state.perf_label, LV_OBJ_FLAG_HIDDEN);
+        Serial.println("[RADAR] Perf HUD label created (DEV mode)");
+    #endif
+
     // Beacon dBm label (DEV mode, 50m zoom only — for field calibration)
     g_ui_state.beacon_dbm_label = lv_label_create(stage);
     lv_obj_set_style_text_color(g_ui_state.beacon_dbm_label, lv_color_white(), 0);
@@ -344,6 +367,9 @@ void createRadarScreen() {
         lv_obj_clear_flag(g_ui_state.log_indicator, LV_OBJ_FLAG_HIDDEN);
         Serial.println("[RADAR] DEV label visible (dev_mode ON)");
     }
+    if (g_ui_state.perf_label && settings_manager::getSettings().dev_mode) {
+        lv_obj_clear_flag(g_ui_state.perf_label, LV_OBJ_FLAG_HIDDEN);
+    }
 }
 
 // Settings screen moved to settings_screen.cpp
@@ -393,6 +419,8 @@ void showHUD() {
             lv_obj_clear_flag(g_ui_state.zoom_label, LV_OBJ_FLAG_HIDDEN);
         if (g_ui_state.log_indicator && settings_manager::getSettings().dev_mode)
             lv_obj_clear_flag(g_ui_state.log_indicator, LV_OBJ_FLAG_HIDDEN);
+        if (g_ui_state.perf_label && settings_manager::getSettings().dev_mode)
+            lv_obj_clear_flag(g_ui_state.perf_label, LV_OBJ_FLAG_HIDDEN);
         if (g_ui_state.beacon_dbm_label)
             lv_obj_clear_flag(g_ui_state.beacon_dbm_label, LV_OBJ_FLAG_HIDDEN);
         g_ui_state.hud_visible = true;
@@ -412,6 +440,10 @@ void hideHUD() {
             lv_obj_add_flag(g_ui_state.zoom_label, LV_OBJ_FLAG_HIDDEN);
         if (g_ui_state.log_indicator)
             lv_obj_add_flag(g_ui_state.log_indicator, LV_OBJ_FLAG_HIDDEN);
+        #if !RADAR_PERF_HUD
+        if (g_ui_state.perf_label)
+            lv_obj_add_flag(g_ui_state.perf_label, LV_OBJ_FLAG_HIDDEN);
+        #endif
         if (g_ui_state.beacon_dbm_label)
             lv_obj_add_flag(g_ui_state.beacon_dbm_label, LV_OBJ_FLAG_HIDDEN);
         if (g_ui_state.waypoint_distance_label)

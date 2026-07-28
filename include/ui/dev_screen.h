@@ -13,4 +13,5 @@ namespace dev_screen {
     // Update functions
     void updateLoggerStatus();
     void updateNTPStatus();
+    void updatePerfStats();   // Render timing breakdown (see NavState render stats)
 }

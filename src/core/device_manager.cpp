@@ -52,6 +52,7 @@ static const int DATA_PINS[16] = { 5,45,48,47,21, 14,13,12,11,10,9, 46,3,8,18,17
 
 // Forward declarations
 static void lvgl_flush_cb(lv_disp_drv_t* drv, const lv_area_t* area, lv_color_t* color_p);
+static void lvgl_monitor_cb(lv_disp_drv_t* drv, uint32_t time_ms, uint32_t px);
 static void lvgl_touch_read_cb(lv_indev_drv_t*, lv_indev_data_t* data);
 static inline int16_t scale_to_480(uint16_t raw);
 static bool on_color_trans_done(esp_lcd_panel_handle_t panel, const esp_lcd_rgb_panel_event_data_t* edata, void* user_ctx);
@@ -543,6 +544,7 @@ bool initLVGL(const Config& config) {
     disp_drv.hor_res = config.screen_width;
     disp_drv.ver_res = config.screen_height;
     disp_drv.flush_cb = lvgl_flush_cb;
+    disp_drv.monitor_cb = lvgl_monitor_cb;   // Render timing for the DEV perf HUD
     disp_drv.draw_buf = &draw_buf;
 
     // Partial refresh for performance (120-line buffers provide smooth scrolling)
@@ -803,6 +805,16 @@ static bool IRAM_ATTR on_vsync_cb(esp_lcd_panel_handle_t panel, const esp_lcd_rg
 
 SemaphoreHandle_t getVsyncSemaphore() {
     return g_vsync_sem;
+}
+
+// Render-time monitor - LVGL calls this at the end of every refresh with the
+// elapsed time and pixel count. This is the cost of blit + software rotation +
+// flush dispatch (i.e. everything AFTER the canvas has been painted), which is
+// the half of the frame we suspect software rotation dominates.
+static void lvgl_monitor_cb(lv_disp_drv_t* drv, uint32_t time_ms, uint32_t px) {
+    navigation::NavState& nav = navigation::getNavState();
+    nav.refr_ms = time_ms;
+    nav.refr_px = px;
 }
 
 static void lvgl_flush_cb(lv_disp_drv_t* drv, const lv_area_t* area, lv_color_t* color_p) {

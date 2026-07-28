@@ -17,6 +17,22 @@ struct NavState {
     // FPS tracking
     volatile uint32_t flush_count = 0;
 
+    // Render timing instrumentation (DEV mode HUD).
+    // Splits a radar frame into its two measurable halves so the cost of
+    // software rotation can be attributed:
+    //   paint_us -> canvas painting (lv_canvas_draw_* calls in updateRadarDisplay)
+    //   refr_ms  -> LVGL refresh: canvas blit + 90 deg rotate + flush dispatch
+    volatile uint32_t paint_us = 0;   // last updateRadarDisplay() duration, microseconds
+    volatile uint32_t refr_ms  = 0;   // last LVGL refresh duration, milliseconds
+    volatile uint32_t refr_px  = 0;   // pixels touched by last LVGL refresh
+
+    // Per-stage breakdown of the paint half, so the dominant cost can be
+    // identified rather than inferred (all microseconds)
+    volatile uint32_t bg_us    = 0;   // lv_canvas_fill_bg (full 480x480 clear)
+    volatile uint32_t grid_us  = 0;   // drawRadarGrid
+    volatile uint32_t wpt_us   = 0;   // drawWaypoints
+    volatile uint32_t deco_us  = 0;   // triangle + north indicator + beacon gauge
+
     // First frame tracking
     volatile bool first_frame_done = false;
 };

@@ -693,6 +693,15 @@ static void processUIUpdate(const UIUpdate& update) {
                     lv_obj_add_flag(ui.log_indicator, LV_OBJ_FLAG_HIDDEN);
                 }
             }
+            if (ui.perf_label && lv_obj_is_valid(ui.perf_label)) {
+                if (dev_on) {
+                    lv_obj_clear_flag(ui.perf_label, LV_OBJ_FLAG_HIDDEN);
+                } else {
+                    #if !RADAR_PERF_HUD
+                    lv_obj_add_flag(ui.perf_label, LV_OBJ_FLAG_HIDDEN);
+                    #endif
+                }
+            }
             break;
         }
     }

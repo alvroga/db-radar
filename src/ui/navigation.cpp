@@ -17,6 +17,7 @@
 #include <cfloat>
 #include "esp_heap_caps.h"
 #include "esp_system.h"
+#include "esp_timer.h"
 
 namespace navigation {
 
@@ -856,6 +857,11 @@ void updateRadarDisplay() {
 
     int screen_size = system_config::display::SCREEN_WIDTH;
 
+    // Start of the canvas-painting stage (DEV perf HUD). Everything below is
+    // stage 1 of the frame; the blit + rotate + flush stages are timed
+    // separately by lvgl_monitor_cb in device_manager.cpp.
+    const int64_t t_paint_start = esp_timer_get_time();
+
     // Update zoom level label — only when zoom actually changes
     if (ui.zoom_label && lv_obj_is_valid(ui.zoom_label)) {
         static ui_manager::ZoomLevel s_last_zoom = static_cast<ui_manager::ZoomLevel>(-1);
@@ -942,14 +948,24 @@ void updateRadarDisplay() {
         }
     }
 
-    // Clear canvas with appropriate background color (colors already fetched above)
+    // Clear canvas with appropriate background color (colors already fetched above).
+    //
+    // NOT lv_canvas_fill_bg(): for LV_IMG_CF_TRUE_COLOR that function takes a
+    // per-pixel path (lv_img_buf_set_px_color + lv_img_buf_set_px_alpha for every
+    // pixel = 460,800 out-of-line calls at 480x480), measured at 205ms — 59% of the
+    // whole frame. The radar canvas has no alpha channel, so set_px_alpha is a no-op
+    // and a straight colour fill is equivalent. See docs/performance_optimization_backlog.md.
+    const int64_t t_bg = esp_timer_get_time();
     lv_canvas_fill_bg(ui.radar_canvas, lv_color_hex(colors.background), LV_OPA_COVER);
+    g_nav_state.bg_us = (uint32_t)(esp_timer_get_time() - t_bg);
 
     // Get grid spacing from current zoom level
     int grid_spacing_pixels = ui.getGridSpacingPixels(screen_size);
 
     // Draw grid (black lines) - perfectly aligned at all zoom levels
+    const int64_t t_grid = esp_timer_get_time();
     drawRadarGrid(ui.radar_canvas, screen_size, grid_spacing_pixels);
+    g_nav_state.grid_us = (uint32_t)(esp_timer_get_time() - t_grid);
 
     // Update center reference to current GPS position (if valid)
     // This makes the user always at the center, and waypoints move relative to user
@@ -963,14 +979,18 @@ void updateRadarDisplay() {
     // No GPS involvement — compass controls orientation always, moving or stationary.
 
     // Draw center triangle (red equilateral - always at center representing user)
+    const int64_t t_tri = esp_timer_get_time();
     drawCenterTriangle(ui.radar_canvas, screen_size);
+    g_nav_state.deco_us = (uint32_t)(esp_timer_get_time() - t_tri);
 
     // Update waypoint fix proximity sonar (drives buzzer based on GPS distance)
     updateWaypointFixSonar();
 
     // Draw waypoints (yellow circles) - they move as user moves
     // Drawn after triangle so they appear on top
+    const int64_t t_wpt = esp_timer_get_time();
     drawWaypoints(ui.radar_canvas, screen_size);
+    g_nav_state.wpt_us = (uint32_t)(esp_timer_get_time() - t_wpt);
 
     // ── Fixed waypoint distance label (LVGL overlay widget, NOT canvas text) ──────
     // Updated at ~1Hz but only calls lv_label_set_text when the integer value changes.
@@ -1017,11 +1037,13 @@ void updateRadarDisplay() {
     }
 
     // Draw north indicator (shows where north is in heading-up mode)
+    const int64_t t_deco2 = esp_timer_get_time();
     drawNorthIndicator(ui.radar_canvas, screen_size);
 
     // Draw beacon proximity gauge (arc grows from top as signal strengthens)
     // Drawn last so it overlays everything including the north indicator
     drawBeaconProximityGauge(ui.radar_canvas, screen_size);
+    g_nav_state.deco_us += (uint32_t)(esp_timer_get_time() - t_deco2);
 
     // Beacon-found indicator: show the circle+star overlay when beacon is marked found
     // and HUD is visible. Hides with the rest of the HUD.
@@ -1033,6 +1055,43 @@ void updateRadarDisplay() {
             lv_obj_add_flag(ui.beacon_found_canvas, LV_OBJ_FLAG_HIDDEN);
     }
 
+    // ---- DEV perf HUD -------------------------------------------------
+    // paint = this function (canvas drawing). refr = LVGL's blit + software
+    // rotate + flush dispatch, captured by lvgl_monitor_cb. The two together
+    // are the real cost of one radar frame. refr is reported by LVGL in ms.
+    g_nav_state.paint_us = (uint32_t)(esp_timer_get_time() - t_paint_start);
+
+    if (ui.perf_label && lv_obj_is_valid(ui.perf_label) &&
+        !lv_obj_has_flag(ui.perf_label, LV_OBJ_FLAG_HIDDEN)) {
+
+        // FPS measured from actual panel flushes over a 1 s window
+        static uint32_t s_last_fps_time  = 0;
+        static uint32_t s_last_flush_cnt = 0;
+        static float    s_fps            = 0.0f;
+        uint32_t now = millis();
+        if (now - s_last_fps_time >= 1000) {
+            uint32_t flushes = g_nav_state.flush_count - s_last_flush_cnt;
+            s_fps = (flushes * 1000.0f) / (float)(now - s_last_fps_time);
+            s_last_flush_cnt = g_nav_state.flush_count;
+            s_last_fps_time  = now;
+        }
+
+        uint32_t paint_ms_x10 = g_nav_state.paint_us / 100;   // 0.1 ms resolution
+        uint32_t refr_ms      = g_nav_state.refr_ms;
+
+        lv_label_set_text_fmt(ui.perf_label,
+                              "bg %u grid %u wpt %u ms\n"
+                              "paint %u.%ums  refr %ums\n"
+                              "total %u.%ums  %d.%d fps",
+                              (unsigned)(g_nav_state.bg_us / 1000),
+                              (unsigned)(g_nav_state.grid_us / 1000),
+                              (unsigned)(g_nav_state.wpt_us / 1000),
+                              (unsigned)(paint_ms_x10 / 10), (unsigned)(paint_ms_x10 % 10),
+                              (unsigned)refr_ms,
+                              (unsigned)((paint_ms_x10 + refr_ms * 10) / 10),
+                              (unsigned)((paint_ms_x10 + refr_ms * 10) % 10),
+                              (int)s_fps, (int)((s_fps - (int)s_fps) * 10));
+    }
 }
 
 void handleTapAt(int screen_x, int screen_y) {

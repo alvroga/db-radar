@@ -22,7 +22,12 @@
 #define LV_DPI_DEF 130
 
 // Input devices
-#define LV_USE_PERF_MONITOR 1
+// LVGL's built-in perf monitor is disabled: it aligns to LV_ALIGN_BOTTOM_RIGHT,
+// which is behind the bezel on this round 480x480 panel, so it was never
+// visible while still costing a label refresh every 300ms. The DEV perf HUD in
+// navigation.cpp replaces it and reports the paint/refresh split we actually
+// need (see docs/performance_optimization_backlog.md).
+#define LV_USE_PERF_MONITOR 0
 #define LV_USE_MEM_MONITOR 0
 
 // Fonts

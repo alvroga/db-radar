@@ -1,5 +1,6 @@
 #include "ui/dev_screen.h"
 #include "ui/ui_manager.h"
+#include "system_config.h"
 #include "ui/navigation.h"
 #include "settings_manager.h"
 #include "system_logger.h"
@@ -13,6 +14,7 @@ static lv_obj_t* screen_dev = nullptr;
 static lv_obj_t* logging_toggle = nullptr;
 static lv_obj_t* logger_status_label = nullptr;
 static lv_obj_t* ntp_status_label = nullptr;
+static lv_obj_t* perf_stats_label = nullptr;
 
 // Event handlers
 static void logging_toggle_event(lv_event_t* e) {
@@ -45,8 +47,45 @@ static void refresh_button_event(lv_event_t* e) {
     if (code == LV_EVENT_CLICKED) {
         updateLoggerStatus();
         updateNTPStatus();
+        updatePerfStats();
         Serial.println("[DEV] Status refreshed");
     }
+}
+
+// Render timing breakdown, sourced from NavState. Mirrors the `perf` serial
+// command so the same numbers are available without USB (i.e. on battery).
+void updatePerfStats() {
+    if (!perf_stats_label || !lv_obj_is_valid(perf_stats_label)) return;
+
+    const navigation::NavState& nav = navigation::getNavState();
+
+    uint32_t bg    = nav.bg_us;
+    uint32_t grid  = nav.grid_us;
+    uint32_t wpt   = nav.wpt_us;
+    uint32_t deco  = nav.deco_us;
+    uint32_t paint = nav.paint_us;
+    uint32_t refr  = nav.refr_ms;
+    uint32_t other = (paint > bg + grid + wpt + deco) ? paint - (bg + grid + wpt + deco) : 0;
+
+    lv_label_set_text_fmt(perf_stats_label,
+        "rotation  %s\n"
+        "fill_bg   %u.%u ms\n"
+        "grid      %u.%u ms\n"
+        "waypoints %u.%u ms\n"
+        "tri+N+arc %u.%u ms\n"
+        "other     %u.%u ms\n"
+        "PAINT     %u.%u ms\n"
+        "REFRESH   %u ms\n"
+        "FRAME     %u.%u ms",
+        system_config::display::ROTATION_DEGREES == 0 ? "OFF" : "90 CW",
+        (unsigned)(bg / 1000),    (unsigned)((bg % 1000) / 100),
+        (unsigned)(grid / 1000),  (unsigned)((grid % 1000) / 100),
+        (unsigned)(wpt / 1000),   (unsigned)((wpt % 1000) / 100),
+        (unsigned)(deco / 1000),  (unsigned)((deco % 1000) / 100),
+        (unsigned)(other / 1000), (unsigned)((other % 1000) / 100),
+        (unsigned)(paint / 1000), (unsigned)((paint % 1000) / 100),
+        (unsigned)refr,
+        (unsigned)(paint / 1000 + refr), (unsigned)((paint % 1000) / 100));
 }
 
 void create() {
@@ -292,9 +331,30 @@ void createDevTab(lv_obj_t* parent) {
 
     y_offset += 130;  // Space for multi-line NTP status
 
+    // === RENDER TIMING SECTION ===
+    // Per-stage breakdown of one radar frame. Press Refresh to re-sample.
+    lv_obj_t* perf_title = lv_label_create(parent);
+    lv_label_set_text(perf_title, "Render Timing:");
+    lv_obj_set_style_text_color(perf_title, lv_color_hex(0x00FF88), 0);  // Green
+    lv_obj_set_style_text_font(perf_title, &iosevka_16, 0);
+    lv_obj_align(perf_title, LV_ALIGN_TOP_LEFT, 0, y_offset);
+
+    y_offset += 25;
+
+    perf_stats_label = lv_label_create(parent);
+    lv_label_set_text(perf_stats_label, "Loading...");
+    lv_obj_set_style_text_color(perf_stats_label, lv_color_hex(0xCCCCCC), 0);
+    lv_obj_set_style_text_font(perf_stats_label, &iosevka_16, 0);
+    lv_obj_align(perf_stats_label, LV_ALIGN_TOP_LEFT, 0, y_offset);
+    lv_label_set_long_mode(perf_stats_label, LV_LABEL_LONG_WRAP);
+    lv_obj_set_width(perf_stats_label, 330);  // Match tab width
+
+    y_offset += 175;  // Space for 9-line breakdown
+
     // Initial status update
     updateLoggerStatus();
     updateNTPStatus();
+    updatePerfStats();
 
     // Add bottom padding spacer to allow scrolling content to middle of screen
     lv_obj_t* spacer = lv_obj_create(parent);

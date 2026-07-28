@@ -34,8 +34,22 @@ namespace display {
     constexpr int BUFFER_LINES = 480;      // Full-screen buffer - eliminates visible wipe during screen transitions (rotation 10KB temp buffer fits in 64KB LV_MEM_SIZE)
     constexpr int BOUNCE_BUFFER_LINES = 10; // SRAM bounce buffer lines (IDF 5.5): 2×(10×480×2)=18.75KB SRAM, eliminates PSRAM/DMA bus contention
 
-    // Display rotation to compensate for 90° CCW physical rotation in enclosure
-    constexpr int ROTATION_DEGREES = 90;   // 90° CW software rotation
+    // Display rotation to compensate for 90° CCW physical rotation in enclosure.
+    // Override at build time with -DRADAR_ROTATION_DEGREES=0 to disable software
+    // rotation for A/B performance testing (UI will appear sideways — that is
+    // expected; the point is to read the perf HUD with rotation out of the path).
+    #ifndef RADAR_ROTATION_DEGREES
+    #define RADAR_ROTATION_DEGREES 90
+    #endif
+
+    // Force the render-timing HUD visible regardless of the NVS dev_mode flag.
+    // Build with -DRADAR_PERF_HUD=1 for measurement runs. Release units ship with
+    // dev_mode=false persisted in NVS, and enabling it needs serial (i.e. USB),
+    // which is not available when measuring on battery.
+    #ifndef RADAR_PERF_HUD
+    #define RADAR_PERF_HUD 0
+    #endif
+    constexpr int ROTATION_DEGREES = RADAR_ROTATION_DEGREES;   // 90° CW software rotation
 
     // RGB timing parameters (critical for stability)
     constexpr int HSYNC_PULSE_WIDTH = 8;

@@ -118,6 +118,7 @@ struct UIState {
     lv_obj_t* battery_label = nullptr;     // Battery status indicator
     lv_obj_t* log_indicator = nullptr;     // Log enabled indicator (DEV mode)
     lv_obj_t* beacon_dbm_label = nullptr;  // Beacon RSSI overlay (DEV mode, 50m zoom only)
+    lv_obj_t* perf_label = nullptr;        // Render timing HUD (DEV mode) - paint/refresh/FPS
     lv_obj_t* center_label = nullptr;      // Center text label (test for custom font)
     lv_obj_t* wifi_mode_label = nullptr;   // WiFi mode overlay (shown when radar is disabled)
     lv_obj_t* waypoint_distance_label = nullptr;  // Distance to fixed waypoint (LVGL overlay, not canvas draw)

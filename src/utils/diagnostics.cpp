@@ -2,6 +2,7 @@
 #include "system_config.h"
 #include "scanner.h"
 #include "ui_manager.h"
+#include "navigation.h"
 #include "memory_manager.h"
 #include "task_manager.h"
 #include "device_manager.h"
@@ -33,6 +34,7 @@ static void handleLogCommand(const char* args);
 static void handleNTPCommand(const char* args);
 static void handleDevCommand(const char* args);
 static void handleBeaconCommand(const char* args);
+static void handlePerfCommand(const char* args);
 static void handleCompassCommand(const char* args);
 static void handleAPToggle(bool enable);
 
@@ -118,6 +120,8 @@ void parseCommand(const char* command) {
         handleCompassCommand(p + 7);
     } else if (strncmp(p, "beacon", 6) == 0) {
         handleBeaconCommand(p + 6);
+    } else if (strncmp(p, "perf", 4) == 0) {
+        handlePerfCommand(p + 4);
     } else if (strncmp(p, "version", 7) == 0) {
         Serial.printf("DRAC OS %s\n", FW_VERSION);
     } else {
@@ -1159,6 +1163,36 @@ void handleNTPCommand(const char* args) {
         Serial.println("  ntp settime YYYY-MM-DD HH:MM:SS - Manually set RTC time");
         Serial.println("  ntp timezone <gmt> [dst] - Set timezone (e.g., ntp timezone -5 1)");
     }
+}
+
+void handlePerfCommand(const char* args) {
+    while (*args == ' ') args++;
+
+    const navigation::NavState& nav = navigation::getNavState();
+
+    uint32_t bg   = nav.bg_us;
+    uint32_t grid = nav.grid_us;
+    uint32_t wpt  = nav.wpt_us;
+    uint32_t deco = nav.deco_us;
+    uint32_t paint = nav.paint_us;
+    uint32_t refr  = nav.refr_ms;
+    uint32_t other = (paint > bg + grid + wpt + deco) ? paint - (bg + grid + wpt + deco) : 0;
+
+    Serial.println("===== RENDER TIMING (last radar frame) =====");
+    Serial.printf("Rotation:     %s\n",
+                  system_config::display::ROTATION_DEGREES == 0 ? "OFF (sw_rotate=0)" : "ON (90 CW sw_rotate)");
+    Serial.println("--- paint stage (updateRadarDisplay) ---");
+    Serial.printf("  fill_bg:    %8u us  (%5.1f ms)\n", (unsigned)bg,   bg   / 1000.0);
+    Serial.printf("  grid:       %8u us  (%5.1f ms)\n", (unsigned)grid, grid / 1000.0);
+    Serial.printf("  waypoints:  %8u us  (%5.1f ms)\n", (unsigned)wpt,  wpt  / 1000.0);
+    Serial.printf("  triangle+N+gauge: %2u us  (%5.1f ms)\n", (unsigned)deco, deco / 1000.0);
+    Serial.printf("  other:      %8u us  (%5.1f ms)\n", (unsigned)other, other / 1000.0);
+    Serial.printf("  PAINT TOTAL:%8u us  (%5.1f ms)\n", (unsigned)paint, paint / 1000.0);
+    Serial.println("--- refresh stage (LVGL blit + rotate + flush) ---");
+    Serial.printf("  REFRESH:    %8u ms   (%u px)\n", (unsigned)refr, (unsigned)nav.refr_px);
+    Serial.printf("FRAME TOTAL:  %8.1f ms\n", paint / 1000.0 + refr);
+    Serial.printf("Flushes since boot: %u\n", (unsigned)nav.flush_count);
+    Serial.println("============================================");
 }
 
 void handleDevCommand(const char* args) {
