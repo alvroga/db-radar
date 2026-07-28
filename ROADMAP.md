@@ -36,6 +36,37 @@ For completed features and history, see [CHANGELOG.md](CHANGELOG.md).
 
 ## Planned
 
+### Waypoint Memory Optimization — raise the 50-waypoint cap
+**Severity**: Medium — real GPX files get silently truncated
+
+**Symptom**: `RadarConfig::MAX_WAYPOINTS = 50` is a hard *load-time* cap. `gpx_loader.cpp:376` stops parsing at 50 and sets `was_truncated`. A geocaching.com pocket query routinely contains hundreds of caches, so most of the file never loads.
+
+**Root cause — it's a RAM ceiling, not a render ceiling.** `g_ui_state` is the single largest symbol in the firmware at **70,992 bytes** (next largest is `work_mem_int$4` at 65,536), which is ~37% of all static RAM. Almost all of it is the waypoint array:
+
+| Field | Bytes |
+|---|---|
+| `desc[1024]` | 1024 |
+| `hint[256]` | 256 |
+| `display_name[64]` | 64 |
+| `name[48]` | 48 |
+| lat/lon/valid/found | 24 |
+| **`sizeof(Waypoint)` (padded)** | **~1416** |
+
+× 50 = ~70,800 B. **`desc` + `hint` alone are 90% of it** — and they are read in exactly one place, `waypoint_screen.cpp:117,149`, the detail screen for a *single* waypoint at a time. All 50 copies sit resident in SRAM permanently to serve one on demand.
+
+**Proposed fix**: move `desc`/`hint` out of SRAM — either into PSRAM (8 MB, effectively free) or drop them from RAM entirely and re-read from the GPX file when a waypoint is tapped. `Waypoint` drops to ~136 bytes:
+
+- same 50 waypoints → ~6.8 KB instead of 70.8 KB (**frees ~64 KB SRAM**)
+- or the same ~70 KB budget buys **~500 waypoints**
+
+**Note on the render side**: the cap is *not* what limits drawing. `drawWaypoints()` culls by distance before drawing (`navigation.cpp:633`) and renders only the fixed waypoint when one is selected (`navigation.cpp:614`), so draw cost scales with *visible* waypoints. What does scale with the cap is the per-waypoint Haversine loop — and the ESP32-S3 FPU is single-precision only, so all that `double` trig is soft-float. Read `wpt_us` off the `perf` HUD before raising the cap; §3.6 of the perf backlog proposes an equirectangular approximation that would cut it.
+
+**Key files**: `include/ui/ui_manager.h` (`Waypoint`, `MAX_WAYPOINTS`), `src/gpx/gpx_loader.cpp`, `src/ui/waypoint_screen.cpp`
+
+**Related**: [`docs/performance_optimization_backlog.md`](docs/performance_optimization_backlog.md) step 11
+
+---
+
 ### Beacon Advertising Interval Note
 The beacon proximity system is most responsive when the target beacon advertises at a short interval (~100ms). Longer advertising intervals (500ms+) cause noticeable lag between physical proximity change and RSSI update. Consider documenting the recommended beacon configuration in `docs/beacon_proximity.md`.
 

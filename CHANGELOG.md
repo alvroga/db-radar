@@ -11,6 +11,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+**Radar rotation dropped to 1 Hz whenever GPS acquired a fix**
+
+Heading rotation felt smooth while searching for satellites, then became visibly choppy the moment a
+fix appeared. The renderer was not getting slower — the render *rate* dropped 5×.
+
+`processUIUpdate()` handled `COMPASS_UPDATE` by skipping the redraw whenever GPS was valid, on the
+stated reasoning that "`RADAR_REFRESH` is queued in the same burst". Both events are produced by the
+System Task, but at different rates: the compass read is gated to 20ms so it fires every 200ms tick
+(5 Hz), while the GPS read is gated by `GPS_UPDATE_INTERVAL_MS = 1000` (1 Hz). The bursts coincide 1
+time in 5. The other 4 compass updates advanced `ui.current_heading` and drew nothing, so rotation
+was pinned to the 1 Hz GPS rate and each frame showed a heading up to a second stale.
+
+Fixed by coalescing instead of suppressing. All four render-triggering cases (`RADAR_REFRESH`,
+`COMPASS_UPDATE`, `ZOOM_CHANGE`, `ZOOM_CHANGE_REVERSE`) now call `requestRadarRender()`, which only
+sets a flag; the UI Task calls `flushRadarRender()` once after draining the queue batch, still inside
+`display_mutex`, with a standby guard so a queued refresh cannot paint a screen that is off.
+
+- Rotation now tracks the fastest producer: **1 Hz → 5 Hz with a fix**
+- Renders per UI Task loop capped at **1** (was up to 4) — strictly fewer worst-case renders than
+  before, and resolves §3.3 of the perf backlog, which warned of 4 × 149ms with the mutex held
+- Verified on hardware with a 14-satellite fix: rotation smooth, button remains responsive
+- This was §3.2 of the perf backlog, ranked step 11 behind four large pipeline rewrites. It needed
+  none of them — the preceding `fill_bg` fix had already made frames cheap enough
+- Build: RAM 59.0% (193,424 B), Flash 79.3% (1,662,635 B)
+- Files: `src/utils/task_manager.cpp`, `docs/performance_optimization_backlog.md`, `ROADMAP.md`
+
 **Radar frame time: canvas clear was 59% of every frame (205ms → 21ms)**
 
 `updateRadarDisplay()` cleared the 480×480 radar canvas with `lv_canvas_fill_bg()`. For

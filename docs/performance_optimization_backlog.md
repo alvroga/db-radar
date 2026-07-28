@@ -1,7 +1,48 @@
 # Performance Optimization Backlog
 
-**Status**: Analysis only — nothing in this document has been implemented.
-**Date**: 2026-07-27 (measured results added 2026-07-28)
+**Status**: Partially implemented — see "Completed" below. The rest is still analysis.
+**Date**: 2026-07-27 (measured results added 2026-07-28; completions marked 2026-07-28)
+
+---
+
+## ✅ COMPLETED
+
+### C1. `lv_canvas_fill_bg` → `lv_color_fill` (§6 step —, was priority 1) — 2026-07-28
+
+Commit `fa63a03`. Measured: **`fill_bg` 205.0 → 21.3 ms (9.6×)**, paint stage 215.3 → 32.2 ms (6.7×).
+Full before/after numbers in the measured-results section below.
+
+### C2. Decoupled heading rotation from the 1 Hz GPS redraw (§3.2, §6 step 11) — 2026-07-28
+
+**This was the "payoff" item, and it turned out not to require steps 7–10 first.**
+
+The premise of §0 point 1 was right: `processUIUpdate()` skipped the compass redraw whenever GPS had
+a fix, so rotation ran at the 1 Hz `RADAR_REFRESH` rate instead of the 5 Hz compass rate. The guard's
+own comment claimed `RADAR_REFRESH` "is queued in the same burst" as `COMPASS_UPDATE` — true only 1
+time in 5, since the compass read runs every 200 ms System Task tick while the GPS read is gated by
+`GPS_UPDATE_INTERVAL_MS = 1000`.
+
+Fix: **coalesce rather than suppress.** All four render-triggering cases (`RADAR_REFRESH`,
+`COMPASS_UPDATE`, both `ZOOM_CHANGE`s) now call `requestRadarRender()`, which only sets a flag. The
+UI Task calls `flushRadarRender()` once after draining the queue batch, still inside `display_mutex`.
+
+- Rotation now tracks the fastest producer — **1 Hz → 5 Hz with a fix**.
+- **§3.3 is resolved as a side effect.** That item warned of `4 × 149 ms` of queued renders with the
+  mutex held; renders per UI loop are now capped at **1**, strictly fewer than before.
+- Verified on hardware with a 14-satellite fix: rotation smooth, button remains responsive.
+
+**Why this landed before the expensive items**: the frame was already cheap enough after C1 — the
+problem was that there were 5× fewer frames, not that each one cost too much. C1 + C2 together were
+XS effort and delivered the felt result that steps 7–10 were budgeted for.
+
+**Files**: `src/utils/task_manager.cpp` — `requestRadarRender()` / `flushRadarRender()`, forward
+decl at :66, flush at :175, cases at :541/:559/:567/:687.
+
+### Still open, unchanged in priority
+
+Steps 7–10 (tiled transpose §2.2, drop the canvas §2.1, `num_fbs = 2` §2.3, higher PCLK §2.4) remain
+the large wins — software rotation is still ~153 ms/frame. They are now *headroom* work rather than
+*smoothness* work: they buy a higher achievable rotation rate, not a fix for a broken one.
 
 ---
 
@@ -496,29 +537,36 @@ Every one of these lines is axis-aligned, so each is just a 3×480 or 480×3 rec
 - **Effort**: small. **Risk**: very low (visually near-identical; you lose AA on lines that are
   axis-aligned and therefore have nothing to anti-alias).
 
-### 3.2 Decouple heading rotation from the 1 Hz GPS redraw
+### 3.2 Decouple heading rotation from the 1 Hz GPS redraw — ✅ DONE (C2)
 
-Once a frame is cheap, remove the suppression at `task_manager.cpp:673-682` and let compass updates
-drive redraws. Two further changes make this feel smooth:
+The suppression is removed and compass updates now drive redraws via `requestRadarRender()` /
+`flushRadarRender()` coalescing. Rotation is at 5 Hz with a fix. See C1/C2 at the top.
+
+Remaining sub-items, **not** done, in order of likely value:
 
 - Raise the compass rate. The read is already gated to 20 ms (`task_manager.cpp:1337`) but the
   System Task loop is `SYSTEM_UPDATE_MS = 200` → effective 5 Hz. Splitting the compass read into its
-  own task, or dropping the System Task period, gets you 10–20 Hz.
+  own task, or dropping the System Task period, gets you 10–20 Hz. **The coalescing in C2 makes this
+  safe to try** — a faster producer can no longer multiply renders per UI loop.
 - Reconsider the 1.5° deadband (`task_manager.cpp:669-671`). It exists to cut render load; with a
   cheap frame it becomes the thing standing between you and smooth rotation. Lower it to ~0.5° and
   lean on `smoothHeading()`'s EMA instead.
 - Interpolate GPS position between the 1 Hz fixes (dead reckoning from speed + heading) so
-  translation is smooth too, not just rotation.
+  translation is smooth too, not just rotation. **Rotation is smooth now; translation is still 1 Hz,
+  so this is the next thing that will be felt.**
 
 **Note**: `memory/compass_architecture.md` and `CLAUDE.md` describe the compass as ~1 Hz; the code
 now reads at up to 5 Hz. Worth reconciling.
 
-### 3.3 Don't hold `display_mutex` across the whole redraw
+### 3.3 Don't hold `display_mutex` across the whole redraw — ✅ RESOLVED by C2
 
-`uiTask` takes `display_mutex`, then runs `lv_timer_handler()` **and** up to 4 queued updates —
-each of which may be a full `updateRadarDisplay()`. Worst case that's 4 × 149 ms = ~600 ms with the
-mutex held and no button polling. Options: process **one** render-class update per loop iteration,
-or poll the button between queue items.
+Was: `uiTask` takes `display_mutex`, then runs `lv_timer_handler()` **and** up to 4 queued updates —
+each of which may be a full `updateRadarDisplay()`. Worst case 4 × 149 ms = ~600 ms with the mutex
+held and no button polling.
+
+The render-coalescing in C2 caps renders at **one per loop iteration** regardless of batch size,
+which is the "process one render-class update per loop" option this item proposed. Non-render queue
+items (battery, screen loads, beacon dBm) are still processed up to 4 per loop, but they are cheap.
 
 ### 3.4 The vsync gate doesn't actually pace anything
 
@@ -617,23 +665,32 @@ of the time is in stage 3.
 
 ## 6. Suggested order of work
 
-| Step | Item | Effort | Expected impact | Risk |
-|---|---|---|---|---|
-| 0 | Instrument (§5) | S | — | — |
-| 1 | CPU 240 MHz (§1.1) | XS | **High** | Low (power) |
-| 2 | `bb_invalidate_cache` (§1.4) | XS | **High** | Low |
-| 3 | Flash mode DIO → QIO (§1.8) | XS | **High** | Low (verify boot) |
-| 3b | `-O2` + silent assertions (§1.2) | XS | Medium | Low (flash) |
-| 4 | Confirm + move panel ISR to Core 0 (§1.5) | S | Medium | Low |
-| 5 | Grid lines as rects (§3.1) | S | Medium | Very low |
-| 6 | Cache sizes, `FAST_MEM`, `MEMCPY_STD` (§1.3/1.6/1.7) | S | Medium | Medium (SRAM) |
-| 7 | **Tiled transpose, drop `sw_rotate` (§2.2 A)** | M | **Very high** | Medium |
-| 8 | Drop the canvas → `DRAW_MAIN` (§2.1) | M–L | **High** | Medium |
-| 9 | `num_fbs = 2` + direct mode (§2.3) | M | High | Medium |
-| 10 | Re-test higher PCLK (§2.4) | S | High (60 Hz) | **Medium-high** |
-| 11 | Decouple heading redraw, raise rate (§3.2) | M | **This is the payoff** | Low |
-| 12 | Mutex/scheduling cleanup (§3.3–3.5) | S | Low–medium | Low |
-| 13 | Doc reconciliation (§4.1) | S | — | — |
+| Step | Item | Effort | Expected impact | Risk | Status |
+|---|---|---|---|---|---|
+| 0 | Instrument (§5) | S | — | — | ✅ done (`perf` / DEV HUD, `8d2ac29`) |
+| — | **`fill_bg` → `lv_color_fill` (C1)** | XS | **9.6× on the dominant call** | Low | ✅ done `fa63a03` |
+| — | **Decouple heading redraw (§3.2 → C2)** | XS | **1 Hz → 5 Hz rotation** | Low | ✅ done |
+| — | Mutex worst case (§3.3) | — | — | — | ✅ resolved by C2 |
+| 1 | CPU 240 MHz (§1.1) | XS | **High** | Low (power) | open |
+| 2 | `bb_invalidate_cache` (§1.4) | XS | **High** | Low | open |
+| 3 | Flash mode DIO → QIO (§1.8) | XS | — | — | ❌ void — already QIO |
+| 3b | `-O2` + silent assertions (§1.2) | XS | Medium | Low (flash) | open |
+| 4 | Confirm + move panel ISR to Core 0 (§1.5) | S | Medium | Low | open |
+| 5 | Grid lines as rects (§3.1) | S | Low (4.7 ms total) | Very low | open |
+| 6 | Cache sizes, `FAST_MEM`, `MEMCPY_STD` (§1.3/1.6/1.7) | S | Medium | Medium (SRAM) | open |
+| 7 | **Tiled transpose, drop `sw_rotate` (§2.2 A)** | M | **Very high (153 ms)** | Medium | open |
+| 8 | Drop the canvas → `DRAW_MAIN` (§2.1) | M–L | **High (131 ms)** | Medium | open |
+| 9 | `num_fbs = 2` + direct mode (§2.3) | M | High | Medium | open |
+| 10 | Re-test higher PCLK (§2.4) | S | High (60 Hz) | **Medium-high** | open |
+| 11 | Waypoint memory (see ROADMAP) | M | Raises the 50-waypoint cap | Low | open |
+| 12 | Serial flush / recompute-per-frame (§3.5–3.6) | S | Low–medium | Low | open |
+| 13 | Doc reconciliation (§4.1) | S | — | — | open |
 
-Steps 1–5 are a single afternoon and should be measurable on their own. Step 7 is where the frame
-budget really changes. Step 11 is what the user actually feels.
+**What the completed work changed about this plan.** The original ordering assumed smoothness had to
+be bought with steps 7–10 first, and listed the heading decouple last as the thing that finally cashes
+it in. In practice C1 + C2 — both XS — delivered the felt result on their own, because the second
+problem was never frame *cost*, it was frame *rate*: the redraw was being skipped, not running slow.
+
+Steps 7–10 are still worth ~284 ms/frame between them and remain the large technical wins. They are
+now headroom, not blockers: they raise the ceiling on rotation rate and unlock §3.2's remaining
+sub-items (10–20 Hz compass, smaller deadband). Reassess after re-reading `perf` on the current build.

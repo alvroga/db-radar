@@ -63,6 +63,7 @@ static void processUIUpdate(const UIUpdate& update);
 static void updateMemoryStats();
 static void updateStatusLabels();
 static void checkTaskHealth();
+static void flushRadarRender();
 
 // =============================================================================
 // ZOOM-BASED FEATURE ACTIVATION (50m zoom only)
@@ -172,6 +173,9 @@ static void uiTask(void* parameter) {
                 system_stats.ui_updates_queued++;
                 processed++;
             }
+
+            // Single coalesced radar render for everything processed above.
+            flushRadarRender();
 
             xSemaphoreGive(display_mutex);
         } else {
@@ -519,6 +523,31 @@ static void processI2CRequest(I2CRequest& request) {
     }
 }
 
+// Radar render coalescing.
+//
+// Several queued events want the radar redrawn (GPS fix, compass heading, zoom).
+// They arrive at different rates — compass at 5 Hz (System Task tick), GPS at 1 Hz
+// (GPS_UPDATE_INTERVAL_MS gate) — so a batch drained in one UI Task loop may contain
+// anywhere from one to four of them.
+//
+// Rather than render inside each case (N renders per batch) or suppress some cases
+// outright (which previously pinned rotation to the 1 Hz GPS rate whenever a fix was
+// present), every case just marks this flag. The UI Task renders once after draining
+// the batch: at most one render per loop, and rotation tracks the fastest producer.
+static bool s_radar_render_pending = false;
+
+static inline void requestRadarRender() {
+    s_radar_render_pending = true;
+}
+
+// Called by the UI Task after draining the update queue, still holding display_mutex.
+static void flushRadarRender() {
+    if (!s_radar_render_pending) return;
+    s_radar_render_pending = false;
+    if (standby_manager::isStandby()) return;  // screen is off — don't paint
+    navigation::updateRadarDisplay();
+}
+
 static void processUIUpdate(const UIUpdate& update) {
     ui_manager::UIState& ui = ui_manager::getUIState();
 
@@ -532,7 +561,7 @@ static void processUIUpdate(const UIUpdate& update) {
 
         case UIUpdateType::RADAR_REFRESH:
             // Update radar display with current GPS position
-            navigation::updateRadarDisplay();
+            requestRadarRender();
             break;
 
         case UIUpdateType::ZOOM_CHANGE:
@@ -540,7 +569,7 @@ static void processUIUpdate(const UIUpdate& update) {
             Serial.println("[UI_UPDATE] Processing zoom change (forward)");
             ui.cycleZoom();
             updateZoomDependentFeatures();  // Beacon proximity at 50m zoom
-            navigation::updateRadarDisplay();
+            requestRadarRender();
             break;
 
         case UIUpdateType::ZOOM_CHANGE_REVERSE:
@@ -548,7 +577,7 @@ static void processUIUpdate(const UIUpdate& update) {
             Serial.println("[UI_UPDATE] Processing zoom change (reverse)");
             ui.cycleZoomReverse();
             updateZoomDependentFeatures();  // Beacon proximity at 50m zoom
-            navigation::updateRadarDisplay();
+            requestRadarRender();
             break;
 
         case UIUpdateType::SETTINGS_SCREEN:
@@ -673,13 +702,7 @@ static void processUIUpdate(const UIUpdate& update) {
             if (delta > 180.0f) delta = 360.0f - delta;
             if (delta < 1.5f) break;
 
-            // Only render if GPS has no valid fix.
-            // When GPS has a fix, RADAR_REFRESH is queued in the same burst and
-            // renders with this updated heading — rendering twice wastes 50ms of
-            // UI Task time per second and causes long button polling gaps.
-            if (!device_manager::getDeviceState().last_gps_data.valid) {
-                navigation::updateRadarDisplay();
-            }
+            requestRadarRender();
             break;
         }
 
