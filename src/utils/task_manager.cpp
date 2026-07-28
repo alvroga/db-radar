@@ -153,6 +153,10 @@ static void uiTask(void* parameter) {
         // This protects against race conditions with UI updates from other sources
         // Timeout increased to 300ms to accommodate worst-case LVGL operations
         if (xSemaphoreTake(display_mutex, pdMS_TO_TICKS(300)) == pdTRUE) {
+            // Apply a pending runtime sw_rotate change before LVGL renders anything,
+            // so the toggle never lands mid-refresh. UI Task + mutex = safe for LVGL.
+            device_manager::applyPendingSwRotate();
+
             // Process LVGL tasks (timer handlers, animations, etc.)
             if (device_manager::isLVGLUnlocked()) {
                 lv_timer_handler();
@@ -1169,12 +1173,61 @@ static void updateStatusLabels() {
             constexpr float MAX_HDOP_ACCEPT = 10.0f;
             bool hdop_acceptable = isnan(gps_data.hdop) || gps_data.hdop <= MAX_HDOP_ACCEPT;
             gps_position_valid = gps_position_valid && (quality.updates_received <= 1 || hdop_acceptable);
-            if (!gps_position_valid) {
-                if (!quality.position_stable) {
-                    Serial.println("[GPS] REJECTED: Position jump detected, keeping last good position");
+            // Rejection logging is edge-triggered + throttled, never once-per-sample.
+            //
+            // Sampling runs at 5Hz (GPS_UPDATE_INTERVAL_MS), and a poor-sky condition
+            // persists for minutes, so an unconditional print here emits ~300 lines/min.
+            // That is not just noise: SerialClass ends every call in fflush(stdout), and
+            // on the USB CDC path that can stall when the host isn't draining — i.e. the
+            // logging itself steals System Task time in exactly the situation where GPS
+            // is already struggling.
+            //
+            // Log the transition into rejection, then at most once per 5s with a count,
+            // then the recovery. Enough to diagnose, bounded regardless of sample rate.
+            // Hysteresis, not edge-triggering.
+            //
+            // A marginal fix flaps: the module alternates HDOP 99.9 (no solution) and
+            // ~8 (marginal) every few samples. Logging each transition turns 5Hz sampling
+            // into a REJECTED/RECOVERED ping-pong that is noisier than the unthrottled
+            // print it replaced. So a state change is only *reported* once the new state
+            // has held for STABLE_SAMPLES consecutive readings.
+            //
+            // This is logging hysteresis only — the position gate itself still evaluates
+            // every sample independently, so a single good fix is still used immediately.
+            {
+                static bool     s_reported_rejecting = false;  // what we last told the user
+                static uint16_t s_consec_bad         = 0;
+                static uint16_t s_consec_good        = 0;
+                static uint32_t s_reject_count       = 0;
+                static uint32_t s_last_reject_log    = 0;
+                constexpr uint16_t STABLE_SAMPLES          = 5;     // ~1s at 5Hz
+                constexpr uint32_t REJECT_LOG_INTERVAL_MS  = 15000;
+
+                if (!gps_position_valid) {
+                    s_consec_bad++;
+                    s_consec_good = 0;
+                    s_reject_count++;
+
+                    const char* reason = !quality.position_stable ? "position jump" : "HDOP";
+                    if (!s_reported_rejecting && s_consec_bad >= STABLE_SAMPLES) {
+                        s_reported_rejecting = true;
+                        s_last_reject_log    = now;
+                        Serial.printf("[GPS] REJECTED (%s): HDOP=%.1f (>%.0f) — holding last good position\n",
+                                      reason, gps_data.hdop, MAX_HDOP_ACCEPT);
+                    } else if (s_reported_rejecting && (now - s_last_reject_log >= REJECT_LOG_INTERVAL_MS)) {
+                        s_last_reject_log = now;
+                        Serial.printf("[GPS] REJECTED (%s): still poor, %lu samples, HDOP=%.1f\n",
+                                      reason, (unsigned long)s_reject_count, gps_data.hdop);
+                    }
                 } else {
-                    Serial.printf("[GPS] REJECTED: HDOP=%.1f (>%.0f), keeping last good position\n",
-                                  gps_data.hdop, MAX_HDOP_ACCEPT);
+                    s_consec_good++;
+                    s_consec_bad = 0;
+                    if (s_reported_rejecting && s_consec_good >= STABLE_SAMPLES) {
+                        Serial.printf("[GPS] RECOVERED: stable fix, %lu samples rejected, HDOP=%.1f\n",
+                                      (unsigned long)s_reject_count, gps_data.hdop);
+                        s_reported_rejecting = false;
+                        s_reject_count       = 0;
+                    }
                 }
             }
 

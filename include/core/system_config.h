@@ -49,7 +49,30 @@ namespace display {
     #ifndef RADAR_PERF_HUD
     #define RADAR_PERF_HUD 0
     #endif
-    constexpr int ROTATION_DEGREES = RADAR_ROTATION_DEGREES;   // 90° CW software rotation
+
+    // Whether LVGL performs the 90° pixel rotation itself.
+    //
+    // This is deliberately separate from ROTATION_DEGREES. LVGL keys the two
+    // behaviours off different fields:
+    //   - pixel rotation  → applied only when `rotated != NONE && sw_rotate`  (lv_refr.c:1293)
+    //   - touch transform → applied on `rotated` alone, sw_rotate not consulted (lv_indev.c:346)
+    //
+    // So building with -DRADAR_SW_ROTATE=0 while leaving ROTATION_DEGREES at 90
+    // drops the expensive in-place transpose but KEEPS touch coordinates correct.
+    // The UI renders sideways — expected — but input mapping stays valid, which is
+    // what makes it a clean A/B for the cost of rotation alone.
+    //
+    // (-DRADAR_ROTATION_DEGREES=0 is a blunter instrument: it zeroes `rotated` too,
+    // so it also disables the touch transform.)
+    //
+    // This is also the configuration a tiled-transpose implementation would run in
+    // permanently — LVGL stops rotating, the flush callback takes over.
+    #ifndef RADAR_SW_ROTATE
+    #define RADAR_SW_ROTATE 1
+    #endif
+
+    constexpr int  ROTATION_DEGREES = RADAR_ROTATION_DEGREES;   // 90° CW software rotation
+    constexpr bool SW_ROTATE        = (RADAR_SW_ROTATE != 0);   // LVGL does the pixel rotation
 
     // RGB timing parameters (critical for stability)
     constexpr int HSYNC_PULSE_WIDTH = 8;

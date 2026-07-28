@@ -125,9 +125,28 @@ bool detectPositionJump(const GPSData& current, const GPSData& previous) {
 
     // Detect jump
     if (distance_m > max_plausible_m) {
-        Serial.printf("[GPS_QUALITY] ⚠ Position jump detected: %.1fm in %dms (max plausible: %.1fm)\n",
-                      distance_m, time_delta_ms, max_plausible_m);
         g_metrics.position_jumps_detected++;
+
+        // Throttled: this runs at the GPS sample rate (5Hz), and a module confused by
+        // poor sky can jump on every sample. Unbounded printing here stalls the caller
+        // via fflush on USB CDC. Log at most once per 5s; the running total is always
+        // available via g_metrics.position_jumps_detected ("gps quality" command).
+        static uint32_t s_last_jump_log = 0;
+        static uint32_t s_suppressed    = 0;
+        uint32_t now_ms = millis();
+        if (now_ms - s_last_jump_log >= 5000) {
+            if (s_suppressed) {
+                Serial.printf("[GPS_QUALITY] Position jump: %.1fm in %dms (max %.1fm) [+%lu suppressed]\n",
+                              distance_m, time_delta_ms, max_plausible_m, (unsigned long)s_suppressed);
+            } else {
+                Serial.printf("[GPS_QUALITY] Position jump: %.1fm in %dms (max %.1fm)\n",
+                              distance_m, time_delta_ms, max_plausible_m);
+            }
+            s_last_jump_log = now_ms;
+            s_suppressed    = 0;
+        } else {
+            s_suppressed++;
+        }
         return true;
     }
 

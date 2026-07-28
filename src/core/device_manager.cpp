@@ -37,6 +37,7 @@ static volatile bool g_lvgl_unlocked = false;
 // LVGL buffers
 static lv_color_t *lv_buf1 = nullptr, *lv_buf2 = nullptr;
 static lv_disp_draw_buf_t draw_buf;
+static lv_disp_t* g_lv_disp = nullptr;   // Captured at register; needed by applyPendingSwRotate()
 static lv_disp_drv_t disp_drv;
 static lv_indev_drv_t indev_drv;
 
@@ -551,21 +552,31 @@ bool initLVGL(const Config& config) {
     disp_drv.full_refresh = 0;          // Partial refresh is faster - only redraws changed areas
 
     // Enable software rotation for RGB panel (MUST be set BEFORE registration)
+    //
+    // `rotated` and `sw_rotate` are set independently: `rotated` drives BOTH the pixel
+    // rotation and the touch-coordinate transform, but the pixel rotation additionally
+    // requires `sw_rotate`. Building with -DRADAR_SW_ROTATE=0 therefore renders sideways
+    // while keeping touch correct — see the comment on SW_ROTATE in system_config.h.
     #if LV_VERSION_CHECK(8,0,0)
+        const uint8_t sw_rot = system_config::display::SW_ROTATE ? 1 : 0;
         if (system_config::display::ROTATION_DEGREES == 90) {
-            disp_drv.sw_rotate = 1;
+            disp_drv.sw_rotate = sw_rot;
             disp_drv.rotated = LV_DISP_ROT_90;
-            Serial.println("[LVGL] Software rotation enabled: 90° CW (compensating for physical 90° CCW)");
+            Serial.println("[LVGL] Rotation 90° CW (compensating for physical 90° CCW)");
         } else if (system_config::display::ROTATION_DEGREES == 180) {
-            disp_drv.sw_rotate = 1;
+            disp_drv.sw_rotate = sw_rot;
             disp_drv.rotated = LV_DISP_ROT_180;
-            Serial.println("[LVGL] Software rotation enabled: 180°");
+            Serial.println("[LVGL] Rotation 180°");
         } else if (system_config::display::ROTATION_DEGREES == 270) {
-            disp_drv.sw_rotate = 1;
+            disp_drv.sw_rotate = sw_rot;
             disp_drv.rotated = LV_DISP_ROT_270;
-            Serial.println("[LVGL] Software rotation enabled: 270° CW (90° CCW)");
+            Serial.println("[LVGL] Rotation 270° CW (90° CCW)");
         } else {
             Serial.println("[LVGL] No display rotation applied");
+        }
+        if (!system_config::display::SW_ROTATE) {
+            Serial.println("[LVGL] *** MEASUREMENT BUILD: sw_rotate=0 — display will be SIDEWAYS,");
+            Serial.println("[LVGL] *** touch mapping stays correct. Read 'perf' for refresh cost.");
         }
     #else
         #warning "LVGL rotation requires LVGL 8.0.0 or higher"
@@ -574,7 +585,7 @@ bool initLVGL(const Config& config) {
 
     Serial.printf("[LVGL] FB0=%p FB1=%p | BUF_LINES=%d\n", (void*)lv_buf1, (void*)lv_buf2, config.buffer_lines);
 
-    lv_disp_drv_register(&disp_drv);
+    g_lv_disp = lv_disp_drv_register(&disp_drv);
 
     return true;
 }
@@ -805,6 +816,44 @@ static bool IRAM_ATTR on_vsync_cb(esp_lcd_panel_handle_t panel, const esp_lcd_rg
 
 SemaphoreHandle_t getVsyncSemaphore() {
     return g_vsync_sem;
+}
+
+// ---------------------------------------------------------------------------
+// Runtime software-rotation toggle (Option B viability experiment)
+//
+// LVGL stores a POINTER to disp_drv (lv_hal_disp.c:185), not a copy, so writing
+// disp_drv.sw_rotate is seen by the next refresh. lv_disp_drv_update() is then
+// called to do the bookkeeping a rotation change needs: it clears the pending
+// invalid-area list and re-invalidates the active screen, so no stale partial
+// areas are reinterpreted under the new rotation. The screen is square, so its
+// resolution-swap path is a no-op here.
+// ---------------------------------------------------------------------------
+static volatile int g_sw_rotate_request = -1;   // -1 = none pending, 0/1 = requested
+
+void requestSwRotate(bool enable) {
+    g_sw_rotate_request = enable ? 1 : 0;
+}
+
+bool isSwRotateEnabled() {
+    return disp_drv.sw_rotate != 0;
+}
+
+bool applyPendingSwRotate() {
+    const int req = g_sw_rotate_request;
+    if (req < 0) return false;
+    g_sw_rotate_request = -1;
+
+    const uint8_t want = req ? 1 : 0;
+    if (disp_drv.sw_rotate == want) return false;
+    if (!g_lv_disp) return false;
+
+    disp_drv.sw_rotate = want;
+    lv_disp_drv_update(g_lv_disp, &disp_drv);
+    lv_obj_invalidate(lv_scr_act());
+
+    Serial.printf("[LVGL] sw_rotate -> %d (%s)\n", want,
+                  want ? "LVGL rotates pixels" : "NO pixel rotation — display sideways");
+    return true;
 }
 
 // Render-time monitor - LVGL calls this at the end of every refresh with the

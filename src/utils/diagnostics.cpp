@@ -122,6 +122,22 @@ void parseCommand(const char* command) {
         handleBeaconCommand(p + 6);
     } else if (strncmp(p, "perf", 4) == 0) {
         handlePerfCommand(p + 4);
+    } else if (strncmp(p, "rot", 3) == 0) {
+        // EXPERIMENT: runtime software-rotation toggle. Tests whether sw_rotate can be
+        // flipped per screen — radar unrotated (fast), settings rotated (correct).
+        const char* a = p + 3;
+        while (*a == ' ') a++;
+        if (strncmp(a, "on", 2) == 0) {
+            device_manager::requestSwRotate(true);
+            Serial.println("[ROT] Requested sw_rotate=1 (UI Task will apply)");
+        } else if (strncmp(a, "off", 3) == 0) {
+            device_manager::requestSwRotate(false);
+            Serial.println("[ROT] Requested sw_rotate=0 — display should go SIDEWAYS");
+        } else {
+            Serial.printf("[ROT] sw_rotate is currently %d\n",
+                          device_manager::isSwRotateEnabled() ? 1 : 0);
+            Serial.println("[ROT] Usage: rot on | rot off");
+        }
     } else if (strncmp(p, "version", 7) == 0) {
         Serial.printf("DRAC OS %s\n", FW_VERSION);
     } else {
@@ -1179,8 +1195,18 @@ void handlePerfCommand(const char* args) {
     uint32_t other = (paint > bg + grid + wpt + deco) ? paint - (bg + grid + wpt + deco) : 0;
 
     Serial.println("===== RENDER TIMING (last radar frame) =====");
-    Serial.printf("Rotation:     %s\n",
-                  system_config::display::ROTATION_DEGREES == 0 ? "OFF (sw_rotate=0)" : "ON (90 CW sw_rotate)");
+    // Report BOTH knobs. Pixel rotation needs `rotated != NONE` AND `sw_rotate`;
+    // reporting only ROTATION_DEGREES mislabels an -DRADAR_SW_ROTATE=0 measurement
+    // build as "rotation ON", which is precisely when the label is being relied on.
+    if (system_config::display::ROTATION_DEGREES == 0) {
+        Serial.println("Rotation:     OFF (rotated=NONE — touch transform also off)");
+    } else if (!system_config::display::SW_ROTATE) {
+        Serial.printf("Rotation:     PIXELS OFF / TOUCH ON (%d deg, sw_rotate=0) — measurement build\n",
+                      system_config::display::ROTATION_DEGREES);
+    } else {
+        Serial.printf("Rotation:     ON (%d deg CW, sw_rotate=1)\n",
+                      system_config::display::ROTATION_DEGREES);
+    }
     Serial.println("--- paint stage (updateRadarDisplay) ---");
     Serial.printf("  fill_bg:    %8u us  (%5.1f ms)\n", (unsigned)bg,   bg   / 1000.0);
     Serial.printf("  grid:       %8u us  (%5.1f ms)\n", (unsigned)grid, grid / 1000.0);

@@ -113,6 +113,28 @@ bool isLVGLUnlocked();
 // Returns nullptr before initLCD() completes.
 SemaphoreHandle_t getVsyncSemaphore();
 
+/**
+ * @brief Request LVGL software pixel rotation on/off at runtime (thread-safe).
+ *
+ * EXPERIMENT (Option B viability): if sw_rotate can be toggled per screen, the radar
+ * can run unrotated — drawing its geometry pre-rotated, which is free — while settings
+ * and waypoint screens keep LVGL rotation and stay upright. That would remove the
+ * measured 162ms/frame transpose without any of the DMA risk a tiled transpose carries.
+ *
+ * Safe to call from any task: this only records the request. The UI Task applies it via
+ * applyPendingSwRotate() while holding display_mutex, since it touches LVGL state.
+ */
+void requestSwRotate(bool enable);
+
+/**
+ * @brief Apply a pending requestSwRotate(), if any. UI TASK ONLY, under display_mutex.
+ * @return true if a change was applied this call.
+ */
+bool applyPendingSwRotate();
+
+/** @brief Current LVGL software rotation state. */
+bool isSwRotateEnabled();
+
 } // namespace device_manager
 
 #endif // DEVICE_MANAGER_H
