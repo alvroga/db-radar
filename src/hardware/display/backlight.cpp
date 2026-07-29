@@ -1,5 +1,6 @@
 #include "core/arduino_compat.h"
 #include "backlight.h"
+#include "core/system_config.h"   // backlight::MIN_BRIGHTNESS_PERCENT floor
 #include "driver/ledc.h"
 #include "driver/gpio.h"
 
@@ -68,6 +69,21 @@ void set(uint8_t level) {
 
 void setPercent(uint8_t percent) {
   if (percent > 100) percent = 100;
+
+  // Enforce a floor here, not just in the settings slider.
+  //
+  // Below ~5% the panel is effectively black, and the only control for raising it
+  // again is on a screen you can no longer see — an unrecoverable state without a
+  // reflash. The slider's range already clamps the UI path, but this is the single
+  // point every caller goes through, including the NVS restore at boot (where a raw
+  // stored value of 1-2 divides down to 0%).
+  //
+  // Deliberate full-off (standby) must call backlight::off() instead, which bypasses
+  // this floor. That keeps "dark on purpose" and "dark by accident" distinguishable.
+  if (percent < system_config::backlight::MIN_BRIGHTNESS_PERCENT) {
+    percent = system_config::backlight::MIN_BRIGHTNESS_PERCENT;
+  }
+
   uint8_t level = (percent * 255) / 100;
   set(level);
 }

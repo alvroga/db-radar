@@ -289,7 +289,10 @@ static void applyStandbyPowerSettings() {
 
     // Fade backlight to 0% over 500ms
     // Note: Smooth fade not implemented yet - instant off for now
-    backlight::setPercent(0);
+    // off(), not setPercent(0): setPercent now enforces a 5% floor so a mis-set
+    // brightness can never leave the screen unreadable with no way back. Standby is
+    // the one place going fully dark is intended, so it says so explicitly.
+    backlight::off();
     Serial.println("[STANDBY] ✓ Display OFF (backlight 0%)");
 
     // Disable WiFi if it was enabled
