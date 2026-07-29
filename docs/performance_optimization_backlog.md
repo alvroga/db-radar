@@ -1,7 +1,11 @@
 # Performance Optimization Backlog
 
-**Status**: Partially implemented — see "Completed" below. The rest is still analysis.
-**Date**: 2026-07-27 (measured results added 2026-07-28; completions marked 2026-07-28)
+**Status**: Largely implemented. **Frame ~499 ms → 149 ms (~0.8 → ~6.7 fps).** See "Completed"
+below for what shipped and the measured breakdown for where the remaining 149 ms sits. Sections 0–5
+are the **original 2026-07-27 analysis, preserved as written** — several of their conclusions were
+disproved by measurement, and the ones that were are flagged inline. Trust the ✅ sections over
+them.
+**Date**: 2026-07-27 (measurements + completions: 2026-07-28)
 
 ---
 
@@ -277,11 +281,29 @@ at runtime by the bootloader's `qio_mode` step. Remove this item; there is nothi
 
 ---
 **Scope**: Render pipeline, build configuration, task architecture.
-**Goal**: Smooth navigation. Reduce per-frame cost so the radar can rotate/translate at 10–20 Hz instead of ~1 Hz.
+**Goal**: Smooth navigation. Reduce per-frame cost so the radar can rotate/translate at 10–20 Hz.
+**Progress**: ~1 Hz → **~6.7 Hz**. Rotation and translation both track the compass/GPS at 5 Hz.
 
 ---
 
-## 0. Read this first: what the actual problem is
+# ⬇ ORIGINAL ANALYSIS (2026-07-27) — HISTORICAL
+
+**Everything from here down predates the measurements.** It is kept because the reasoning is useful
+and because two of its confident conclusions were wrong in instructive ways. Where a section has
+been implemented or disproved, it is marked. **Do not take costs from this half of the document** —
+use the ✅ MEASURED sections above.
+
+---
+
+## 0. Read this first: what the actual problem is — ⚠️ HISTORICAL, largely superseded
+
+> **Beware the number collision.** The "~149 ms per redraw" below is the *2026-07-27* figure for the
+> old canvas pipeline. The *current* frame total is also ~149 ms, by coincidence. They describe
+> completely different pipelines — the old one at ~1 Hz effective, the new one at ~6.7 Hz.
+>
+> Also superseded here: the four-PSRAM-passes table (stages 1–2 are gone with the canvas, stage 3 is
+> now a tiled transpose at 64 ms not ~153 ms), and both consequences below — rotation is no longer
+> pinned to 1 Hz (C2) and the mutex worst case is capped at one render per loop (§3.3).
 
 The codebase contains its own measurement, in `src/utils/task_manager.cpp:148`:
 
@@ -544,7 +566,13 @@ on the vsync gate, but then the 10 ms value is misleading and should be commente
 
 ## 2. Tier 1 — Pipeline architecture. This is where the 149 ms actually lives.
 
-### 2.1 Delete the radar canvas; draw in an `LV_EVENT_DRAW_MAIN` handler ⭐⭐
+### 2.1 Delete the radar canvas; draw in an `LV_EVENT_DRAW_MAIN` handler — ✅ DONE (C4, `816b421`)
+
+> Implemented as described. **The gain estimate below was wrong** — "removes one of the four
+> full-screen passes" was right, but that pass cost ~22 ms, not the ~104 ms this section's framing
+> implied. Frame went 238 → 210 ms. The 460 KB PSRAM saving was accurate. The per-draw-call
+> overhead concern was also real but small. See C4 and "The residual trap".
+
 
 The radar is drawn into a full-screen `lv_canvas` (`ui_manager.cpp:190-216`, 460 KB of PSRAM), which
 LVGL then treats as an image and **blits in full into the draw buffer** on every refresh. The canvas
@@ -572,7 +600,14 @@ eliminates:
 - **Risk**: medium — it is the largest single change here, but it's mechanical and testable
   incrementally.
 
-### 2.2 Kill LVGL software rotation ⭐⭐⭐ — the single biggest item
+### 2.2 Kill LVGL software rotation — ✅ DONE via Option A (C3, `ff82116`)
+
+> Option A implemented: rotation 162 → 64.3 ms. **Option B is impossible** — LVGL's touch transform
+> keys off `rotated` alone and assumes the pixels were rotated to match, so drawing pre-rotated
+> leaves the UI visible but untouchable. **Option C is ruled out by the enclosure**: the panel is
+> rotated specifically to move the GPS module off the bottom edge, where the enclosure indent and
+> sky visibility require it. Neither is available; do not re-propose them.
+
 
 `disp_drv.sw_rotate = 1` / `LV_DISP_ROT_90` (`device_manager.cpp:552-556`) costs, per frame: a
 cache-hostile in-place 480×480 transpose (~11 MB of effective PSRAM traffic, see §0), **and** the
@@ -603,7 +638,16 @@ put all text in pre-rotated image assets. **Not recommended.**
 **Option C — fix it in the enclosure.** Mount the panel in its native orientation. Zero software
 cost, forever. Worth pricing against the engineering time for Option A.
 
-### 2.3 Use the panel's own framebuffers as LVGL's draw buffers (`num_fbs = 2`)
+### 2.3 Use the panel's own framebuffers as LVGL's draw buffers (`num_fbs = 2`) — ⭐ NEXT, unblocked
+
+> **Prerequisites are now satisfied**: `sw_rotate` is off (C3) and the canvas is gone (C4). This is
+> the top remaining item, worth the measured **33.9 ms** the flush currently costs.
+>
+> **Adjusted plan**: rotation still has to happen somewhere, so `full_refresh` + `direct_mode` as
+> written below is not quite the shape. Instead, have `rotate90_tiled()` write straight into the
+> back framebuffer from `esp_lcd_rgb_panel_get_frame_buffer()` and swap — that deletes both the
+> `esp_lcd_panel_draw_bitmap` memcpy *and* the staging-buffer write, in one change to code we own.
+
 
 Confirmed available in this IDF version
 (`components/esp_lcd/rgb/include/esp_lcd_panel_rgb.h:151`, max 3 buffers). Currently `num_fbs` is
@@ -646,10 +690,15 @@ by decoupling the panel's real-time fetch from PSRAM.
 
 ## 3. Tier 2 — Draw-level and scheduling work
 
-### 3.1 Grid lines: use rects, not `lv_canvas_draw_line` with `width = 3`
+### 3.1 Grid lines: use rects, not `lv_draw_line` with `width = 3` — still open, now measured
 
-`drawRadarGrid()` (`navigation.cpp:269-317`) draws up to 22 axis-aligned lines per frame at
-`line_dsc.width = 3`. LVGL's thick-line path builds anti-aliasing masks and blends through the mask
+> **Updated**: the calls are `lv_draw_line` now, not `lv_canvas_draw_line` (C4). Measured cost is
+> **6–9 ms**, not the 4.7 ms this section assumed — and it was 20–26 ms until the `clip_corner` fix
+> (C5) removed the radius mask every line was blending through. Still the largest single item in the
+> 13 ms paint stage, so the argument below holds; the payoff is just smaller than the effort table
+> once suggested.
+
+`drawRadarGrid()` draws up to 22 axis-aligned lines per frame at `line_dsc.width = 3`. LVGL's thick-line path builds anti-aliasing masks and blends through the mask
 pipeline — dramatically more expensive than a solid fill.
 
 Every one of these lines is axis-aligned, so each is just a 3×480 or 480×3 rectangle. A
@@ -667,16 +716,18 @@ The suppression is removed and compass updates now drive redraws via `requestRad
 
 Remaining sub-items, **not** done, in order of likely value:
 
-- Raise the compass rate. The read is already gated to 20 ms (`task_manager.cpp:1337`) but the
-  System Task loop is `SYSTEM_UPDATE_MS = 200` → effective 5 Hz. Splitting the compass read into its
-  own task, or dropping the System Task period, gets you 10–20 Hz. **The coalescing in C2 makes this
-  safe to try** — a faster producer can no longer multiply renders per UI loop.
-- Reconsider the 1.5° deadband (`task_manager.cpp:669-671`). It exists to cut render load; with a
-  cheap frame it becomes the thing standing between you and smooth rotation. Lower it to ~0.5° and
-  lean on `smoothHeading()`'s EMA instead.
-- Interpolate GPS position between the 1 Hz fixes (dead reckoning from speed + heading) so
-  translation is smooth too, not just rotation. **Rotation is smooth now; translation is still 1 Hz,
-  so this is the next thing that will be felt.**
+- **Raise the compass rate — now the top item, and the situation has inverted.** At 149 ms the radar
+  renders at ~6.7 Hz while only being *asked* to render at 5 Hz, so the sensor rate is finally the
+  binding constraint rather than frame cost. The read is gated to 20 ms but the System Task loop is
+  `SYSTEM_UPDATE_MS = 200` → effective 5 Hz; splitting the compass into its own task, or dropping
+  the System Task period, gets 10–20 Hz. The coalescing in C2 makes this safe — a faster producer
+  cannot multiply renders per UI loop.
+- Reconsider the 1.5° deadband (`task_manager.cpp`). It exists to cut render load; with a cheap
+  frame it becomes the thing standing between you and smooth rotation. Lower it to ~0.5° and lean on
+  `smoothHeading()`'s EMA instead.
+- ~~Interpolate GPS position between the 1 Hz fixes~~ — **not needed.** `GPS_UPDATE_INTERVAL_MS` went
+  1000 → 100 in `d289707`; the BH-880 emits NAV-PVT at a fixed 10 Hz regardless of what it is asked
+  for, so translation already matches rotation at 5 Hz with no dead reckoning.
 
 **Note**: `memory/compass_architecture.md` and `CLAUDE.md` describe the compass as ~1 Hz; the code
 now reads at up to 5 Hz. Worth reconciling.
@@ -750,7 +801,12 @@ This matters more than it looks: several of the findings above are cases where a
 | `CLAUDE.md`: partitions "3MB app + 10MB FFat" | Build uses `partitions_ota.csv` — 2×2 MB OTA + 11.7 MB FFat |
 | `CLAUDE.md` / memory: compass "~1 Hz" | Read gate is 20 ms, effective ~5 Hz |
 | `CLAUDE.md`: GPS heading fusion, "NMEA RMC sentence fields 7-8" | Compass is the sole heading source; GPS is UBX |
-| Docs: "<2ms for 50 waypoints @ 240MHz" | Full redraw is ~149 ms @ 160 MHz |
+| Docs: "<2ms for 50 waypoints @ 240MHz" | Waypoint drawing is ~5 ms; the *full frame* is ~149 ms @ 160 MHz |
+
+**Partly reconciled 2026-07-28**: `CLAUDE.md` gained a Render Pipeline section covering the current
+architecture (no canvas, tiled transpose, the two load-bearing style constraints) and the 240 MHz
+row is now understood — the hardware genuinely is rated to 240 MHz (§1.1), only the build config
+disagrees. The remaining rows are still drift and still worth a pass.
 
 ### 4.2 Dead weight
 
@@ -765,7 +821,15 @@ This matters more than it looks: several of the findings above are cases where a
 
 ---
 
-## 5. Do this before any of it: measure
+## 5. Do this before any of it: measure — ✅ DONE, and it was the whole ballgame
+
+> This section was right about everything that mattered. Every wrong estimate in this document
+> comes from a section that was written *without* the corresponding measurement, and every one was
+> corrected by adding one timer. The `perf` command and DEV HUD (`8d2ac29`) now report the full
+> per-stage split; `flush_us` and the `DRAW_MAIN_BEGIN` bracket were added later as the residual
+> shrank. Item 3 below needs one correction: `ROTATION_DEGREES = 0` does not just make the UI
+> sideways, it makes it **untouchable** (LVGL's input transform assumes the pixels were rotated), so
+> it is a measurement mode only — use `rot on|off|tiled` at runtime instead of a rebuild.
 
 The 149 ms is a single number from a comment. Everything above is inference from the source. Before
 spending effort, spend an hour getting a breakdown — otherwise you risk optimizing stage 1 when 80 %
