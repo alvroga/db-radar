@@ -21,6 +21,8 @@
 #include "ui/ui_manager.h"
 #include "system_logger.h"
 #include "esp_heap_caps.h"
+#include "esp_attr.h"
+#include <string.h>
 #include <time.h>
 #include "driver/sdmmc_host.h"
 #include "sdmmc_cmd.h"
@@ -39,7 +41,15 @@ static lv_color_t *lv_buf1 = nullptr, *lv_buf2 = nullptr;
 static lv_disp_draw_buf_t draw_buf;
 static lv_disp_t* g_lv_disp = nullptr;   // Captured at register; needed by applyPendingSwRotate()
 
-// Staging buffers for the tiled 90° rotation (RotMode::TILED).
+// The panel's own two framebuffers (step 9). rotate90_tiled() writes directly into
+// the back one and esp_lcd_panel_draw_bitmap then swaps without copying.
+static lv_color_t* g_fb[2] = { nullptr, nullptr };
+static uint8_t     g_fb_back = 1;          // Index we are about to render into
+static volatile bool g_fb_swap_pending = false;  // Submitted, not yet latched by scan-out
+static SemaphoreHandle_t g_fb_swap_sem = nullptr;
+
+// Staging buffers for the tiled 90° rotation, used only when the dual-framebuffer
+// path is unavailable (allocation failure).
 //
 // One per LVGL draw buffer, paired by pointer. That pairing is what makes the DMA
 // safe: LVGL never re-renders into a draw buffer whose flush is still outstanding,
@@ -47,6 +57,9 @@ static lv_disp_t* g_lv_disp = nullptr;   // Captured at register; needed by appl
 // never be overwritten while esp_lcd is reading it.
 static lv_color_t* g_rot_buf[2] = { nullptr, nullptr };
 static size_t      g_lv_buf_px  = 0;     // Pixels per draw buffer (for the range check)
+
+// True when rotation can target the panel framebuffers directly (zero-copy flush).
+static inline bool dualFbRotateAvailable() { return g_fb[0] && g_fb[1]; }
 
 static volatile int g_rot_mode_request = -1;   // -1 = none pending
 
@@ -75,6 +88,7 @@ static void lvgl_touch_read_cb(lv_indev_drv_t*, lv_indev_data_t* data);
 static inline int16_t scale_to_480(uint16_t raw);
 static bool on_color_trans_done(esp_lcd_panel_handle_t panel, const esp_lcd_rgb_panel_event_data_t* edata, void* user_ctx);
 static bool on_vsync_cb(esp_lcd_panel_handle_t panel, const esp_lcd_rgb_panel_event_data_t* edata, void* user_ctx);
+static bool on_frame_buf_complete(esp_lcd_panel_handle_t panel, const esp_lcd_rgb_panel_event_data_t* edata, void* user_ctx);
 
 const DeviceState& getDeviceState() {
     return g_device_state;
@@ -443,6 +457,13 @@ bool initLCD(const Config& config) {
     cfg.flags.fb_in_psram = 1;
     cfg.bounce_buffer_size_px = system_config::display::SCREEN_WIDTH * system_config::display::BOUNCE_BUFFER_LINES;  // IDF 5.5: SRAM staging eliminates PSRAM/DMA bus contention
 
+    // Two framebuffers (step 9). rotate90_tiled() transposes straight into the back
+    // buffer and hands the pointer to esp_lcd_panel_draw_bitmap, which recognises its
+    // own framebuffer and swaps instead of copying (esp_lcd_panel_rgb.c:614-624) —
+    // that deletes the 34ms full-screen memcpy the flush used to cost. Net PSRAM is
+    // still negative: +460KB here, -920KB from dropping the rotation staging buffers.
+    cfg.num_fbs = 2;
+
     Serial.printf("[RGB] %dx%d pclk=%lu Hz | H:pw=%u bp=%u fp=%u | V:pw=%u bp=%u fp=%u\n",
                   cfg.timings.h_res, cfg.timings.v_res, (unsigned)cfg.timings.pclk_hz,
                   (unsigned)cfg.timings.hsync_pulse_width, (unsigned)cfg.timings.hsync_back_porch, (unsigned)cfg.timings.hsync_front_porch,
@@ -466,16 +487,27 @@ bool initLCD(const Config& config) {
         return false;
     }
 
+    // Grab both framebuffer pointers so flush_cb can transpose straight into the
+    // back one. If this fails we simply never enter the zero-copy path.
+    if (esp_lcd_rgb_panel_get_frame_buffer(g_device_state.panel_handle, 2,
+                                           (void**)&g_fb[0], (void**)&g_fb[1]) != ESP_OK) {
+        g_fb[0] = g_fb[1] = nullptr;
+        Serial.println("[LCD] get_frame_buffer failed — falling back to staged flush");
+    }
+
     // Register panel callbacks (ESP-IDF 5.x API)
-    // on_color_trans_done: DMA complete → LVGL flush_ready
-    // on_vsync:            Frame boundary → unblock uiTask for tear-free rendering
+    // on_color_trans_done:  DMA complete → LVGL flush_ready
+    // on_vsync:             Frame boundary → unblock uiTask for tear-free rendering
+    // on_frame_buf_complete: scan-out latched cur_fb_index → back buffer is free again
     g_vsync_sem = xSemaphoreCreateBinary();
+    g_fb_swap_sem = xSemaphoreCreateBinary();
     esp_lcd_rgb_panel_event_callbacks_t cbs = {};
     cbs.on_color_trans_done = on_color_trans_done;
     cbs.on_vsync = on_vsync_cb;
+    cbs.on_frame_buf_complete = on_frame_buf_complete;
     esp_lcd_rgb_panel_register_event_callbacks(g_device_state.panel_handle, &cbs, nullptr);
 
-    Serial.println("[LCD] Display initialized successfully");
+    Serial.printf("[LCD] Display initialized successfully (fb0=%p fb1=%p)\n", g_fb[0], g_fb[1]);
     return true;
 }
 
@@ -559,14 +591,18 @@ bool initLVGL(const Config& config) {
 
     g_lv_buf_px = (size_t)config.screen_width * config.buffer_lines;
 
-    // Staging buffers for tiled rotation. Failure is non-fatal — TILED mode simply
-    // refuses to engage and we stay on LVGL's own rotation.
-    g_rot_buf[0] = (lv_color_t*)heap_caps_malloc(buf_size, MALLOC_CAP_SPIRAM);
-    g_rot_buf[1] = (lv_color_t*)heap_caps_malloc(buf_size, MALLOC_CAP_SPIRAM);
-    if (!g_rot_buf[0] || !g_rot_buf[1]) {
-        Serial.println("[LVGL] WARN: rotation staging buffers unavailable — tiled rotation disabled");
-        if (g_rot_buf[0]) { heap_caps_free(g_rot_buf[0]); g_rot_buf[0] = nullptr; }
-        if (g_rot_buf[1]) { heap_caps_free(g_rot_buf[1]); g_rot_buf[1] = nullptr; }
+    // Staging buffers for tiled rotation — only needed when we cannot transpose into
+    // the panel's own framebuffers. With num_fbs = 2 these 920KB are pure waste, so
+    // skip them. Failure is non-fatal either way: TILED refuses to engage and we stay
+    // on LVGL's own rotation.
+    if (!dualFbRotateAvailable()) {
+        g_rot_buf[0] = (lv_color_t*)heap_caps_malloc(buf_size, MALLOC_CAP_SPIRAM);
+        g_rot_buf[1] = (lv_color_t*)heap_caps_malloc(buf_size, MALLOC_CAP_SPIRAM);
+        if (!g_rot_buf[0] || !g_rot_buf[1]) {
+            Serial.println("[LVGL] WARN: rotation staging buffers unavailable — tiled rotation disabled");
+            if (g_rot_buf[0]) { heap_caps_free(g_rot_buf[0]); g_rot_buf[0] = nullptr; }
+            if (g_rot_buf[1]) { heap_caps_free(g_rot_buf[1]); g_rot_buf[1] = nullptr; }
+        }
     }
 
     lv_disp_draw_buf_init(&draw_buf, lv_buf1, lv_buf2, config.screen_width * config.buffer_lines);
@@ -577,8 +613,11 @@ bool initLVGL(const Config& config) {
     disp_drv.monitor_cb = lvgl_monitor_cb;   // Render timing for the DEV perf HUD
     disp_drv.draw_buf = &draw_buf;
 
-    // Partial refresh for performance (120-line buffers provide smooth scrolling)
-    disp_drv.full_refresh = 0;          // Partial refresh is faster - only redraws changed areas
+    // full_refresh is decided below, once the rotation mode is known: the zero-copy
+    // dual-framebuffer path requires it (a partial area would leave the rest of the
+    // alternate buffer holding a two-frames-old image), every other path is faster
+    // without it. LVGL also rejects full_refresh outright when sw_rotate is set.
+    disp_drv.full_refresh = 0;
 
     // Enable software rotation for RGB panel (MUST be set BEFORE registration)
     //
@@ -591,13 +630,17 @@ bool initLVGL(const Config& config) {
         // leaving sw_rotate=1 while g_rot_mode is TILED rotates the image twice.
         if (!system_config::display::SW_ROTATE) {
             g_rot_mode = RotMode::NONE;          // -DRADAR_SW_ROTATE=0 measurement build
-        } else if (g_rot_buf[0] && g_rot_buf[1]) {
+        } else if (dualFbRotateAvailable() || (g_rot_buf[0] && g_rot_buf[1])) {
             g_rot_mode = RotMode::TILED;         // preferred — 64ms vs 162ms
         } else {
             g_rot_mode = RotMode::LVGL_SW;       // staging alloc failed, fall back
         }
         const uint8_t sw_rot = (g_rot_mode == RotMode::LVGL_SW) ? 1 : 0;
-        Serial.printf("[LVGL] Rotation mode: %s\n", rotModeName(g_rot_mode));
+
+        // Only the zero-copy path needs (and tolerates) a full-screen area per flush.
+        disp_drv.full_refresh = (g_rot_mode == RotMode::TILED && dualFbRotateAvailable()) ? 1 : 0;
+        Serial.printf("[LVGL] Rotation mode: %s (full_refresh=%u)\n",
+                      rotModeName(g_rot_mode), disp_drv.full_refresh);
         if (system_config::display::ROTATION_DEGREES == 90) {
             disp_drv.sw_rotate = sw_rot;
             disp_drv.rotated = LV_DISP_ROT_90;
@@ -853,6 +896,20 @@ static bool IRAM_ATTR on_vsync_cb(esp_lcd_panel_handle_t panel, const esp_lcd_rg
     return hp_woken == pdTRUE;  // Yield to higher-priority task if woken
 }
 
+// Fires when the scan-out wraps to a new frame and latches bb_fb_index = cur_fb_index
+// (esp_lcd_panel_rgb.c:831-834). Until that happens the "back" buffer is still the one
+// being read out, so writing into it would tear. At ~115ms/frame vs a 26.6ms panel
+// period this never actually blocks — it is here so that raising PCLK or shaving the
+// frame further cannot silently reintroduce tearing.
+static bool IRAM_ATTR on_frame_buf_complete(esp_lcd_panel_handle_t panel, const esp_lcd_rgb_panel_event_data_t* edata, void* user_ctx) {
+    BaseType_t hp_woken = pdFALSE;
+    g_fb_swap_pending = false;
+    if (g_fb_swap_sem) {
+        xSemaphoreGiveFromISR(g_fb_swap_sem, &hp_woken);
+    }
+    return hp_woken == pdTRUE;
+}
+
 SemaphoreHandle_t getVsyncSemaphore() {
     return g_vsync_sem;
 }
@@ -873,7 +930,7 @@ void requestRotMode(RotMode mode) {
 
 RotMode getRotMode() { return g_rot_mode; }
 
-bool isTiledRotateAvailable() { return g_rot_buf[0] && g_rot_buf[1]; }
+bool isTiledRotateAvailable() { return dualFbRotateAvailable() || (g_rot_buf[0] && g_rot_buf[1]); }
 
 const char* rotModeName(RotMode m) {
     switch (m) {
@@ -902,6 +959,9 @@ bool applyPendingRotMode() {
     // LVGL only rotates pixels when sw_rotate is set; NONE and TILED both need it
     // off, the difference being whether flush_cb puts the rotation back.
     disp_drv.sw_rotate = (want == RotMode::LVGL_SW) ? 1 : 0;
+    // Must move in lockstep: the zero-copy path needs whole-screen areas, and LVGL
+    // rejects full_refresh together with sw_rotate.
+    disp_drv.full_refresh = (want == RotMode::TILED && dualFbRotateAvailable()) ? 1 : 0;
     lv_disp_drv_update(g_lv_disp, &disp_drv);
     lv_obj_invalidate(lv_scr_act());
 
@@ -926,20 +986,55 @@ bool applyPendingRotMode() {
  * blocks keeps both the source rows and destination columns of a tile resident
  * (32×32×2B = 2KB each, trivially inside the 32KB dcache), so the same pixel count
  * moves with near-full cache-line utilisation.
+ *
+ * Why the SRAM scratch (step 9b): tiling alone still leaves one of the two PSRAM
+ * streams strided — whichever loop is innermost gets sequential access and the other
+ * hops by a 960-byte row stride. Transposing via a 2KB internal-SRAM staging tile
+ * splits the work so that *both* PSRAM sides are sequential: read a source row run,
+ * scatter into SRAM (free), then emit each destination row run as one memcpy. The
+ * only strided accesses left are inside the scratch, which never leaves L1/SRAM.
+ *
+ * IRAM_ATTR keeps the loop body out of flash. The function is ~1% of the code but
+ * runs 230,400 iterations per frame, and it competes for the 16KB instruction cache
+ * with the whole LVGL draw path that ran immediately before it.
  */
-static void rotate90_tiled(const lv_color_t* __restrict src,
-                           lv_color_t* __restrict dst,
-                           int w, int h) {
+static IRAM_ATTR void rotate90_tiled(const lv_color_t* __restrict src,
+                                     lv_color_t* __restrict dst,
+                                     int w, int h) {
+    // 64 makes each destination run 128 bytes — four full cache lines per memcpy,
+    // which is where the PSRAM write burst stops being dominated by per-run setup.
     constexpr int TILE = 32;
+
+    // Internal SRAM (.bss), 8KB. Not cached on the S3 (internal SRAM is directly
+    // addressed), so the strided halves of the transpose cost no cache traffic at all.
+    // Safe as a static because flush_cb only ever runs from the UI Task — LVGL is
+    // single-threaded here by construction.
+    static lv_color_t scratch[TILE * TILE];
+
     for (int jj = 0; jj < h; jj += TILE) {
-        const int jmax = (jj + TILE < h) ? (jj + TILE) : h;
+        const int th = ((jj + TILE < h) ? (jj + TILE) : h) - jj;
         for (int ii = 0; ii < w; ii += TILE) {
-            const int imax = (ii + TILE < w) ? (ii + TILE) : w;
-            for (int j = jj; j < jmax; j++) {
-                const lv_color_t* srow = src + (size_t)j * w;
-                for (int i = ii; i < imax; i++) {
-                    dst[(size_t)(w - 1 - i) * h + j] = srow[i];
+            const int tw = ((ii + TILE < w) ? (ii + TILE) : w) - ii;
+
+            // Gather: sequential reads from PSRAM, strided writes into SRAM.
+            // Walk the scratch with a running pointer rather than `i * th` — at -Os
+            // the compiler does not reliably strength-reduce that multiply, and this
+            // loop body executes once per pixel.
+            for (int j = 0; j < th; j++) {
+                const lv_color_t* __restrict srow = src + (size_t)(jj + j) * w + ii;
+                lv_color_t* __restrict sc = scratch + j;
+                for (int i = 0; i < tw; i++) {
+                    *sc = srow[i];
+                    sc += th;
                 }
+            }
+
+            // Scatter: each destination row run is contiguous, so it is one memcpy.
+            const lv_color_t* __restrict sc = scratch;
+            for (int i = 0; i < tw; i++) {
+                lv_color_t* __restrict drow = dst + (size_t)(w - 1 - (ii + i)) * h + jj;
+                memcpy(drow, sc, (size_t)th * sizeof(lv_color_t));
+                sc += th;
             }
         }
     }
@@ -975,7 +1070,32 @@ static void lvgl_flush_cb(lv_disp_drv_t* drv, const lv_area_t* area, lv_color_t*
     // Store driver pointer for DMA callback
     g_current_disp_drv = drv;
 
-    if (g_rot_mode == RotMode::TILED && g_rot_buf[0] && g_rot_buf[1]) {
+    if (g_rot_mode == RotMode::TILED && dualFbRotateAvailable()) {
+        // Zero-copy path (step 9). full_refresh = 1 guarantees `area` is the whole
+        // screen, which is what makes writing into the alternate framebuffer safe:
+        // every pixel of it is rewritten, so nothing stale survives the swap.
+        const int w = area->x2 - area->x1 + 1;
+        const int h = area->y2 - area->y1 + 1;
+
+        // Wait for scan-out to pick up the previous swap before overwriting what is,
+        // until that moment, still the buffer being displayed.
+        if (g_fb_swap_pending && g_fb_swap_sem) {
+            xSemaphoreTake(g_fb_swap_sem, pdMS_TO_TICKS(50));
+        }
+
+        const int64_t t0 = esp_timer_get_time();
+        rotate90_tiled(color_p, g_fb[g_fb_back], w, h);
+        const int64_t t1 = esp_timer_get_time();
+        s_rot_acc += (uint32_t)(t1 - t0);
+
+        // Pointer lies inside a framebuffer, so this sets cur_fb_index and returns —
+        // no copy. It still invokes on_color_trans_done, so LVGL is released as before.
+        g_fb_swap_pending = true;
+        esp_lcd_panel_draw_bitmap(g_device_state.panel_handle,
+                                  0, 0, h, w, g_fb[g_fb_back]);
+        g_fb_back ^= 1;
+        s_flush_acc += (uint32_t)(esp_timer_get_time() - t1);
+    } else if (g_rot_mode == RotMode::TILED && g_rot_buf[0] && g_rot_buf[1]) {
         const int w = area->x2 - area->x1 + 1;
         const int h = area->y2 - area->y1 + 1;
 

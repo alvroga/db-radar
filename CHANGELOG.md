@@ -11,6 +11,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Performance
 
+**Radar frame 149ms → 94ms (~6.7 → ~10 fps): transpose tuning, then a zero-copy flush**
+
+Steps 9b and 9 from the optimization backlog. Verified on hardware — no tearing, taps intact.
+
+*Step 9b — transpose tuning.* `rotate90_tiled` gained `IRAM_ATTR` and an internal-SRAM scratch tile.
+Tiling alone still left one of the two PSRAM streams strided: whichever loop is innermost gets
+sequential access and the other hops by a 960-byte row stride. Transposing *via* a 2 KB SRAM tile
+makes both PSRAM sides sequential — read a source row run, scatter into SRAM (uncached, free), emit
+each destination row run as one `memcpy`. Rotation **64.1 → 55.7ms**.
+
+Short of the ~40ms projected, and the reason was already sitting in the measurements: the flush
+moved the same 460 KB PSRAM→PSRAM with an optimized `memcpy` in 34ms ≈ 27 MB/s, while the transpose
+now runs at ~16.5 MB/s. Real headroom was ~1.6×, not the 1.6× *on top of* tiling that was assumed.
+
+*Step 9 — `num_fbs = 2`, transpose straight into the back framebuffer.* The panel now allocates two
+framebuffers. `rotate90_tiled` writes into the back one and hands that pointer to
+`esp_lcd_panel_draw_bitmap`, which recognises its own framebuffer and swaps `cur_fb_index` instead
+of copying (`esp_lcd_panel_rgb.c:614-624`). Flush **34.0 → 0.02ms** — deleted, not reduced.
+
+Rotation *also* dropped **55.7 → 47.4ms**: the flush memcpy had been competing with the transpose
+for PSRAM bandwidth and cache. That interaction reversed a step-9b decision — a 64-pixel tile beat
+32 by 3.4ms while the flush existed, and by 0.5ms (noise) once it was gone, so the tile went back to
+32 and kept 6 KB of SRAM.
+
+- **Frame 149.6 → 94–101ms** depending on HUD content; rotation is now 50% of what remains
+- **PSRAM −460 KB net**: +460 KB for the second framebuffer, −920 KB from no longer allocating the
+  two rotation staging buffers at all
+- **RAM +2,064 bytes** (the scratch tile), **Flash +872 bytes**
+- `full_refresh = 1` is now load-bearing for the zero-copy path — a partial flush area would leave
+  the rest of the alternate framebuffer holding a two-frames-old image. It moves in lockstep with
+  the rotation mode in both init and the runtime `rot` switch, since LVGL rejects `full_refresh`
+  together with `sw_rotate`
+- Added an `on_frame_buf_complete` guard before the transpose: the driver latches
+  `bb_fb_index = cur_fb_index` only at a frame boundary, so between a swap and that latch the back
+  buffer is still being scanned out. At 94ms/frame vs a 26.6ms panel period it never blocks — it is
+  there so step 10 (higher PCLK) cannot silently reintroduce tearing
+
 **Radar frame 238ms → 149ms: dropped the canvas, then found two hidden full-screen repaints**
 
 Two changes, one of which was found only because the other forced better instrumentation.
