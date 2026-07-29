@@ -473,7 +473,7 @@ rotation with `full_refresh` at all (`lv_refr.c:1181`), which is why `full_refre
 These are `sdkconfig.defaults` edits. No application code changes. Do these first and re-measure
 before touching architecture, because they change the baseline everything else is judged against.
 
-### 1.1 The CPU is running at 160 MHz, not 240 MHz ⭐ biggest single free win
+### 1.1 The CPU is running at 160 MHz, not 240 MHz ⭐ biggest single free win — APPLIED 2026-07-28, unverified on hardware
 
 `sdkconfig.defaults` never sets the CPU frequency, so ESP-IDF's default applies. Verified in the
 generated config:
@@ -503,6 +503,89 @@ does not currently run there.
   will be less than 1.5× end to end, but it is free and it also shortens the bounce-buffer ISR.
 - **Cost**: higher power draw — measure battery life impact, this is a handheld device.
 - **Risk**: low. Watch for PSRAM timing at 240 MHz/80 MHz octal; it is a standard, well-tested combo.
+
+#### Applied — 2026-07-28
+
+`CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y` is now in `sdkconfig.defaults`. `CONFIG_PM_ENABLE` is off, so
+this is a fixed frequency rather than a DFS ceiling.
+
+**Setting it in `sdkconfig.defaults` was not sufficient.** PlatformIO does not regenerate
+`sdkconfig.<env>` when `sdkconfig.defaults` changes. The first build succeeded, reported success, and
+still produced a 160 MHz binary. The fix is to delete the generated `sdkconfig.cc-radar` and rebuild.
+Always diff the regenerated file against the old one — here it also revealed three settings that had
+drifted, including `CONFIG_BT_NIMBLE_MEM_ALLOC_MODE_EXTERNAL`, which existed *only* in the generated
+file and would have silently reverted NimBLE allocations into internal SRAM. It is now pinned in
+`sdkconfig.defaults`.
+
+This failure is the same shape as the original bug: a configuration value that nothing ever printed.
+Boot now logs the measured frequency via `getCpuFrequencyMhz()` (`esp_clk_tree`), so a stale
+sdkconfig announces itself on the first line of the log.
+
+#### Measured on hardware — 2026-07-28
+
+Boot reports `[BOOT] CPU: 240 MHz`. All four tasks healthy, `I2C Requests: total=0 failed=0`, no
+display artifacts, no PSRAM instability. `perf` at 100m zoom, no GPS fix:
+
+| Stage | 160 MHz | 240 MHz | ratio | predicted |
+|---|---|---|---|---|
+| tiled rotate | 47.4 | **38.3** | 1.24× | "barely moves" ❌ |
+| radar bg fill | 21.5 | **20.5** | 1.05× | "barely moves" ✅ |
+| LVGL non-radar draw | 23.2 | **17.0** | 1.36× | ~1.5× ≈ ✅ |
+| radar paint | 9.4 | **9.3** | 1.01× | ~1.5× ❌ |
+| flush | 0.02 | 0.045 | — | — |
+| **FRAME** | **101.5** | **85.2** | **1.19×** | ~80ms ≈ ✅ |
+
+*(Baseline is the per-stage sum, 47.4+21.5+23.2+9.4 = 101.5ms. Note the pre-existing doc
+inconsistency: `CLAUDE.md` presents that breakdown as "where the 94ms sits", but it sums to 101.5 —
+the 94 and the breakdown came from different captures. 101.5 is the like-for-like comparison; against
+a best-case 94ms frame the gain is 1.10×.)*
+
+**Two predictions were wrong, and they were wrong in opposite directions:**
+
+1. **Rotate was not at the memory ceiling.** It was predicted to barely move and instead delivered the
+   single largest absolute gain, 9.1ms. So ~24% of the transpose was CPU work — loop overhead and the
+   scatter into the SRAM tile — not PSRAM bandwidth.
+2. **Radar paint is not CPU-bound.** Predicted 1.5×, delivered 1.01× — it did not move at all.
+   Emitting geometry into LVGL's draw context is bound by writing the draw buffer, not by computing
+   the geometry. Optimizing the drawing *math* would therefore buy nothing.
+
+The correction that matters for future work: **"full-screen PSRAM write" is not one category.** Bg
+fill (1.05×) really is at the bus ceiling; rotate (1.24×) was not. The claim in `CLAUDE.md` that both
+"sit near the memory ceiling" was true of only one of them — and it was, once again, an
+un-instrumented grouping standing in for a measurement (see "The residual trap" below).
+
+**Measurement still owed** — the numbers above were taken **indoors with no GPS fix**, which is the
+light case: only the compass drives renders and the deadband suppresses stationary noise (71 flushes
+since boot, nowhere near 10 Hz). Still untested:
+
+1. ~~**Frame time and input latency with a GPS fix.**~~ **Verified outdoors 2026-07-29 with satellites
+   locked: rotation and button both good. No regression.** The mechanism predicted was real — with a
+   fix, `RADAR_REFRESH` is queued every GPS sample, so the UI Task renders nearly every loop and polls
+   input once per ~90ms rather than once per 26.6ms vsync — but the *consequence* did not follow.
+   ~90ms is comfortably shorter than a real button press (132–186ms in the boot log), so presses are
+   never missed and the latency stays below the perceptual threshold for a discrete action.
+
+   **The error worth keeping:** the prediction conflated *poll interval* with *perceived latency*.
+   Those coincide for continuous input like a drag, and diverge for a discrete press, where the only
+   thing that matters is whether the poll interval is shorter than the event. Don't reason about input
+   "feel" from the poll rate alone — ask how long the event being sampled lasts.
+
+   **Worth revisiting later, not now:** dropping the GPS-driven `RADAR_REFRESH` to 5 Hz while leaving
+   the compass at 10 Hz would halve the render rate for little visible cost, since translation matters
+   less than rotation. Nothing calls for it today — reconsider it if PCLK goes up or a heavy waypoint
+   load makes Core 1 the constraint again.
+2. **Waypoint load.** The capture above had no GPX loaded. Re-run `perf` with a realistic waypoint
+   count; `waypoints` was 2.4ms of paint here.
+3. **Battery life.** This is a handheld and the whole cost of the change is power. Serial requires
+   USB, and USB also charges the battery, so a live measurement is impossible (see
+   `memory/hardware_constraints.md`). Measure it off-line instead: charge to full, disconnect USB,
+   leave the device running a fixed scenario (screen on, GPS fix, 100m zoom, beacon off), and record
+   wall-clock time to a fixed battery percentage using the on-device battery readout. Run the same
+   scenario on a 160 MHz build for the comparison. Expect the render — not the CPU clock — to
+   dominate, since the radar is redrawing continuously either way.
+4. ~~**PSRAM stability.**~~ Checked 2026-07-28: no display artifacts, `I2C Requests: total=0
+   failed=0`, no `Wire.cpp requestFrom Error -1`, all four tasks healthy over a 50s run. Worth
+   re-checking over a long session, but 240 MHz CPU / 80 MHz octal PSRAM looks clean here.
 
 ### 1.2 Compiler is optimizing for size, not speed
 
@@ -898,13 +981,13 @@ This matters more than it looks: several of the findings above are cases where a
 
 | Doc claim | Reality |
 |---|---|
-| `CLAUDE.md`: "MCU: ESP32-S3 @ 240MHz" | Builds at **160 MHz** (§1.1) |
+| ~~`CLAUDE.md`: "MCU: ESP32-S3 @ 240MHz"~~ | ~~Builds at **160 MHz**~~ — resolved 2026-07-28, now genuinely builds at 240 (§1.1) |
 | `CLAUDE.md`: "framework = arduino", `[env:cc-moat-port]` | `platformio.ini` is `framework = espidf`, `[env:cc-radar]` |
 | `CLAUDE.md`: "ESP-IDF version doesn't support bounce buffer" | Bounce buffer is configured and active (§2.4) |
 | `CLAUDE.md`: "40-line bounce buffer", "BUFFER_LINES 40/50/120/160" | `BUFFER_LINES = 480` |
 | `CLAUDE.md`: "Use full refresh for stability / `full_refresh = 1`" | Code sets `full_refresh = 0` |
 | `CLAUDE.md`: partitions "3MB app + 10MB FFat" | Build uses `partitions_ota.csv` — 2×2 MB OTA + 11.7 MB FFat |
-| `CLAUDE.md` / memory: compass "~1 Hz" | Read gate is 20 ms, effective ~5 Hz |
+| ~~`CLAUDE.md` / memory: compass "~1 Hz"~~ | ~~Read gate is 20 ms, effective ~5 Hz~~ — resolved 2026-07-28: `SYSTEM_UPDATE_MS = 100`, so compass and GPS are both 10 Hz |
 | `CLAUDE.md`: GPS heading fusion, "NMEA RMC sentence fields 7-8" | Compass is the sole heading source; GPS is UBX |
 | Docs: "<2ms for 50 waypoints @ 240MHz" | Waypoint drawing is ~5 ms; the *full frame* is ~149 ms @ 160 MHz |
 

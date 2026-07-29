@@ -11,6 +11,83 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Performance
 
+**CPU restored to 240MHz, and sensors raised to 10Hz now that the render outruns them**
+
+Two changes that stop the render being faster than the things feeding it. **Frame 101.5 → 85.2ms
+(1.19×), verified on hardware** — boot reports `[BOOT] CPU: 240 MHz`, all four tasks healthy, zero
+I2C failures, no display artifacts.
+
+| Stage | 160 MHz | 240 MHz | ratio |
+|---|---|---|---|
+| tiled rotate | 47.4 | 38.3 | 1.24× |
+| radar bg fill | 21.5 | 20.5 | 1.05× |
+| LVGL non-radar draw | 23.2 | 17.0 | 1.36× |
+| radar paint | 9.4 | 9.3 | 1.01× |
+| **FRAME** | **101.5** | **85.2** | **1.19×** |
+
+Two predictions in the backlog were wrong in opposite directions, and both are worth carrying
+forward: **rotate was not at the memory ceiling** (predicted "barely moves", delivered the largest
+absolute gain — ~24% of the transpose was CPU work, not bandwidth), and **radar paint is not
+CPU-bound** (predicted 1.5×, delivered 1.01× — it is bound by writing the draw buffer, not by
+computing geometry, so optimizing the drawing math would buy nothing). "Full-screen PSRAM write"
+turned out not to be one category.
+
+*CPU 160 → 240MHz.* The binary had been running at 160MHz since the ESP-IDF migration: vanilla IDF
+defaults to 160 and the Arduino core used to set 240 on our behalf, so the clock was lost silently
+when the framework changed. One line in `sdkconfig.defaults`
+(`CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y`). `CONFIG_PM_ENABLE` is off, so this is a fixed frequency,
+not a DFS ceiling. Expect ~1.5× on CPU-bound work (BLE host, GPS UBX parsing, I2C, compass read,
+LVGL draw and radar paint) and much less on the two full-screen PSRAM writes in the render, which
+are bus-bound — a whole-frame estimate lands nearer ~80ms than 94/1.5. Cost is power draw; see the
+battery measurement note in the backlog before treating this as settled.
+
+Boot now prints the *measured* CPU frequency (`getCpuFrequencyMhz()` via `esp_clk_tree`), because
+the only reason a 1.5× regression survived for months is that nothing ever printed it.
+
+*Sensor rate 5 → 10Hz.* `SYSTEM_UPDATE_MS` 200 → 100. The System Task tick is the sensor clock: the
+compass sub-timer (20ms gate) and the GPS gate (`GPS_UPDATE_INTERVAL_MS = 100`) both fire every
+tick, so this doubles both. 10Hz is also the BH-880's native NAV-PVT rate, so GPS samples stop being
+discarded, and `HEADING_SMOOTHING = 0.3f` was already tuned for a 10Hz compass it had never actually
+received. Safe only because render requests are coalesced to at most one per UI Task loop.
+
+- **Heading render deadband 1.5° → 0.5°** (`HEADING_RENDER_DEADBAND_DEG`). At 10Hz with EMA α=0.3 a
+  single-sample noise excursion smooths to ~0.6°, so 0.5° still sits at the noise floor while a
+  genuine 5°/s turn now redraws — under 1.5° nothing slower than 15°/s did. The threshold is close
+  to vestigial as a load control either way: with a GPS fix, `RADAR_REFRESH` is queued every sample
+  regardless, so it only gates anything indoors
+- **Battery sampling explicitly pinned to 5Hz** in `systemTask`. `battery::update()` busy-waits
+  ~1.5ms (15 ADC samples × 100µs) with no internal rate limit and was the only per-tick cost in that
+  loop not already time-gated; everything downstream of it is 30s-gated, so doubling it bought
+  nothing
+- **The predicted input regression did not happen.** Verified outdoors with satellites locked:
+  rotation and button both good. The concern was that with a fix, `RADAR_REFRESH` is queued every GPS
+  sample, so the UI Task renders nearly every loop and polls input once per ~90ms instead of once per
+  26.6ms vsync. That is still true — but ~90ms is comfortably shorter than a real button press (the
+  boot log shows 132–186ms press durations), so nothing is missed and the latency stays under the
+  perceptual threshold for a discrete action. The prediction conflated *poll interval* with *perceived
+  latency*; for discrete input they are not the same thing.
+- **Noted for a possible future revisit** (not implemented, not a user-facing setting): if Core 1 ever
+  needs relief — after raising PCLK, or under a much heavier waypoint load — dropping the *GPS-driven*
+  `RADAR_REFRESH` to 5Hz while leaving the compass at 10Hz would halve the render rate cheaply, since
+  translation matters less than rotation. The compass rate is what makes the rotation feel right and
+  should not be the thing lowered
+
+**Fixed: committed `sdkconfig.cc-radar` had drifted from `sdkconfig.defaults`**
+
+PlatformIO does not regenerate `sdkconfig.<env>` when `sdkconfig.defaults` changes — the first
+240MHz build succeeded and still ran at 160MHz. Deleting the generated file and rebuilding revealed
+three further settings that `sdkconfig.defaults` asked for and never got:
+
+- `CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE` was **off** despite being requested — OTA rollback
+  protection was configured but not armed. Now on; safe because `main.cpp:395` calls
+  `esp_ota_mark_app_valid_cancel_rollback()`
+- `CONFIG_PARTITION_TABLE_CUSTOM_FILENAME` still named the pre-OTA `partitions.csv`. Cosmetic only —
+  PlatformIO's `board_build.partitions` governs the real table, and the built `partitions.bin` was
+  verified to be the ota_0/ota_1 layout both before and after
+- `CONFIG_BT_NIMBLE_MEM_ALLOC_MODE_EXTERNAL` existed **only** in the generated file, so regenerating
+  reverted NimBLE allocations to IDF's INTERNAL default and would have pushed the beacon stack into
+  the scarce internal SRAM. Now pinned in `sdkconfig.defaults`
+
 **Radar frame 149ms → 94ms (~6.7 → ~10 fps): transpose tuning, then a zero-copy flush**
 
 Steps 9b and 9 from the optimization backlog. Verified on hardware — no tearing, taps intact.

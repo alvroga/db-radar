@@ -767,11 +767,48 @@ the flush no longer copies anything.
 `refr_ms`, not sequential with it. **Frame = `label_us + refr_ms`** — adding `paint` double-counts.
 Read via the `perf` serial command or the DEV tab.
 
-**Where the 94ms sits**: rotate 47.4 + non-radar LVGL draw 23.2 + radar bg fill 21.5 + radar paint
-9.4. The two full-screen 460KB PSRAM writes (rotate, bg fill) are 69ms of that and sit near the
-memory ceiling — a plain optimized `memcpy` over the same bytes measures ~27 MB/s. Further large wins
-need higher clocks (CPU is at 160MHz, not the 240MHz quoted above; PCLK at 10MHz), not more pipeline
-rewriting. **The render is now roughly 2× faster than the 5Hz sensor rate feeding it.**
+**Where the 85ms sits** (measured at 240MHz, 2026-07-28; 160MHz values in parens): rotate 38.3
+(47.4) + non-radar LVGL draw 17.0 (23.2) + radar bg fill 20.5 (21.5) + radar paint 9.3 (9.4).
+
+**"Full-screen PSRAM write" is not one category** — the 240MHz measurement split the two apart:
+- **radar bg fill scaled 1.05×** — genuinely at the bus ceiling, as a plain optimized `memcpy` over
+  the same bytes (~27 MB/s) predicted.
+- **rotate scaled 1.24×**, the largest absolute gain of any stage. ~24% of the transpose was CPU
+  work — loop overhead and the scatter into the SRAM tile — not bandwidth. An earlier version of this
+  section claimed both writes "sit near the memory ceiling"; that was true of only one of them.
+- **radar paint scaled 1.01×** — it did *not* move. Emitting geometry into LVGL's draw context is
+  bound by writing the draw buffer, not by computing the geometry, so optimizing the drawing math
+  would buy nothing.
+
+**Clocks** (all measurements above were taken at 160MHz):
+- **CPU is now 240MHz**, set by `CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240` in `sdkconfig.defaults`. It had
+  been at 160 since the ESP-IDF migration — vanilla IDF's default, where the Arduino core used to set
+  240 for us. Verified on hardware: **frame 101.5 → 85.2ms (1.19×)**. Boot prints the measured value;
+  if it ever says 160 again, the generated `sdkconfig.cc-radar` is stale (see below).
+- **PCLK is still 10MHz.** Raising it is the item where the `on_frame_buf_complete` guard stops being
+  theoretical: it now has ~3.2× of margin at 85ms/frame against a 26.6ms panel period, and a higher
+  PCLK shortens that period.
+
+**`sdkconfig.defaults` is not enough on its own.** PlatformIO does *not* regenerate
+`sdkconfig.cc-radar` when `sdkconfig.defaults` changes — a build will succeed and silently keep the
+old setting. Delete `sdkconfig.cc-radar`, rebuild, and diff against the previous copy: the committed
+file had accumulated three settings that diverged from the defaults, one of which
+(`CONFIG_BT_NIMBLE_MEM_ALLOC_MODE_EXTERNAL`) existed *only* in the generated file and would have
+silently reverted.
+
+**Sensor rate**: `SYSTEM_UPDATE_MS = 100` is the sensor clock — it drives *both* the compass sub-timer
+(20ms gate) and the GPS gate (`GPS_UPDATE_INTERVAL_MS = 100`), so compass and GPS both sample at 10Hz.
+Safe only because render requests are coalesced to at most one per UI Task loop.
+
+With a GPS fix, `RADAR_REFRESH` is queued every sample, so the UI Task renders nearly every loop and
+polls button/touch once per ~90ms rather than once per 26.6ms vsync. **Verified fine outdoors** — 90ms
+is shorter than a real button press (132–186ms), so nothing is missed.
+
+**Possible future revisit**: if Core 1 ever needs relief — a higher PCLK, or a much heavier waypoint
+load — dropping the *GPS-driven* `RADAR_REFRESH` to 5Hz while leaving the compass at 10Hz would halve
+the render rate for little visible cost, since translation matters less than rotation. Not needed
+today. If it is ever done, lower the GPS refresh and **not** the compass rate — the compass rate is
+what makes the rotation feel right.
 
 **Methodology note**: three separate estimates in the backlog were wrong because a *residual*
 (`total − known`) was named after a hypothesis. Never attribute an un-instrumented remainder; bracket

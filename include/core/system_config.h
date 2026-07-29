@@ -195,10 +195,11 @@ namespace timing {
     // how often we sample it. At 1000ms it discarded 9 of every 10 real fixes and the
     // radar translated in 1Hz jumps.
     //
-    // 100ms means "every System Task tick" (SYSTEM_UPDATE_MS = 200) → 5Hz, matching the
-    // compass rate so translation and rotation update together. Raising this rate is only
-    // safe because render requests are coalesced (see requestRadarRender/flushRadarRender
-    // in task_manager.cpp) — otherwise 5Hz GPS + 5Hz compass would multiply renders.
+    // 100ms means "every System Task tick". SYSTEM_UPDATE_MS is now 100, so this is
+    // 10Hz — the module's native NAV-PVT rate, and the same rate as the compass, so
+    // translation and rotation update together. Raising this rate is only safe because
+    // render requests are coalesced (see requestRadarRender/flushRadarRender in
+    // task_manager.cpp) — otherwise 10Hz GPS + 10Hz compass would multiply renders.
     //
     // Also relieves the 2048-byte UART RX buffer, which held ~1000 bytes per 1s cycle.
     constexpr uint32_t GPS_UPDATE_INTERVAL_MS = 100;     // Read every System Task tick (5Hz)

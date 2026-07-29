@@ -32,6 +32,16 @@ CONFIG_FREERTOS_HZ=1000
 # FreeRTOS multicore (dual-core ESP32-S3)
 CONFIG_FREERTOS_UNICORE=n
 
+# CPU frequency — 240MHz (vanilla IDF defaults to 160MHz; the Arduino core used to
+# set 240 for us, so the ESP-IDF migration silently downclocked the whole binary).
+# Global ~1.5x on both cores: BLE stack, GPS UBX parsing, I2C transactions, compass
+# read, and the CPU-bound parts of the render. The two full-screen PSRAM writes in
+# the render path are bus-bound, not CPU-bound, so they gain much less than 1.5x.
+# Cost is power draw — see docs/performance_optimization_backlog.md for the
+# battery-life measurement this needs.
+# CONFIG_PM_ENABLE is off, so this is a fixed frequency, not a DFS ceiling.
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
+
 # I2C master new API (ESP-IDF 5.x)
 CONFIG_I2C_ENABLE_DEBUG_LOG=n
 
@@ -60,6 +70,13 @@ CONFIG_ESP_WIFI_DYNAMIC_TX_BUFFER_NUM=32
 CONFIG_BT_ENABLED=y
 CONFIG_BT_NIMBLE_ENABLED=y
 CONFIG_BT_CONTROLLER_ENABLED=y
+
+# NimBLE host allocations go to PSRAM, not internal SRAM. This was set in the
+# committed sdkconfig but never in sdkconfig.defaults, so it survived only as long
+# as nobody regenerated the file — pinned here now. Internal SRAM is the scarce
+# resource on this board (static RAM already ~60%); IDF's default for this option
+# is INTERNAL, which would move the beacon-proximity stack back into it.
+CONFIG_BT_NIMBLE_MEM_ALLOC_MODE_EXTERNAL=y
 
 # Custom partition table — OTA dual-slot layout
 CONFIG_PARTITION_TABLE_CUSTOM=y

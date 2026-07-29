@@ -424,9 +424,20 @@ static void systemTask(void* parameter) {
         // Get device state (needed by multiple sections below)
         const device_manager::DeviceState& dev_state = device_manager::getDeviceState();
 
-        // Battery monitoring - update voltage history and periodic monitoring
-        battery::update();                  // Collect voltage samples for trend analysis
-        battery::updatePeriodicMonitoring();  // Print status if monitoring enabled
+        // Battery monitoring - update voltage history and periodic monitoring.
+        //
+        // Explicitly gated to 200ms so it stays at 5Hz after SYSTEM_UPDATE_MS dropped
+        // to 100ms. battery::update() -> getVoltage() busy-waits ~1.5ms (15 ADC samples
+        // x delayMicroseconds(100)) with no internal rate limit, and it is the only
+        // per-tick cost in this loop that isn't already time-gated. Nothing downstream
+        // wants a faster sample: the trend history is 30s-gated and the UI queue push
+        // is 30s-gated. Doubling it would buy nothing and just spend Core 0.
+        static uint32_t last_battery_sample = 0;
+        if (now - last_battery_sample >= 200) {
+            last_battery_sample = now;
+            battery::update();                  // Collect voltage samples for trend analysis
+            battery::updatePeriodicMonitoring();  // Print status if monitoring enabled
+        }
 
         // Auto-sleep: check if inactivity timeout has elapsed
         standby_manager::checkInactivityTimeout();
@@ -530,8 +541,8 @@ static void processI2CRequest(I2CRequest& request) {
 // Radar render coalescing.
 //
 // Several queued events want the radar redrawn (GPS fix, compass heading, zoom).
-// They arrive at different rates — compass at 5 Hz (System Task tick), GPS at 1 Hz
-// (GPS_UPDATE_INTERVAL_MS gate) — so a batch drained in one UI Task loop may contain
+// They arrive at different rates — compass and GPS both at 10 Hz (System Task tick),
+// zoom on demand — so a batch drained in one UI Task loop may contain
 // anywhere from one to four of them.
 //
 // Rather than render inside each case (N renders per batch) or suppress some cases
@@ -699,12 +710,28 @@ static void processUIUpdate(const UIUpdate& update) {
             ui.current_heading = navigation::smoothHeading(
                 ui.current_heading, update.compass_heading, navigation::HEADING_SMOOTHING);
 
-            // Skip redraw if smoothed heading barely moved (< 1.5°).
-            // Stationary compass noise produces sub-degree changes every second —
-            // skipping those cuts Core 1 render load and reduces button poll gaps (FT-01).
+            // Render deadband on the *smoothed* heading. Note ui.current_heading is
+            // already updated above, so a suppressed render never stales the heading —
+            // the next render from any source paints the current value.
+            //
+            // 1.5° -> 0.5° now that the compass runs at 10Hz and a frame costs ~94ms
+            // instead of ~499ms. The arithmetic that picks this number:
+            //   - raw QMC5883L noise standing still is ~±2°, and HEADING_SMOOTHING
+            //     (EMA a=0.3) attenuates a single-sample excursion to ~0.6° of it,
+            //     so 0.5° still sits at the noise floor and the radar holds still.
+            //   - a genuine turn at 5°/s is 0.5°/sample at 10Hz and now passes; under
+            //     the old 1.5° threshold nothing slower than 15°/s produced a redraw.
+            // Raise it back toward 1.0° if the radar visibly twitches while stationary.
+            //
+            // This threshold is close to vestigial as a load control: whenever GPS has
+            // a fix it queues RADAR_REFRESH every sample (10Hz), so renders happen at
+            // the tick rate regardless of what the compass does. It only actually gates
+            // anything with no fix — indoors, which is exactly where compass noise is
+            // the only thing moving.
+            constexpr float HEADING_RENDER_DEADBAND_DEG = 0.5f;
             float delta = fabsf(ui.current_heading - prev_heading);
             if (delta > 180.0f) delta = 360.0f - delta;
-            if (delta < 1.5f) break;
+            if (delta < HEADING_RENDER_DEADBAND_DEG) break;
 
             requestRadarRender();
             break;
@@ -1139,7 +1166,7 @@ void printTaskStatus() {
 }
 
 /**
- * @brief GPS/compass/battery update — called every 1s by System Task
+ * @brief GPS/compass/battery update — called every System Task tick (10Hz)
  */
 static void updateStatusLabels() {
     // Radar project: GPS reading and serial output
@@ -1357,7 +1384,7 @@ static void updateStatusLabels() {
     }
 
     // =========================================================================
-    // COMPASS UPDATE - Read QMC5883L magnetometer (~1Hz via System Task)
+    // COMPASS UPDATE - Read QMC5883L magnetometer (10Hz via System Task tick)
     // NOTE: Must stay in System Task, NOT I2C Task — see docs/compass_i2c_constraint.md
     //
     // WiFi AP isolation: compass reads are fully suspended while WiFi is enabled.

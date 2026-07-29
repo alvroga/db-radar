@@ -38,6 +38,9 @@ extern "C" void app_main() {
     Serial.printf("[T+%08lu] BOOT: Phase 1 - Serial initialized\n", millis());
 
     Serial.println("==== GPS Radar - FreeRTOS Task Architecture ====");
+    Serial.printf("[BOOT] CPU: %lu MHz  (expected 240 — a 160 here means "
+                  "CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240 did not reach sdkconfig)\n",
+                  (unsigned long)getCpuFrequencyMhz());
 
     // BOOT PHASE 2: Device manager (all hardware)
     Serial.printf("[T+%08lu] BOOT: Phase 2 - Initializing hardware...\n", millis());

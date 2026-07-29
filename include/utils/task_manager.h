@@ -42,7 +42,18 @@ struct TaskConfig {
     static constexpr uint32_t UI_UPDATE_MS = 10;       // 100 FPS max
     static constexpr uint32_t I2C_PROCESS_MS = 20;     // 50 Hz I2C processing
     static constexpr uint32_t NETWORK_UPDATE_MS = 200; // 5 Hz for sonar rhythm
-    static constexpr uint32_t SYSTEM_UPDATE_MS = 200;   // 5 Hz — System Task does more than compass; compass sub-timer handles actual read rate
+    // System Task tick. This is the sensor clock: the compass sub-timer (20ms gate)
+    // and the GPS gate (GPS_UPDATE_INTERVAL_MS = 100) both fire every tick, so this
+    // value *is* the compass and GPS sample rate.
+    //
+    // 200 -> 100 (5 Hz -> 10 Hz) once the render dropped to ~94ms/frame: the sensor
+    // had become the bottleneck, not the frame. 10 Hz also matches the BH-880's
+    // native NAV-PVT rate, so GPS samples stop being discarded.
+    //
+    // Everything else in systemTask() is independently time-gated (health 5s,
+    // memory 30s, SD 10s, battery 200ms, heartbeat 120s), so halving the tick does
+    // not double their work — see the battery gate in updateStatusLabels().
+    static constexpr uint32_t SYSTEM_UPDATE_MS = 100;   // 10 Hz — compass + GPS sample rate
 
     // Queue sizes
     static constexpr size_t I2C_QUEUE_SIZE = 16;       // I2C request queue
