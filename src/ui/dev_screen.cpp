@@ -59,33 +59,41 @@ void updatePerfStats() {
 
     const navigation::NavState& nav = navigation::getNavState();
 
-    uint32_t bg    = nav.bg_us;
     uint32_t grid  = nav.grid_us;
     uint32_t wpt   = nav.wpt_us;
     uint32_t deco  = nav.deco_us;
     uint32_t paint = nav.paint_us;
+    uint32_t rot   = nav.rot_us;
+    uint32_t flush = nav.flush_us;
+    uint32_t label = nav.label_us;
     uint32_t refr  = nav.refr_ms;
-    uint32_t other = (paint > bg + grid + wpt + deco) ? paint - (bg + grid + wpt + deco) : 0;
+    uint32_t other = (paint > grid + wpt + deco) ? paint - (grid + wpt + deco) : 0;
+
+    // The radar paints in a draw event, so PAINT is a component of REFRESH.
+    // FRAME is label + refresh — adding paint would count the geometry twice.
+    uint32_t frame_x10 = label / 100 + refr * 10;
 
     lv_label_set_text_fmt(perf_stats_label,
         "rotation  %s\n"
-        "fill_bg   %u.%u ms\n"
         "grid      %u.%u ms\n"
         "waypoints %u.%u ms\n"
         "tri+N+arc %u.%u ms\n"
         "other     %u.%u ms\n"
-        "PAINT     %u.%u ms\n"
+        "paint     %u.%u ms\n"
+        "rotate    %u.%u ms\n"
+        "flush     %u.%u ms\n"
         "REFRESH   %u ms\n"
         "FRAME     %u.%u ms",
         system_config::display::ROTATION_DEGREES == 0 ? "OFF" : "90 CW",
-        (unsigned)(bg / 1000),    (unsigned)((bg % 1000) / 100),
         (unsigned)(grid / 1000),  (unsigned)((grid % 1000) / 100),
         (unsigned)(wpt / 1000),   (unsigned)((wpt % 1000) / 100),
         (unsigned)(deco / 1000),  (unsigned)((deco % 1000) / 100),
         (unsigned)(other / 1000), (unsigned)((other % 1000) / 100),
         (unsigned)(paint / 1000), (unsigned)((paint % 1000) / 100),
+        (unsigned)(rot / 1000),   (unsigned)((rot % 1000) / 100),
+        (unsigned)(flush / 1000), (unsigned)((flush % 1000) / 100),
         (unsigned)refr,
-        (unsigned)(paint / 1000 + refr), (unsigned)((paint % 1000) / 100));
+        (unsigned)(frame_x10 / 10), (unsigned)(frame_x10 % 10));
 }
 
 void create() {

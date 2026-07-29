@@ -949,10 +949,20 @@ static void rotate90_tiled(const lv_color_t* __restrict src,
 // elapsed time and pixel count. This is the cost of blit + software rotation +
 // flush dispatch (i.e. everything AFTER the canvas has been painted), which is
 // the half of the frame we suspect software rotation dominates.
+// Per-refresh accumulators. flush_cb can fire several times for one refresh (one
+// per invalidated area), so these sum and the monitor callback — which LVGL calls
+// once at the end of a refresh — latches and clears them.
+static volatile uint32_t s_rot_acc   = 0;
+static volatile uint32_t s_flush_acc = 0;
+
 static void lvgl_monitor_cb(lv_disp_drv_t* drv, uint32_t time_ms, uint32_t px) {
     navigation::NavState& nav = navigation::getNavState();
-    nav.refr_ms = time_ms;
-    nav.refr_px = px;
+    nav.refr_ms  = time_ms;
+    nav.refr_px  = px;
+    nav.rot_us   = s_rot_acc;
+    nav.flush_us = s_flush_acc;
+    s_rot_acc    = 0;
+    s_flush_acc  = 0;
 }
 
 static void lvgl_flush_cb(lv_disp_drv_t* drv, const lv_area_t* area, lv_color_t* color_p) {
@@ -978,7 +988,8 @@ static void lvgl_flush_cb(lv_disp_drv_t* drv, const lv_area_t* area, lv_color_t*
 
         const int64_t t0 = esp_timer_get_time();
         rotate90_tiled(color_p, stage, w, h);
-        navigation::getNavState().rot_us = (uint32_t)(esp_timer_get_time() - t0);
+        const int64_t t1 = esp_timer_get_time();
+        s_rot_acc += (uint32_t)(t1 - t0);
 
         // Destination is the transposed rectangle: h wide, w tall.
         const int ver  = system_config::display::SCREEN_HEIGHT;
@@ -986,10 +997,12 @@ static void lvgl_flush_cb(lv_disp_drv_t* drv, const lv_area_t* area, lv_color_t*
         const int dy1  = ver - 1 - area->x2;
         esp_lcd_panel_draw_bitmap(g_device_state.panel_handle,
                                   dx1, dy1, dx1 + h, dy1 + w, stage);
+        s_flush_acc += (uint32_t)(esp_timer_get_time() - t1);
     } else {
-        navigation::getNavState().rot_us = 0;
         // Start DMA transfer (asynchronous - callback will fire when done)
+        const int64_t t1 = esp_timer_get_time();
         esp_lcd_panel_draw_bitmap(g_device_state.panel_handle, area->x1, area->y1, area->x2+1, area->y2+1, color_p);
+        s_flush_acc += (uint32_t)(esp_timer_get_time() - t1);
     }
 
     // Increment FPS counter for navigation module

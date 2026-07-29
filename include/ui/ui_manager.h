@@ -110,7 +110,7 @@ struct UIState {
     lv_obj_t* btn_back = nullptr;
 
     // Radar elements
-    lv_obj_t* radar_canvas = nullptr;
+    lv_obj_t* radar_obj = nullptr;   // Radar painting surface (draws in LV_EVENT_DRAW_MAIN)
     lv_obj_t* btn_add_waypoint = nullptr;
     lv_obj_t* zoom_label = nullptr;        // Zoom level indicator (always visible)
     lv_obj_t* gps_status_label = nullptr;  // GPS status indicator (sats)

@@ -129,12 +129,12 @@ void goToRadarScreen() {
     // Now safe to delete the waypoint screen (radar is already active)
     waypoint_screen::close();
 
-    // Refresh canvas
-    if (ui.radar_canvas && lv_obj_is_valid(ui.radar_canvas)) {
-        Serial.println("[NAVIGATION] Radar canvas valid - updating display");
+    // Refresh radar
+    if (ui.radar_obj && lv_obj_is_valid(ui.radar_obj)) {
+        Serial.println("[NAVIGATION] Radar surface valid - updating display");
         updateRadarDisplay();
     } else {
-        Serial.println("[NAVIGATION] WARNING: Radar canvas invalid - skipping display update");
+        Serial.println("[NAVIGATION] WARNING: Radar surface invalid - skipping display update");
     }
 }
 
@@ -268,8 +268,8 @@ void latLonToScreen(double lat, double lon, int& x, int& y, int screen_size) {
     }
 }
 
-void drawRadarGrid(lv_obj_t* canvas, int screen_size, int grid_spacing_pixels) {
-    if (!canvas) return;
+static void drawRadarGrid(lv_draw_ctx_t* ctx, int screen_size, int grid_spacing_pixels) {
+    if (!ctx) return;
 
     lv_draw_line_dsc_t line_dsc;
     lv_draw_line_dsc_init(&line_dsc);
@@ -287,7 +287,7 @@ void drawRadarGrid(lv_obj_t* canvas, int screen_size, int grid_spacing_pixels) {
         points[0].y = 0;
         points[1].x = x;
         points[1].y = screen_size - 1;
-        lv_canvas_draw_line(canvas, points, 2, &line_dsc);
+        lv_draw_line(ctx, &line_dsc, &points[0], &points[1]);
     }
 
     // Always draw right edge line
@@ -297,7 +297,7 @@ void drawRadarGrid(lv_obj_t* canvas, int screen_size, int grid_spacing_pixels) {
         points[0].y = 0;
         points[1].x = screen_size - 1;
         points[1].y = screen_size - 1;
-        lv_canvas_draw_line(canvas, points, 2, &line_dsc);
+        lv_draw_line(ctx, &line_dsc, &points[0], &points[1]);
     }
 
     // Draw horizontal lines from y=0 to y=screen_size-1
@@ -307,7 +307,7 @@ void drawRadarGrid(lv_obj_t* canvas, int screen_size, int grid_spacing_pixels) {
         points[0].y = y;
         points[1].x = screen_size - 1;
         points[1].y = y;
-        lv_canvas_draw_line(canvas, points, 2, &line_dsc);
+        lv_draw_line(ctx, &line_dsc, &points[0], &points[1]);
     }
 
     // Always draw bottom edge line
@@ -317,12 +317,12 @@ void drawRadarGrid(lv_obj_t* canvas, int screen_size, int grid_spacing_pixels) {
         points[0].y = screen_size - 1;
         points[1].x = screen_size - 1;
         points[1].y = screen_size - 1;
-        lv_canvas_draw_line(canvas, points, 2, &line_dsc);
+        lv_draw_line(ctx, &line_dsc, &points[0], &points[1]);
     }
 }
 
-void drawCenterTriangle(lv_obj_t* canvas, int screen_size) {
-    if (!canvas) return;
+static void drawCenterTriangle(lv_draw_ctx_t* ctx, int screen_size) {
+    if (!ctx) return;
 
     // Get current color scheme
     const ColorScheme& colors = getColorScheme();
@@ -352,11 +352,11 @@ void drawCenterTriangle(lv_obj_t* canvas, int screen_size) {
     tri_dsc.bg_color = lv_color_hex(colors.center_triangle);
     tri_dsc.bg_opa = LV_OPA_COVER;
 
-    lv_canvas_draw_polygon(canvas, points, 3, &tri_dsc);
+    lv_draw_polygon(ctx, &tri_dsc, points, 3);
 }
 
-void drawNorthIndicator(lv_obj_t* canvas, int screen_size) {
-    if (!canvas) return;
+static void drawNorthIndicator(lv_draw_ctx_t* ctx, int screen_size) {
+    if (!ctx) return;
 
     ui_manager::UIState& ui = ui_manager::getUIState();
 
@@ -387,7 +387,8 @@ void drawNorthIndicator(lv_obj_t* canvas, int screen_size) {
     circle_dsc.color = lv_color_hex(colors.north_indicator);
     circle_dsc.width = 30;  // Thick arc to create filled circle effect
     circle_dsc.opa = LV_OPA_COVER;
-    lv_canvas_draw_arc(canvas, north_x, north_y, 15, 0, 360, &circle_dsc);
+    const lv_point_t north_center = { (lv_coord_t)north_x, (lv_coord_t)north_y };
+    lv_draw_arc(ctx, &circle_dsc, &north_center, 15, 0, 360);
 
     // Draw "N" text (white in normal mode, white/yellow in daylight for contrast)
     lv_draw_label_dsc_t label_dsc;
@@ -395,8 +396,12 @@ void drawNorthIndicator(lv_obj_t* canvas, int screen_size) {
     label_dsc.color = lv_color_white();  // White "N" visible on red/dark red background
     label_dsc.font = &iosevka_16;
 
-    // Center the "N" text (approximate offset for single character)
-    lv_canvas_draw_text(canvas, north_x - 5, north_y - 7, 20, &label_dsc, "N");
+    // Center the "N" text (approximate offset for single character).
+    // Bottom edge runs to the screen edge, matching what lv_canvas_draw_text did
+    // (it set y2 to the canvas height, i.e. unbounded downward).
+    const lv_area_t n_area = { (lv_coord_t)(north_x - 5), (lv_coord_t)(north_y - 7),
+                               (lv_coord_t)(north_x - 5 + 20 - 1), (lv_coord_t)(screen_size - 1) };
+    lv_draw_label(ctx, &label_dsc, &n_area, "N", NULL);
 }
 
 /**
@@ -412,8 +417,8 @@ void drawNorthIndicator(lv_obj_t* canvas, int screen_size) {
  *
  * Capped at 355° to avoid LVGL drawing nothing when start == end at 360°.
  */
-static void drawBeaconProximityGauge(lv_obj_t* canvas, int screen_size) {
-    if (!canvas) return;
+static void drawBeaconProximityGauge(lv_draw_ctx_t* ctx, int screen_size) {
+    if (!ctx) return;
 
     const int cx = screen_size / 2;
     const int cy = screen_size / 2;
@@ -436,7 +441,8 @@ static void drawBeaconProximityGauge(lv_obj_t* canvas, int screen_size) {
             fill_dsc.bg_opa       = LV_OPA_COVER;
             fill_dsc.radius       = LV_RADIUS_CIRCLE;
             fill_dsc.border_width = 0;
-            lv_canvas_draw_rect(canvas, 0, 0, screen_size, screen_size, &fill_dsc);
+            const lv_area_t full_area = { 0, 0, (lv_coord_t)(screen_size - 1), (lv_coord_t)(screen_size - 1) };
+            lv_draw_rect(ctx, &fill_dsc, &full_area);
 
             // Orange ball at center
             const int ball_r = 60;
@@ -446,8 +452,9 @@ static void drawBeaconProximityGauge(lv_obj_t* canvas, int screen_size) {
             ball_dsc.bg_opa       = LV_OPA_COVER;
             ball_dsc.radius       = LV_RADIUS_CIRCLE;
             ball_dsc.border_width = 0;
-            lv_canvas_draw_rect(canvas, cx - ball_r, cy - ball_r,
-                                ball_r * 2, ball_r * 2, &ball_dsc);
+            const lv_area_t ball_area = { (lv_coord_t)(cx - ball_r), (lv_coord_t)(cy - ball_r),
+                                          (lv_coord_t)(cx + ball_r - 1), (lv_coord_t)(cy + ball_r - 1) };
+            lv_draw_rect(ctx, &ball_dsc, &ball_area);
 
             // Filled star: 5 arm triangles + center pentagon, all convex (safe for LVGL)
             const float STAR_OUTER = 22.0f;
@@ -469,10 +476,10 @@ static void drawBeaconProximityGauge(lv_obj_t* canvas, int screen_size) {
             // 5 arm triangles (each convex: tip + two adjacent inner points)
             for (int i = 0; i < 5; i++) {
                 lv_point_t arm[3] = { s_outer[i], s_inner[(i + 4) % 5], s_inner[i] };
-                lv_canvas_draw_polygon(canvas, arm, 3, &star_dsc);
+                lv_draw_polygon(ctx, &star_dsc, arm, 3);
             }
             // Center pentagon (convex)
-            lv_canvas_draw_polygon(canvas, s_inner, 5, &star_dsc);
+            lv_draw_polygon(ctx, &star_dsc, s_inner, 5);
             return;
         }
 
@@ -492,12 +499,13 @@ static void drawBeaconProximityGauge(lv_obj_t* canvas, int screen_size) {
         arc_dsc.width = ring_width;
         arc_dsc.opa   = LV_OPA_COVER;
         int32_t ring_radius = 239 - ring_width / 2;  // outer edge always at 239px
-        lv_canvas_draw_arc(canvas, cx, cy, ring_radius, 0, 360, &arc_dsc);
+        const lv_point_t ring_center = { (lv_coord_t)cx, (lv_coord_t)cy };
+        lv_draw_arc(ctx, &arc_dsc, &ring_center, (uint16_t)ring_radius, 0, 360);
     }
 }
 
-void drawOffScreenIndicator(lv_obj_t* canvas, double bearing, int screen_size) {
-    if (!canvas) return;
+static void drawOffScreenIndicator(lv_draw_ctx_t* ctx, double bearing, int screen_size) {
+    if (!ctx) return;
 
     int center_x = screen_size / 2;
     int center_y = screen_size / 2;
@@ -545,18 +553,18 @@ void drawOffScreenIndicator(lv_obj_t* canvas, double bearing, int screen_size) {
     border_dsc.border_color = lv_color_black();
     border_dsc.border_width = border_width;
     border_dsc.border_opa = LV_OPA_COVER;
-    lv_canvas_draw_polygon(canvas, points, 3, &border_dsc);
+    lv_draw_polygon(ctx, &border_dsc, points, 3);
 
     // Draw triangle fill (color depends on mode)
     lv_draw_rect_dsc_t tri_dsc;
     lv_draw_rect_dsc_init(&tri_dsc);
     tri_dsc.bg_color = lv_color_hex(colors.offscreen_indicator);
     tri_dsc.bg_opa = LV_OPA_COVER;
-    lv_canvas_draw_polygon(canvas, points, 3, &tri_dsc);
+    lv_draw_polygon(ctx, &tri_dsc, points, 3);
 }
 
-void drawWaypoints(lv_obj_t* canvas, int screen_size) {
-    if (!canvas) return;
+static void drawWaypoints(lv_draw_ctx_t* ctx, int screen_size) {
+    if (!ctx) return;
 
     ui_manager::UIState& ui = ui_manager::getUIState();
 
@@ -664,7 +672,10 @@ void drawWaypoints(lv_obj_t* canvas, int screen_size) {
             // On-screen: draw yellow circle beacon
             int size = ui_manager::RadarConfig::WAYPOINT_SIZE;  // 25x25
             int half_size = size / 2;
-            lv_canvas_draw_rect(canvas, x - half_size, y - half_size, size, size, &circle_dsc);
+            const lv_area_t dot_area = { (lv_coord_t)(x - half_size), (lv_coord_t)(y - half_size),
+                                         (lv_coord_t)(x - half_size + size - 1),
+                                         (lv_coord_t)(y - half_size + size - 1) };
+            lv_draw_rect(ctx, &circle_dsc, &dot_area);
 
             // Proximity star: drawn on top of the dot as you approach the fixed waypoint.
             // Three zone sizes so GPS jitter (±5m) won't cause rapid size flickering.
@@ -696,9 +707,9 @@ void drawWaypoints(lv_obj_t* canvas, int screen_size) {
                 star_dsc.border_width = 0;
                 for (int k = 0; k < 5; k++) {
                     lv_point_t arm[3] = { sp_outer[k], sp_inner[(k + 4) % 5], sp_inner[k] };
-                    lv_canvas_draw_polygon(canvas, arm, 3, &star_dsc);
+                    lv_draw_polygon(ctx, &star_dsc, arm, 3);
                 }
-                lv_canvas_draw_polygon(canvas, sp_inner, 5, &star_dsc);
+                lv_draw_polygon(ctx, &star_dsc, sp_inner, 5);
             }
         } else {
             if (i == ui.fixed_waypoint_index) {
@@ -732,7 +743,7 @@ void drawWaypoints(lv_obj_t* canvas, int screen_size) {
             if (ui.heading_up_mode && ui.current_heading != 0.0f) {
                 bearing -= ui.current_heading * M_PI_LOCAL / 180.0;
             }
-            drawOffScreenIndicator(canvas, bearing, screen_size);
+            drawOffScreenIndicator(ctx, bearing, screen_size);
         }
     }
 
@@ -742,7 +753,7 @@ void drawWaypoints(lv_obj_t* canvas, int screen_size) {
         if (ui.heading_up_mode && ui.current_heading != 0.0f) {
             bearing -= ui.current_heading * M_PI_LOCAL / 180.0;
         }
-        drawOffScreenIndicator(canvas, bearing, screen_size);
+        drawOffScreenIndicator(ctx, bearing, screen_size);
     }
 }
 
@@ -840,27 +851,81 @@ void drawBeaconFoundIndicator(lv_obj_t* canvas, bool daylight) {
     lv_canvas_draw_polygon(canvas, sp_inner, 5, &star_dsc);
 }
 
+/**
+ * @brief Paint the radar geometry directly into LVGL's draw buffer.
+ *
+ * Registered on the radar object for LV_EVENT_DRAW_MAIN, so it runs inside LVGL's
+ * refresh with a live draw context. Nothing here may touch widgets or LVGL object
+ * state — this is a draw pass, and invalidating from inside it would recurse.
+ *
+ * Replaces the old lv_canvas: painting into a canvas image meant LVGL then blitted
+ * the whole 460 KB buffer into the draw buffer every refresh (~104 ms). Emitting
+ * into the draw context skips that pass entirely.
+ *
+ * The object's background is painted by LVGL's own class handler before this runs
+ * (see the style setup in ui_manager), which is why there is no fill step here.
+ */
+void radarDrawEventCb(lv_event_t* e) {
+    lv_draw_ctx_t* ctx = lv_event_get_draw_ctx(e);
+    if (!ctx) return;
+
+    ui_manager::UIState& ui = ui_manager::getUIState();
+    const int screen_size = system_config::display::SCREEN_WIDTH;
+
+    const int64_t t_paint_start = esp_timer_get_time();
+
+    // Background is a style now, drawn by LVGL before this callback — its cost lands
+    // in the refresh overhead rather than being separately attributable.
+    g_nav_state.bg_us = 0;
+
+    // Draw grid (black lines) - perfectly aligned at all zoom levels
+    const int grid_spacing_pixels = ui.getGridSpacingPixels(screen_size);
+    const int64_t t_grid = esp_timer_get_time();
+    drawRadarGrid(ctx, screen_size, grid_spacing_pixels);
+    g_nav_state.grid_us = (uint32_t)(esp_timer_get_time() - t_grid);
+
+    // Draw center triangle (red equilateral - always at center representing user)
+    const int64_t t_tri = esp_timer_get_time();
+    drawCenterTriangle(ctx, screen_size);
+    g_nav_state.deco_us = (uint32_t)(esp_timer_get_time() - t_tri);
+
+    // Draw waypoints (yellow circles) - they move as user moves
+    // Drawn after triangle so they appear on top
+    const int64_t t_wpt = esp_timer_get_time();
+    drawWaypoints(ctx, screen_size);
+    g_nav_state.wpt_us = (uint32_t)(esp_timer_get_time() - t_wpt);
+
+    // Draw north indicator (shows where north is in heading-up mode)
+    const int64_t t_deco2 = esp_timer_get_time();
+    drawNorthIndicator(ctx, screen_size);
+
+    // Draw beacon proximity gauge (arc grows from top as signal strengthens)
+    // Drawn last so it overlays everything including the north indicator
+    drawBeaconProximityGauge(ctx, screen_size);
+    g_nav_state.deco_us += (uint32_t)(esp_timer_get_time() - t_deco2);
+
+    g_nav_state.paint_us = (uint32_t)(esp_timer_get_time() - t_paint_start);
+}
+
 void updateRadarDisplay() {
     ui_manager::UIState& ui = ui_manager::getUIState();
     const device_manager::DeviceState& dev = device_manager::getDeviceState();
 
     // Comprehensive object validation before any operations
-    if (!ui.radar_canvas) {
-        Serial.println("[RADAR] ERROR: radar_canvas is NULL!");
+    if (!ui.radar_obj) {
+        Serial.println("[RADAR] ERROR: radar_obj is NULL!");
         return;
     }
 
-    if (!lv_obj_is_valid(ui.radar_canvas)) {
-        Serial.println("[RADAR] ERROR: radar_canvas is invalid (possibly deleted)!");
+    if (!lv_obj_is_valid(ui.radar_obj)) {
+        Serial.println("[RADAR] ERROR: radar_obj is invalid (possibly deleted)!");
         return;
     }
 
-    int screen_size = system_config::display::SCREEN_WIDTH;
-
-    // Start of the canvas-painting stage (DEV perf HUD). Everything below is
-    // stage 1 of the frame; the blit + rotate + flush stages are timed
-    // separately by lvgl_monitor_cb in device_manager.cpp.
-    const int64_t t_paint_start = esp_timer_get_time();
+    // This function no longer paints — it refreshes the HUD label widgets and then
+    // invalidates the radar object. The geometry is emitted by radarDrawEventCb
+    // during LVGL's refresh, so its cost shows up inside refr_ms, not here.
+    const int64_t t_label_start = esp_timer_get_time();
 
     // Update zoom level label — only when zoom actually changes
     if (ui.zoom_label && lv_obj_is_valid(ui.zoom_label)) {
@@ -948,29 +1013,17 @@ void updateRadarDisplay() {
         }
     }
 
-    // Clear canvas with appropriate background color (colors already fetched above).
-    //
-    // NOT lv_canvas_fill_bg(): for LV_IMG_CF_TRUE_COLOR that function takes a
-    // per-pixel path (lv_img_buf_set_px_color + lv_img_buf_set_px_alpha for every
-    // pixel = 460,800 out-of-line calls at 480x480), measured at 205ms — 59% of the
-    // whole frame. The radar canvas has no alpha channel, so set_px_alpha is a no-op
-    // and a straight colour fill is equivalent. See docs/performance_optimization_backlog.md.
-    const int64_t t_bg = esp_timer_get_time();
+    // Background is a style on the radar object, painted by LVGL's own class draw
+    // handler before radarDrawEventCb runs. Only write it when the theme actually
+    // changes: lv_obj_set_style_bg_color invalidates the object, so doing it every
+    // frame would queue a redundant full-screen invalidate on top of the one below.
     {
-        lv_img_dsc_t* dsc = lv_canvas_get_img(ui.radar_canvas);
-        lv_color_fill((lv_color_t*)dsc->data, lv_color_hex(colors.background),
-                      (uint32_t)dsc->header.w * (uint32_t)dsc->header.h);
-        lv_obj_invalidate(ui.radar_canvas);
+        static uint32_t s_last_bg = 0xFFFFFFFFu;
+        if (colors.background != s_last_bg) {
+            lv_obj_set_style_bg_color(ui.radar_obj, lv_color_hex(colors.background), 0);
+            s_last_bg = colors.background;
+        }
     }
-    g_nav_state.bg_us = (uint32_t)(esp_timer_get_time() - t_bg);
-
-    // Get grid spacing from current zoom level
-    int grid_spacing_pixels = ui.getGridSpacingPixels(screen_size);
-
-    // Draw grid (black lines) - perfectly aligned at all zoom levels
-    const int64_t t_grid = esp_timer_get_time();
-    drawRadarGrid(ui.radar_canvas, screen_size, grid_spacing_pixels);
-    g_nav_state.grid_us = (uint32_t)(esp_timer_get_time() - t_grid);
 
     // Update center reference to current GPS position (if valid)
     // This makes the user always at the center, and waypoints move relative to user
@@ -983,19 +1036,10 @@ void updateRadarDisplay() {
     // The I2C Task reads the QMC5883L every 100ms and queues the heading to the UI Task.
     // No GPS involvement — compass controls orientation always, moving or stationary.
 
-    // Draw center triangle (red equilateral - always at center representing user)
-    const int64_t t_tri = esp_timer_get_time();
-    drawCenterTriangle(ui.radar_canvas, screen_size);
-    g_nav_state.deco_us = (uint32_t)(esp_timer_get_time() - t_tri);
-
-    // Update waypoint fix proximity sonar (drives buzzer based on GPS distance)
+    // Update waypoint fix proximity sonar (drives buzzer based on GPS distance).
+    // Not drawing — this stays on the update path so it keeps running at the render
+    // request rate rather than at LVGL's redraw rate.
     updateWaypointFixSonar();
-
-    // Draw waypoints (yellow circles) - they move as user moves
-    // Drawn after triangle so they appear on top
-    const int64_t t_wpt = esp_timer_get_time();
-    drawWaypoints(ui.radar_canvas, screen_size);
-    g_nav_state.wpt_us = (uint32_t)(esp_timer_get_time() - t_wpt);
 
     // ── Fixed waypoint distance label (LVGL overlay widget, NOT canvas text) ──────
     // Updated at ~1Hz but only calls lv_label_set_text when the integer value changes.
@@ -1041,15 +1085,6 @@ void updateRadarDisplay() {
         }
     }
 
-    // Draw north indicator (shows where north is in heading-up mode)
-    const int64_t t_deco2 = esp_timer_get_time();
-    drawNorthIndicator(ui.radar_canvas, screen_size);
-
-    // Draw beacon proximity gauge (arc grows from top as signal strengthens)
-    // Drawn last so it overlays everything including the north indicator
-    drawBeaconProximityGauge(ui.radar_canvas, screen_size);
-    g_nav_state.deco_us += (uint32_t)(esp_timer_get_time() - t_deco2);
-
     // Beacon-found indicator: show the circle+star overlay when beacon is marked found
     // and HUD is visible. Hides with the rest of the HUD.
     if (ui.beacon_found_canvas) {
@@ -1060,11 +1095,16 @@ void updateRadarDisplay() {
             lv_obj_add_flag(ui.beacon_found_canvas, LV_OBJ_FLAG_HIDDEN);
     }
 
+    // Request the repaint. Everything above only touched widgets and state; the
+    // geometry is painted by radarDrawEventCb when LVGL services this invalidate.
+    lv_obj_invalidate(ui.radar_obj);
+
     // ---- DEV perf HUD -------------------------------------------------
-    // paint = this function (canvas drawing). refr = LVGL's blit + software
-    // rotate + flush dispatch, captured by lvgl_monitor_cb. The two together
-    // are the real cost of one radar frame. refr is reported by LVGL in ms.
-    g_nav_state.paint_us = (uint32_t)(esp_timer_get_time() - t_paint_start);
+    // label = this function (widget updates + invalidate). refr = LVGL's refresh,
+    // captured by lvgl_monitor_cb, which now CONTAINS the radar painting since it
+    // happens in a draw event. So the frame is label + refr — adding paint would
+    // count the geometry twice.
+    g_nav_state.label_us = (uint32_t)(esp_timer_get_time() - t_label_start);
 
     if (ui.perf_label && lv_obj_is_valid(ui.perf_label) &&
         !lv_obj_has_flag(ui.perf_label, LV_OBJ_FLAG_HIDDEN)) {
@@ -1083,18 +1123,21 @@ void updateRadarDisplay() {
 
         uint32_t paint_ms_x10 = g_nav_state.paint_us / 100;   // 0.1 ms resolution
         uint32_t refr_ms      = g_nav_state.refr_ms;
+        uint32_t label_ms_x10 = g_nav_state.label_us / 100;
+        // Frame = label + refr. paint is shown for attribution but is INSIDE refr.
+        uint32_t total_ms_x10 = label_ms_x10 + refr_ms * 10;
 
         lv_label_set_text_fmt(ui.perf_label,
-                              "bg %u grid %u wpt %u ms\n"
-                              "paint %u.%ums  refr %ums\n"
+                              "grid %u wpt %u rot %u ms\n"
+                              "paint %u.%ums (in refr %ums)\n"
                               "total %u.%ums  %d.%d fps",
-                              (unsigned)(g_nav_state.bg_us / 1000),
                               (unsigned)(g_nav_state.grid_us / 1000),
                               (unsigned)(g_nav_state.wpt_us / 1000),
+                              (unsigned)(g_nav_state.rot_us / 1000),
                               (unsigned)(paint_ms_x10 / 10), (unsigned)(paint_ms_x10 % 10),
                               (unsigned)refr_ms,
-                              (unsigned)((paint_ms_x10 + refr_ms * 10) / 10),
-                              (unsigned)((paint_ms_x10 + refr_ms * 10) % 10),
+                              (unsigned)(total_ms_x10 / 10),
+                              (unsigned)(total_ms_x10 % 10),
                               (int)s_fps, (int)((s_fps - (int)s_fps) * 10));
     }
 }

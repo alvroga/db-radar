@@ -1191,13 +1191,12 @@ void handlePerfCommand(const char* args) {
 
     const navigation::NavState& nav = navigation::getNavState();
 
-    uint32_t bg   = nav.bg_us;
     uint32_t grid = nav.grid_us;
     uint32_t wpt  = nav.wpt_us;
     uint32_t deco = nav.deco_us;
     uint32_t paint = nav.paint_us;
     uint32_t refr  = nav.refr_ms;
-    uint32_t other = (paint > bg + grid + wpt + deco) ? paint - (bg + grid + wpt + deco) : 0;
+    uint32_t other = (paint > grid + wpt + deco) ? paint - (grid + wpt + deco) : 0;
 
     Serial.println("===== RENDER TIMING (last radar frame) =====");
     // Report BOTH knobs. Pixel rotation needs `rotated != NONE` AND `sw_rotate`;
@@ -1210,8 +1209,8 @@ void handlePerfCommand(const char* args) {
                       system_config::display::ROTATION_DEGREES,
                       device_manager::rotModeName(device_manager::getRotMode()));
     }
-    Serial.println("--- paint stage (updateRadarDisplay) ---");
-    Serial.printf("  fill_bg:    %8u us  (%5.1f ms)\n", (unsigned)bg,   bg   / 1000.0);
+    Serial.printf("--- label stage (updateRadarDisplay): %.1f ms ---\n", nav.label_us / 1000.0);
+    Serial.println("--- paint stage (radarDrawEventCb — NESTED inside REFRESH) ---");
     Serial.printf("  grid:       %8u us  (%5.1f ms)\n", (unsigned)grid, grid / 1000.0);
     Serial.printf("  waypoints:  %8u us  (%5.1f ms)\n", (unsigned)wpt,  wpt  / 1000.0);
     Serial.printf("  triangle+N+gauge: %2u us  (%5.1f ms)\n", (unsigned)deco, deco / 1000.0);
@@ -1219,14 +1218,35 @@ void handlePerfCommand(const char* args) {
     Serial.printf("  PAINT TOTAL:%8u us  (%5.1f ms)\n", (unsigned)paint, paint / 1000.0);
     Serial.println("--- refresh stage (LVGL blit + rotate + flush) ---");
     Serial.printf("  REFRESH:    %8u ms   (%u px)\n", (unsigned)refr, (unsigned)nav.refr_px);
-    // In TILED mode the transpose runs inside flush_cb, so it is already counted
-    // within REFRESH above. Broken out here to show what the rotation itself costs.
-    if (device_manager::getRotMode() == device_manager::RotMode::TILED) {
-        const uint32_t rot = nav.rot_us;
-        Serial.printf("    of which tiled rotate: %u us (%.1f ms)\n",
-                      (unsigned)rot, rot / 1000.0);
+    // Both sub-stages below run inside flush_cb and are therefore already counted
+    // within REFRESH; they are broken out to attribute it. The remainder is the
+    // canvas -> draw buffer blit, which is the only part that drawing direct
+    // (LV_EVENT_DRAW_MAIN instead of lv_canvas) would eliminate.
+    {
+        const uint32_t rot   = nav.rot_us;
+        const uint32_t flush = nav.flush_us;
+        const uint32_t refr_us = refr * 1000u;
+        if (device_manager::getRotMode() == device_manager::RotMode::TILED) {
+            Serial.printf("    tiled rotate:        %8u us (%5.1f ms)\n",
+                          (unsigned)rot, rot / 1000.0);
+        }
+        Serial.printf("    flush to framebuffer:%8u us (%5.1f ms)\n",
+                      (unsigned)flush, flush / 1000.0);
+        Serial.printf("    radar paint:         %8u us (%5.1f ms)\n",
+                      (unsigned)paint, paint / 1000.0);
+        if (refr_us > rot + flush + paint) {
+            const uint32_t oh = refr_us - rot - flush - paint;
+            Serial.printf("    LVGL overhead+bg:    %8u us (%5.1f ms)\n",
+                          (unsigned)oh, oh / 1000.0);
+        } else {
+            // refr_ms has 1 ms granularity; on a small partial refresh the parts can
+            // round up past the whole. Say so rather than printing a bogus figure.
+            Serial.println("    LVGL overhead+bg:      (below refr_ms resolution)");
+        }
     }
-    Serial.printf("FRAME TOTAL:  %8.1f ms\n", paint / 1000.0 + refr);
+    // paint is inside refr now (it runs in a draw event), so the frame is label + refr.
+    Serial.printf("FRAME TOTAL:  %8.1f ms  (label %.1f + refresh %u)\n",
+                  nav.label_us / 1000.0 + refr, nav.label_us / 1000.0, (unsigned)refr);
     Serial.printf("Flushes since boot: %u\n", (unsigned)nav.flush_count);
     Serial.println("============================================");
 }

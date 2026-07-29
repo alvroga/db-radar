@@ -187,44 +187,39 @@ void createRadarScreen() {
         }
     }, LV_EVENT_PRESSED, nullptr);
 
-    // Allocate canvas draw buffer (RGB565 format - LVGL 8.x)
-    size_t canvas_buf_size = LV_CANVAS_BUF_SIZE_TRUE_COLOR(g_config.screen_width, g_config.screen_height);
-    Serial.printf("[RADAR] Canvas buffer size needed: %u bytes (%.1f KB)\n", canvas_buf_size, canvas_buf_size / 1024.0);
+    // Radar surface: a plain object that paints itself from an LV_EVENT_DRAW_MAIN
+    // handler, NOT an lv_canvas.
+    //
+    // A canvas is an image, so LVGL blitted its whole 460 KB buffer into the draw
+    // buffer on every refresh — measured at ~104 ms/frame, the single largest cost
+    // in the pipeline, on top of the 460 KB of PSRAM the buffer itself occupied.
+    // Drawing straight into LVGL's draw context skips that intermediate entirely.
+    //
+    // The background is a style rather than a fill call: the class draw handler runs
+    // before user DRAW_MAIN callbacks (lv_event.c, event_send_core -> lv_obj_event_base
+    // then user cbs), so LVGL paints the background and navigation draws on top of it.
+    g_ui_state.radar_obj = lv_obj_create(stage);
+    lv_obj_set_size(g_ui_state.radar_obj, g_config.screen_width, g_config.screen_height);
+    lv_obj_set_pos(g_ui_state.radar_obj, 0, 0);
 
-    // Try SPIRAM first (8MB available), then fallback to DMA-capable RAM
-    void* canvas_buf = heap_caps_malloc(canvas_buf_size, MALLOC_CAP_SPIRAM);
-    if (!canvas_buf) {
-        Serial.println("[RADAR] WARNING: SPIRAM allocation failed, trying DMA RAM...");
-        canvas_buf = heap_caps_malloc(canvas_buf_size, MALLOC_CAP_DMA);
-    }
+    // Strip every default-theme decoration — this object is a bare painting surface.
+    lv_obj_set_style_pad_all(g_ui_state.radar_obj, 0, 0);
+    lv_obj_set_style_border_width(g_ui_state.radar_obj, 0, 0);
+    lv_obj_set_style_outline_width(g_ui_state.radar_obj, 0, 0);
+    lv_obj_set_style_radius(g_ui_state.radar_obj, 0, 0);
+    lv_obj_set_style_shadow_width(g_ui_state.radar_obj, 0, 0);
+    lv_obj_set_style_bg_opa(g_ui_state.radar_obj, LV_OPA_COVER, 0);
+    lv_obj_set_style_bg_color(g_ui_state.radar_obj, lv_color_hex(0x3A9949), 0);
 
-    if (!canvas_buf) {
-        Serial.println("[RADAR] ERROR: Failed to allocate canvas buffer!");
-        Serial.printf("[RADAR] Free heap: %u bytes\n", (unsigned)esp_get_free_heap_size());
-        Serial.printf("[RADAR] Free PSRAM: %u bytes\n", (unsigned)heap_caps_get_free_size(MALLOC_CAP_SPIRAM));
-        Serial.printf("[RADAR] Largest free block: %u bytes\n", (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_DEFAULT));
-        return;
-    }
+    // No scrolling: lv_obj_create() enables it by default, which would let a stray
+    // touch drag the radar surface and would add scrollbars to the draw list.
+    lv_obj_clear_flag(g_ui_state.radar_obj, LV_OBJ_FLAG_SCROLLABLE);
 
-    Serial.printf("[RADAR] Canvas buffer allocated: %p (%u bytes)\n", canvas_buf, canvas_buf_size);
+    lv_obj_add_event_cb(g_ui_state.radar_obj, navigation::radarDrawEventCb,
+                        LV_EVENT_DRAW_MAIN, nullptr);
 
-    // Create canvas (LVGL 8.x API) - full screen, no header
-    g_ui_state.radar_canvas = lv_canvas_create(stage);
-    lv_canvas_set_buffer(g_ui_state.radar_canvas, canvas_buf, g_config.screen_width, g_config.screen_height, LV_IMG_CF_TRUE_COLOR);
-    lv_obj_set_size(g_ui_state.radar_canvas, g_config.screen_width, g_config.screen_height);
-    lv_obj_set_pos(g_ui_state.radar_canvas, 0, 0);  // Explicitly set position to (0,0)
-    lv_obj_set_style_pad_all(g_ui_state.radar_canvas, 0, 0);  // Remove all padding
-
-    Serial.printf("[RADAR] Canvas size: %dx%d, positioned at (0,0)\n",
+    Serial.printf("[RADAR] Radar surface: %dx%d at (0,0), direct draw (no canvas)\n",
                   g_config.screen_width, g_config.screen_height);
-
-    // Fill canvas with green background
-    lv_canvas_fill_bg(g_ui_state.radar_canvas, lv_color_hex(0x3A9949), LV_OPA_COVER);
-
-    // Touch-to-zoom disabled - touch will be used for other functionalities
-    // Future: Touch can be used for waypoint selection, dragging, etc.
-    // lv_obj_add_flag(g_ui_state.radar_canvas, LV_OBJ_FLAG_CLICKABLE);
-    // lv_obj_add_event_cb(g_ui_state.radar_canvas, [](lv_event_t* e) { ... }, LV_EVENT_CLICKED, nullptr);
 
     // Add zoom level indicator (always visible, above GPS status)
     g_ui_state.zoom_label = lv_label_create(stage);
