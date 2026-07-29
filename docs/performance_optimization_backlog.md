@@ -366,6 +366,12 @@ IDF does not.
 CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
 ```
 
+**Confirmed against the board spec**: the ESP32-S3 carries a high-performance **Xtensa 32-bit LX7
+dual-core** processor rated to a main frequency of **up to 240 MHz**. So 240 MHz is the part's rated
+ceiling, not an overclock — this item is recovering the clock the silicon is specified for, and the
+"240 MHz" figure in `CLAUDE.md` and `docs/` describes the hardware correctly even though the binary
+does not currently run there.
+
 - **Expected gain**: ~1.5× on every CPU-bound stage. On a redraw that is largely PSRAM-bound this
   will be less than 1.5× end to end, but it is free and it also shortens the bounce-buffer ISR.
 - **Cost**: higher power draw — measure battery life impact, this is a handheld device.
