@@ -865,6 +865,16 @@ void drawBeaconFoundIndicator(lv_obj_t* canvas, bool daylight) {
  * The object's background is painted by LVGL's own class handler before this runs
  * (see the style setup in ui_manager), which is why there is no fill step here.
  */
+// Timestamp taken at LV_EVENT_DRAW_MAIN_BEGIN, i.e. before LVGL's class handler
+// paints the object background. Subtracting it from the start of our DRAW_MAIN
+// handler isolates the background fill, which is otherwise buried in the refresh.
+static int64_t g_draw_begin_us = 0;
+
+void radarDrawBeginCb(lv_event_t* e) {
+    (void)e;
+    g_draw_begin_us = esp_timer_get_time();
+}
+
 void radarDrawEventCb(lv_event_t* e) {
     lv_draw_ctx_t* ctx = lv_event_get_draw_ctx(e);
     if (!ctx) return;
@@ -874,9 +884,14 @@ void radarDrawEventCb(lv_event_t* e) {
 
     const int64_t t_paint_start = esp_timer_get_time();
 
-    // Background is a style now, drawn by LVGL before this callback — its cost lands
-    // in the refresh overhead rather than being separately attributable.
-    g_nav_state.bg_us = 0;
+    // Background: painted by LVGL's class draw handler between DRAW_MAIN_BEGIN and
+    // this callback, so the gap between those two is its cost (plus a negligible
+    // event dispatch). Whatever refr_ms has left after bg + paint + rot + flush is
+    // LVGL drawing things that are NOT the radar object — the screen and stage
+    // backgrounds underneath it, and the HUD widgets on top.
+    g_nav_state.bg_us = (g_draw_begin_us > 0)
+                      ? (uint32_t)(t_paint_start - g_draw_begin_us)
+                      : 0;
 
     // Draw grid (black lines) - perfectly aligned at all zoom levels
     const int grid_spacing_pixels = ui.getGridSpacingPixels(screen_size);

@@ -165,10 +165,26 @@ void createRadarScreen() {
     lv_obj_t* stage = lv_obj_create(g_ui_state.screen_radar);
     lv_obj_set_size(stage, g_config.screen_width, g_config.screen_height);
     lv_obj_set_pos(stage, 0, 0);  // Explicitly set position to (0,0)
-    lv_obj_set_style_bg_color(stage, lv_color_hex(0x3A9949), 0);  // Green background
-    lv_obj_set_style_bg_opa(stage, LV_OPA_COVER, 0);
+
+    // No background: radar_obj is a full-screen opaque child that covers this
+    // completely, in the same colour. Filling it first was ~21 ms of pure waste
+    // per frame.
+    lv_obj_set_style_bg_opa(stage, LV_OPA_TRANSP, 0);
+
+    // clip_corner is deliberately OFF, and it is load-bearing for performance.
+    //
+    // LVGL answers LV_EVENT_COVER_CHECK with LV_COVER_RES_MASKED for any object
+    // with clip_corner set, and lv_refr_get_top_obj treats MASKED as "stop, and
+    // do not descend into the children". With it on, the search for the topmost
+    // fully-covering object bailed here and never reached radar_obj, so LVGL
+    // redrew the screen background and this stage's background underneath the
+    // radar on every single frame — both full-screen, both immediately painted
+    // over. Leaving it off lets radar_obj become the top object, and LVGL skips
+    // straight to it.
+    //
+    // Nothing is lost visually: the panel is physically round, so the corners
+    // this would have clipped are not on the glass.
     lv_obj_set_style_radius(stage, LV_RADIUS_CIRCLE, 0);
-    lv_obj_set_style_clip_corner(stage, true, 0);
     lv_obj_set_style_border_width(stage, 0, 0);
     lv_obj_set_style_pad_all(stage, 0, 0);  // Remove all padding
     lv_obj_clear_flag(stage, LV_OBJ_FLAG_SCROLLABLE);
@@ -215,6 +231,16 @@ void createRadarScreen() {
     // touch drag the radar surface and would add scrollbars to the draw list.
     lv_obj_clear_flag(g_ui_state.radar_obj, LV_OBJ_FLAG_SCROLLABLE);
 
+    // Not clickable either. lv_obj_create() sets LV_OBJ_FLAG_CLICKABLE (lv_obj.c:436)
+    // whereas lv_canvas_create() does not, so replacing the canvas with a plain object
+    // silently made this surface the hit-test winner for every touch on the radar. The
+    // press then stopped at radar_obj instead of reaching the stage handler that calls
+    // handleTapAt(), which is what opens waypoint details. This surface is purely
+    // something to paint on — input belongs to the stage underneath it.
+    lv_obj_clear_flag(g_ui_state.radar_obj, LV_OBJ_FLAG_CLICKABLE);
+
+    lv_obj_add_event_cb(g_ui_state.radar_obj, navigation::radarDrawBeginCb,
+                        LV_EVENT_DRAW_MAIN_BEGIN, nullptr);
     lv_obj_add_event_cb(g_ui_state.radar_obj, navigation::radarDrawEventCb,
                         LV_EVENT_DRAW_MAIN, nullptr);
 

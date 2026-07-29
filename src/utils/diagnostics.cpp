@@ -1232,11 +1232,18 @@ void handlePerfCommand(const char* args) {
         }
         Serial.printf("    flush to framebuffer:%8u us (%5.1f ms)\n",
                       (unsigned)flush, flush / 1000.0);
+        const uint32_t bg = nav.bg_us;
+        Serial.printf("    radar bg fill:       %8u us (%5.1f ms)\n",
+                      (unsigned)bg, bg / 1000.0);
         Serial.printf("    radar paint:         %8u us (%5.1f ms)\n",
                       (unsigned)paint, paint / 1000.0);
-        if (refr_us > rot + flush + paint) {
-            const uint32_t oh = refr_us - rot - flush - paint;
-            Serial.printf("    LVGL overhead+bg:    %8u us (%5.1f ms)\n",
+        if (refr_us > rot + flush + paint + bg) {
+            // Everything LVGL does that is NOT the radar object: the screen and
+            // stage backgrounds beneath it, plus the HUD widgets on top. If the
+            // radar's opaque background is short-circuiting the layers below
+            // (lv_refr_get_top_obj), this should be small.
+            const uint32_t oh = refr_us - rot - flush - paint - bg;
+            Serial.printf("    LVGL non-radar draw: %8u us (%5.1f ms)\n",
                           (unsigned)oh, oh / 1000.0);
         } else {
             // refr_ms has 1 ms granularity; on a small partial refresh the parts can

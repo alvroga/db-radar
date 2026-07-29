@@ -85,6 +85,10 @@ void updateRadarDisplay();
 // the radar screen is built.
 void radarDrawEventCb(lv_event_t* e);
 
+// LV_EVENT_DRAW_MAIN_BEGIN handler — fires before LVGL paints the object's
+// background, so the two together bracket the background fill.
+void radarDrawBeginCb(lv_event_t* e);
+
 // Draw the beacon-found indicator icon into a 32×32 TRUE_COLOR_ALPHA canvas.
 // Call once on creation and again whenever the daylight theme changes.
 void drawBeaconFoundIndicator(lv_obj_t* canvas, bool daylight);
