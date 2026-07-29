@@ -9,7 +9,64 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Performance
+
+**Radar frame 238ms → 149ms: dropped the canvas, then found two hidden full-screen repaints**
+
+Two changes, one of which was found only because the other forced better instrumentation.
+
+*Step 8 — drop the radar canvas (`816b421`).* The radar painted into a full-screen `lv_canvas`,
+which LVGL treated as an image and blitted into the draw buffer on every refresh. Replaced with a
+plain `lv_obj` that paints itself from an `LV_EVENT_DRAW_MAIN` handler, emitting geometry straight
+into LVGL's draw context. Frame **238 → 210ms**, plus **460 KB of PSRAM freed**.
+
+Far less than the ~104ms projected. The projection assumed the whole un-instrumented refresh
+remainder (`refr − rot − flush`) was the canvas blit; it was not. The blit was worth ~22ms.
+
+*Step 8b — `clip_corner` was defeating LVGL's cover-check (`44f6d0d`).* Bracketing the background
+fill with a `DRAW_MAIN_BEGIN` timestamp split the remaining 82ms into `bg 23ms` + `non-radar 62ms`.
+That 62ms was the screen background and the stage background being painted every frame — both
+full-screen, both opaque, both the same green, both immediately covered by the radar.
+
+Cause: `lv_obj_set_style_clip_corner(stage, true)`. LVGL answers `LV_EVENT_COVER_CHECK` with
+`LV_COVER_RES_MASKED` for any object with `clip_corner` set, and `lv_refr_get_top_obj` treats
+`MASKED` as *stop, do not descend into children*. The search for the topmost fully-covering object
+bailed at the stage and never reached the radar, so LVGL drew from the screen down.
+
+`clip_corner` also installs a radius mask that every child draw call blends through — which is what
+made grid drawing 3× more expensive after step 8 moved painting inside the stage. One flag, both
+symptoms. Frame **210 → 149ms**; grid **20–26 → 6–9ms**.
+
+- **~0.8 fps → ~6.7 fps** across the full effort (frame ~499ms → 149ms)
+- Nothing lost visually — the panel is physically round, so the clipped corners are not on the glass
+- Timing semantics changed: painting now happens *inside* the LVGL refresh, so `paint` is a
+  component of `refr`, not sequential with it. Frame = `label + refresh`. `perf`, the DEV tab and
+  the on-screen HUD updated to match; `flush_us` added to attribute `esp_lcd_panel_draw_bitmap`
+- Remaining: rotate 64ms / flush 34ms / bg 21.5ms / non-radar 16.4ms / paint 13ms
+- Build: RAM 59.1% (193,520 B), Flash 79.4% (1,664,747 B)
+- Files: `src/ui/ui_manager.cpp`, `src/ui/navigation.cpp`, `include/ui/navigation.h`,
+  `include/ui/ui_manager.h`, `src/core/device_manager.cpp`, `src/utils/diagnostics.cpp`,
+  `src/ui/dev_screen.cpp`, `docs/performance_optimization_backlog.md`
+
 ### Fixed
+
+**Waypoint taps stopped opening the detail screen (regression from `816b421`)**
+
+`lv_obj_create()` sets `LV_OBJ_FLAG_CLICKABLE` (`lv_obj.c:436`) where `lv_canvas_create()` does not.
+Replacing the radar canvas with a plain object silently made the radar surface the hit-test winner
+for every touch, so presses stopped at it instead of reaching the stage handler that calls
+`handleTapAt()`. The radar rendered identically either way, so this was invisible until a waypoint
+was tapped. Fixed by clearing the flag — the surface is for painting, input belongs to the stage
+beneath it. Fixed in `44f6d0d`, verified on hardware.
+
+**Brightness could be set to 0% with no way to recover**
+
+`MIN_BRIGHTNESS_PERCENT = 5` was defined in `system_config.h` but referenced nowhere. The only
+protection was the settings slider's range, which does not cover the NVS restore path at boot: a
+stored raw level of 1–2 passes the `> 0` guard and divides down to 0%, leaving the panel dark with
+the only control on a screen no longer visible. Moved the floor into `backlight::setPercent()` — the
+single point every caller passes through — and switched standby to `backlight::off()`, which
+bypasses it so deliberate full-off still works. Fixed in `aa66982`, verified on hardware.
 
 **Radar rotation dropped to 1 Hz whenever GPS acquired a fix**
 

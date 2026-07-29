@@ -715,6 +715,48 @@ BLE-based item finder that activates at 50m zoom. Scans for a configured beacon 
 
 ---
 
+## Render Pipeline
+
+**Status**: Optimized ✅ | [Backlog + measurements](docs/performance_optimization_backlog.md)
+
+Frame time went **~499ms → ~149ms (~0.8 → ~6.7 fps)**. The radar no longer uses an `lv_canvas`.
+
+**Current architecture**:
+- **`radar_obj`** — a plain `lv_obj` that paints itself from an `LV_EVENT_DRAW_MAIN` handler
+  (`navigation::radarDrawEventCb`), emitting geometry straight into LVGL's draw context. There is no
+  intermediate image buffer.
+- **`updateRadarDisplay()` does not paint.** It refreshes HUD label widgets, runs the waypoint sonar,
+  and calls `lv_obj_invalidate()`. Geometry happens later, inside LVGL's refresh.
+- **Background is a style** (`bg_color` on `radar_obj`), painted by LVGL's class draw handler before
+  the user `DRAW_MAIN` callback — user callbacks run after `lv_obj_event_base` (`lv_event.c`,
+  `event_send_core`).
+- **90° rotation is a tiled transpose** in `lvgl_flush_cb`, not LVGL's `sw_rotate`
+  (`device_manager.cpp`, `rotate90_tiled`). Runtime-switchable with `rot on|off|tiled`.
+
+**Two constraints that are load-bearing — do not "clean these up"**:
+
+1. **`clip_corner` must stay OFF on the radar stage** (`ui_manager.cpp`). LVGL answers
+   `LV_EVENT_COVER_CHECK` with `LV_COVER_RES_MASKED` for any object with `clip_corner`, and
+   `lv_refr_get_top_obj` treats `MASKED` as *stop, do not descend*. Turning it on makes LVGL repaint
+   the screen and stage backgrounds beneath the radar every frame (**+61 ms**) and installs a radius
+   mask that every child draw call blends through (**grid 3× slower**). The panel is physically
+   round, so the clipping it provides is invisible anyway.
+
+2. **`radar_obj` must not be `CLICKABLE`.** `lv_obj_create()` sets the flag by default
+   (`lv_obj.c:436`); `lv_canvas_create()` did not. With it set, the radar surface wins hit-testing
+   and swallows presses before they reach the stage handler calling `handleTapAt()` — waypoint
+   detail taps silently stop working while the display looks perfect.
+
+**Timing semantics**: painting runs *inside* the LVGL refresh, so `paint_us` is a component of
+`refr_ms`, not sequential with it. **Frame = `label_us + refr_ms`** — adding `paint` double-counts.
+Read via the `perf` serial command or the DEV tab.
+
+**Methodology note**: three separate estimates in the backlog were wrong because a *residual*
+(`total − known`) was named after a hypothesis. Never attribute an un-instrumented remainder; bracket
+it with `esp_timer_get_time()` first. See "The residual trap" in the backlog.
+
+---
+
 ## Documentation Standards
 
 **IMPORTANT**: This project prioritizes thorough documentation. Every significant implementation must be documented properly.

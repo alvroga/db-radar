@@ -38,11 +38,58 @@ XS effort and delivered the felt result that steps 7–10 were budgeted for.
 **Files**: `src/utils/task_manager.cpp` — `requestRadarRender()` / `flushRadarRender()`, forward
 decl at :66, flush at :175, cases at :541/:559/:567/:687.
 
-### Still open, unchanged in priority
+### C3. Tiled transpose, `sw_rotate` off (§2.2 A, step 7) — 2026-07-28
 
-Steps 7–10 (tiled transpose §2.2, drop the canvas §2.1, `num_fbs = 2` §2.3, higher PCLK §2.4) remain
-the large wins — software rotation is still ~153 ms/frame. They are now *headroom* work rather than
-*smoothness* work: they buy a higher achievable rotation rate, not a fix for a broken one.
+Commit `ff82116`. Measured: **rotation 162 → 64.3 ms (2.5×)**. 32×32 blocked transpose in
+`lvgl_flush_cb`, keeping source rows and destination columns resident in the 32 KB dcache instead of
+striding 960 bytes between every pixel. Staging buffers are paired by pointer to LVGL's two draw
+buffers, so they inherit LVGL's own "never re-render into a buffer with an outstanding flush"
+guarantee.
+
+Runtime-switchable via `rot on|off|tiled` for A/B measurement. **Touch requires that *something*
+rotates the pixels** — LVGL's input transform keys off `rotated` alone and assumes the framebuffer
+was rotated to match, so `RotMode::NONE` leaves the UI visible but untouchable. That is a
+measurement mode only, never a shipping configuration.
+
+### C4. Drop the radar canvas → `LV_EVENT_DRAW_MAIN` (§2.1, step 8) — 2026-07-28
+
+Commit `816b421`. Measured: **frame 238 → 210 ms**, plus **460 KB of PSRAM freed**.
+
+Far less than the ~104 ms this document projected, because that projection was a residual (see "The
+residual trap"). The canvas blit was worth ~22 ms; the rest of the bucket was LVGL work the change
+does not touch. The PSRAM saving is real and was never in doubt.
+
+Also introduced one regression, caught on hardware: `lv_obj_create()` sets `LV_OBJ_FLAG_CLICKABLE`
+(`lv_obj.c:436`) where `lv_canvas_create()` does not, so the new radar surface became the hit-test
+winner and swallowed presses before they reached the stage handler calling `handleTapAt()`. Waypoint
+detail taps stopped working. Fixed in `44f6d0d` by clearing the flag — the surface is for painting,
+input belongs to the stage beneath it.
+
+### C5. `clip_corner` was defeating LVGL's cover-check (step 8b) — 2026-07-28
+
+Commit `44f6d0d`. Measured: **frame 210 → 149 ms**, the single largest win of the effort.
+
+Found by bracketing the radar background fill with a `DRAW_MAIN_BEGIN` timestamp, which split the
+opaque 82 ms remainder into `bg 23 ms` + `non-radar 62 ms`. The 62 ms was two full-screen background
+fills — the screen's and the stage's — painted every frame, both opaque, both the same green, both
+immediately covered by the radar.
+
+Cause: `lv_obj_set_style_clip_corner(stage, true)`. LVGL answers `LV_EVENT_COVER_CHECK` with
+`LV_COVER_RES_MASKED` for any object with `clip_corner` set, and `lv_refr_get_top_obj` treats
+`MASKED` as *stop, do not descend into children*. The search for the topmost fully-covering object
+bailed at the stage and never reached `radar_obj`, so LVGL fell back to drawing from the screen down.
+
+`clip_corner` also installs a radius mask on the draw context that **every child draw call** blends
+through — which is what made grid drawing 3× more expensive (20–26 → 6–9 ms) after step 8 moved
+painting inside the stage. One flag, both symptoms.
+
+Nothing lost visually: the panel is physically round, so the clipped corners are not on the glass.
+
+### Still open
+
+Steps 9 (`num_fbs = 2`, §2.3), transpose tuning, and 10 (higher PCLK, §2.4). Rotation at 64 ms and
+flush at 34 ms are now the top two items; both are addressed by code this project owns. See the
+measured breakdown above.
 
 ---
 
@@ -134,6 +181,11 @@ configuration would have cost before either fix.
 | **2** | Base refresh blit, rotation excluded (§2.1/§2.3) | **131 ms** | Full-screen canvas→drawbuf→FB copy; the canvas is what forces the extra pass |
 | 3 | Paint stage (grid/waypoints/geometry) | 32 ms | Only ~11 ms of this is draw calls |
 
+> ⚠️ **Rank 2 above is wrong and is kept only as a record.** The 131 ms was
+> `refr − rot`, i.e. everything not yet instrumented — not the canvas blit. When it was
+> finally split (2026-07-28), the canvas blit turned out to be worth ~22 ms and the bulk
+> was LVGL repainting two hidden full-screen backgrounds. See "The residual trap" below.
+
 ### Revised priority
 
 | Rank | Item | Measured cost | Expected after fix | Effort |
@@ -145,6 +197,71 @@ configuration would have cost before either fix.
 Item 1 alone should take the frame from **346 ms → ~150 ms**. Item 2 then becomes the whole
 remaining cost and deserves the §2.1 "draw direct, delete the canvas" treatment — the canvas is
 what forces the extra full-screen copy.
+
+---
+
+## ⚠️ THE RESIDUAL TRAP — read before estimating anything in this document
+
+Three predictions in this file were wrong, all in the same way: **a residual was named after a
+cause.** The pattern is worth stating explicitly because it survived two corrections.
+
+| Claim | What was actually measured | Truth |
+|---|---|---|
+| "Software rotation is the single biggest item, 153 ms" (§2.2) | `refr` with nothing subtracted | Rotation was ~65 ms once isolated |
+| "The canvas blit is 131 ms" (§2.1, rank 2 above) | `refr − rot` | Blit was ~22 ms |
+| "Dropping the canvas saves ~104 ms" | `refr − rot − flush` | It saved ~28 ms |
+
+Each time the unmeasured remainder was given the name of whatever hypothesis was in play. Each time
+the real cost was something nobody had thought to bracket. The fix was never cleverness — it was
+adding one more timer and letting the residual shrink until it pointed at something specific.
+
+**Rule for this document: never attribute a residual. If a number is `total − known`, call it
+"unmeasured" and bracket it before proposing work against it.** The instrumentation is cheap
+(`esp_timer_get_time()` either side of the suspect call); the rewrites justified by bad attribution
+are not.
+
+---
+
+## ✅ MEASURED — 2026-07-28, after steps 7 + 8 + the cover-check fix
+
+Full-frame refresh (230,400 px), TILED rotation, indoors:
+
+```
+--- label stage (updateRadarDisplay): 0.6 ms ---
+--- paint stage (radarDrawEventCb — NESTED inside REFRESH) ---
+  grid:            6170 us  (  6.2 ms)
+  waypoints:       5115 us  (  5.1 ms)
+  triangle+N+gauge:1765 us  (  1.8 ms)
+  PAINT TOTAL:    13113 us  ( 13.1 ms)
+--- refresh stage ---
+  REFRESH:          149 ms   (230400 px)
+    tiled rotate:           64108 us ( 64.1 ms)
+    flush to framebuffer:   33899 us ( 33.9 ms)
+    radar bg fill:          21452 us ( 21.5 ms)
+    radar paint:            13113 us ( 13.1 ms)
+    LVGL non-radar draw:    16428 us ( 16.4 ms)
+FRAME TOTAL:      149.6 ms  (label 0.6 + refresh 149)
+```
+
+**Frame ~499 ms → 149 ms across the whole effort (~0.8 → ~6.7 fps).**
+
+Note the timing semantics changed at step 8: the radar paints inside a draw event, so `paint` is a
+component of `REFRESH`, not sequential with it. Frame = `label + refresh`. Adding `paint` to `refr`
+double-counts, which is what the pre-step-8 FRAME TOTAL did — correctly, back when the canvas made
+the two stages sequential.
+
+### Where the 149 ms now sits
+
+| Item | Cost | Share | Next move |
+|---|---|---|---|
+| Tiled rotate | 64.1 ms | 43% | `IRAM_ATTR` + sequential writes → ~40 ms |
+| Flush to framebuffer | 33.9 ms | 23% | `num_fbs = 2`: transpose into the back buffer, swap — deletes this entirely |
+| Radar bg fill | 21.5 ms | 14% | At PSRAM write bandwidth for 460 KB; little headroom |
+| LVGL non-radar draw | 16.4 ms | 11% | HUD widgets. Small. |
+| Radar paint | 13.1 ms | 9% | grid could use rects instead of 3px lines (§3.1) |
+
+Steps 9 + transpose tuning together project to **~91 ms / ~11 fps**, and unlike everything above
+they touch only code this project owns.
 
 ### Also corrected by the boot log
 
@@ -678,9 +795,11 @@ of the time is in stage 3.
 | 4 | Confirm + move panel ISR to Core 0 (§1.5) | S | Medium | Low | open |
 | 5 | Grid lines as rects (§3.1) | S | Low (4.7 ms total) | Very low | open |
 | 6 | Cache sizes, `FAST_MEM`, `MEMCPY_STD` (§1.3/1.6/1.7) | S | Medium | Medium (SRAM) | open |
-| 7 | **Tiled transpose, drop `sw_rotate` (§2.2 A)** | M | **Very high (153 ms)** | Medium | open |
-| 8 | Drop the canvas → `DRAW_MAIN` (§2.1) | M–L | **High (131 ms)** | Medium | open |
-| 9 | `num_fbs = 2` + direct mode (§2.3) | M | High | Medium | open |
+| 7 | **Tiled transpose, drop `sw_rotate` (§2.2 A → C3)** | M | **162 → 64.3 ms rotation** | Medium | ✅ done `ff82116` |
+| 8 | **Drop the canvas → `DRAW_MAIN` (§2.1 → C4)** | M–L | 238 → 210 ms, −460 KB PSRAM | Medium | ✅ done `816b421` |
+| 8b | **`clip_corner` cover-check fix (C5)** | XS | **210 → 149 ms** | Low | ✅ done `44f6d0d` |
+| 9 | `num_fbs = 2` + direct mode (§2.3) | M | **High (−34 ms flush)** | Medium | open |
+| 9b | Transpose tuning: `IRAM_ATTR` + sequential writes | S | **High (64 → ~40 ms)** | Low | open |
 | 10 | Re-test higher PCLK (§2.4) | S | High (60 Hz) | **Medium-high** | open |
 | 11 | Waypoint memory (see ROADMAP) | M | Raises the 50-waypoint cap | Low | open |
 | 12 | Serial flush / recompute-per-frame (§3.5–3.6) | S | Low–medium | Low | open |
@@ -691,6 +810,17 @@ be bought with steps 7–10 first, and listed the heading decouple last as the t
 it in. In practice C1 + C2 — both XS — delivered the felt result on their own, because the second
 problem was never frame *cost*, it was frame *rate*: the redraw was being skipped, not running slow.
 
-Steps 7–10 are still worth ~284 ms/frame between them and remain the large technical wins. They are
-now headroom, not blockers: they raise the ceiling on rotation rate and unlock §3.2's remaining
-sub-items (10–20 Hz compass, smaller deadband). Reassess after re-reading `perf` on the current build.
+**Effort did not track impact.** Ranked by measured ms per unit of work, the order was almost the
+inverse of this table's original estimates:
+
+| Change | Effort | Measured |
+|---|---|---|
+| `clip_corner` fix (C5) | XS — one style flag | **−61 ms** |
+| `fill_bg` → `lv_color_fill` (C1) | XS — a few lines | **−184 ms** |
+| Tiled transpose (C3) | M — one function | −98 ms |
+| Drop the canvas (C4) | M–L — 62 call sites | −28 ms |
+
+The two cheapest changes delivered the most. Both were found by measurement, not by reading code and
+reasoning about it — and C4, the largest rewrite in the list, returned the least. Bracket first.
+
+Steps 9 + 9b project to **~91 ms / ~11 fps** and touch only code this project owns.
