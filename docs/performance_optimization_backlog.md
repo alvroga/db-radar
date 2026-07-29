@@ -574,15 +574,30 @@ since boot, nowhere near 10 Hz). Still untested:
    the compass at 10 Hz would halve the render rate for little visible cost, since translation matters
    less than rotation. Nothing calls for it today — reconsider it if PCLK goes up or a heavy waypoint
    load makes Core 1 the constraint again.
-2. **Waypoint load.** The capture above had no GPX loaded. Re-run `perf` with a realistic waypoint
-   count; `waypoints` was 2.4ms of paint here.
-3. **Battery life.** This is a handheld and the whole cost of the change is power. Serial requires
-   USB, and USB also charges the battery, so a live measurement is impossible (see
-   `memory/hardware_constraints.md`). Measure it off-line instead: charge to full, disconnect USB,
-   leave the device running a fixed scenario (screen on, GPS fix, 100m zoom, beacon off), and record
-   wall-clock time to a fixed battery percentage using the on-device battery readout. Run the same
-   scenario on a 160 MHz build for the comparison. Expect the render — not the CPU clock — to
-   dominate, since the radar is redrawing continuously either way.
+2. **Heavier waypoint load.** All captures above were taken with 2–3 waypoints near the test location
+   (`waypoints` = 2.4ms of paint). That is a realistic light case, not an empty one — but the
+   filtering docs discuss 50-waypoint scenarios, and waypoint drawing is the one stage that scales
+   with content. Worth a `perf` reading on a dense GPX before assuming 85ms is the ceiling. Note the
+   distance filter (10× zoom radius) and 8-sector clustering bound the *drawn* count regardless of how
+   many are loaded, so the growth should be sublinear.
+3. **Battery *runtime*, not gauge calibration.** To be explicit, because the earlier wording was
+   ambiguous: **the voltage→percentage calibration does not need redoing.** The thresholds in
+   `battery.cpp` (VBAT_MAX 4.12, range 3.0–4.1V, calibrated 2026-02-13) map voltage to state of
+   charge, and that mapping is a property of the cell, not of the CPU clock.
+
+   The only clock-related effect on the *reading* is extra sag under load: ~20–30mA more current
+   through the cell's internal resistance (~150mΩ) is roughly 4mV, which against the ~1.1V full-scale
+   span is under 0.5% — below the gauge's own noise. Not worth acting on.
+
+   What is genuinely unmeasured is **how many hours the device runs on a charge**, since higher clock
+   means higher draw. Cheap version, no serial needed (serial requires USB, and USB charges the
+   battery — see `memory/hardware_constraints.md`): note the on-screen battery percentage, use the
+   device normally for a couple of hours, note it again. Compare against your sense of the previous
+   builds.
+
+   Expect the effect to be modest and possibly hard to detect: the backlight and display dominate
+   draw on this board, and the radar redraws continuously at either clock. The CPU delta is plausibly
+   5–10% of total current, not a halving of runtime.
 4. ~~**PSRAM stability.**~~ Checked 2026-07-28: no display artifacts, `I2C Requests: total=0
    failed=0`, no `Wire.cpp requestFrom Error -1`, all four tasks healthy over a 50s run. Worth
    re-checking over a long session, but 240 MHz CPU / 80 MHz octal PSRAM looks clean here.
