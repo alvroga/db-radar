@@ -138,11 +138,42 @@ Two constraints this introduced, both in `device_manager.cpp`:
    "back" buffer is still the one being scanned out. At 94 ms/frame against a 26.6 ms panel period
    this never blocks — it exists so step 10 cannot silently reintroduce tearing.
 
-### Still open
+### Still open — but read this before picking anything up
 
-Step 10 (higher PCLK, §2.4) and the Tier 0 build-config items, none of which have been attempted.
-Rotation at 47.4 ms is now half the frame and is close to its ceiling for this approach — see the
-measured breakdown below.
+**The render is no longer the bottleneck, and nothing below is needed to make the device work well.**
+At 85.2 ms/frame (~11.7 fps capability) against a 10 Hz sensor rate, the pipeline now outruns what
+feeds it. Verified outdoors with satellites locked: rotation, buttons and touch all good. Everything
+remaining is optional.
+
+Ranked by what is actually worth trying:
+
+1. **§1.4 `bb_invalidate_cache = 1`** — one flag, low risk, and the only remaining item that reduces
+   PSRAM/cache pressure rather than adding to it. Best value/effort left.
+2. **§1.2 `-O2` + silent assertions** — one line, plausibly 10–25% on the LVGL blend/fill stages.
+   Watch flash: 1.67 MB of a 2 MB OTA slot, so a 5–10% growth still fits with ~270 KB spare.
+3. **§1.5 panel ISR core** — one `xPortGetCoreID()` printf in `on_vsync_cb` confirms or kills the
+   hypothesis before any code moves.
+4. **§3.5/§3.6** — `Serial` fflush gating and per-frame recompute. Small, safe, mostly hygiene.
+
+Deprioritized or not worth it:
+
+- **§2.4 higher PCLK — may make the frame *slower*.** See the 2026-07-29 re-assessment in that
+  section: at 16 MHz the panel would read 27.8 MB/s from PSRAM against a bg fill that only achieves
+  22.5 MB/s and is already bandwidth-bound. Higher PCLK buys a shorter tearing window, not fps.
+- **§1.3 cache sizes** — costs ~48 KB of internal SRAM at 59.7% static already. Bad trade now.
+- **§1.6/§1.7 `FAST_MEM` / `MEMCPY_STD`** — `FAST_MEM` was aimed at LVGL's `draw_buf_rotate_90`,
+  which we no longer call at all (own tiled transpose). Marginal.
+- **§3.1 grid lines as rects** — grid is 5.4 ms of a 9.3 ms paint stage, and paint measured 1.01× on
+  a 1.5× clock, so it is not compute-bound. The payoff keeps shrinking.
+- **§1.8 flash QIO** — void, and the reason is subtle: `flasher_args.json` says `dio`, but that only
+  governs the ROM bootloader's initial load. `CONFIG_ESPTOOLPY_FLASHMODE_QIO=y` makes the 2nd-stage
+  bootloader upgrade the chip at runtime, and the boot log confirms it: `qio_mode: Enabling default
+  flash chip QIO` / `SPI Mode : QIO`. **Already QIO.** (The two config sites disagreeing is still
+  worth tidying — §4.2.)
+
+Rotation at 38.3 ms remains the largest single stage (~45% of the frame). The 240 MHz measurement
+showed it had ~24% CPU headroom, so it is *not* purely bandwidth-bound as previously assumed — it is
+the best target if anyone wants to keep going.
 
 ---
 
@@ -889,6 +920,37 @@ by decoupling the panel's real-time fetch from PSRAM.
 - **Caveat**: raising PCLK also raises the bounce-ISR memcpy rate proportionally (§1.4/§1.5), so do
   §1.4 and §1.5 first.
 
+#### ⚠️ Re-assessed 2026-07-29: higher PCLK may make the *frame* slower, not faster
+
+This item was written when the frame was 149ms and reads as pure upside. The 240 MHz per-stage
+measurements make the trade-off concrete, and it cuts the other way:
+
+The panel continuously fetches the whole framebuffer from PSRAM — 480×480×2 = 460 KB per refresh.
+
+| PCLK | Panel refresh | PSRAM read by panel |
+|---|---|---|
+| 10 MHz (now) | 37.7 Hz | **17.4 MB/s** |
+| 16 MHz | 60.3 Hz | **27.8 MB/s** |
+
+For comparison, the radar bg fill *writes* 460 KB in 20.5ms = **22.5 MB/s**, and that stage was
+measured to be bandwidth-bound (it scaled only 1.05× with a 1.5× CPU clock). So the panel at 16 MHz
+would be consuming a share of PSRAM bandwidth comparable to everything the render achieves — against
+the two stages already proven to be sitting on that exact limit.
+
+**The likely outcome is that rotate and bg fill both get slower**, partially or wholly cancelling the
+higher panel rate. What a higher PCLK actually buys is a shorter tearing window and lower
+present-latency — not more fps, since fps is set by our 85ms frame, not by the panel's 26.6ms period.
+
+So step 10 is no longer "High impact". Revised view:
+
+- Measure PSRAM contention *before* chasing 60 Hz: raise PCLK and re-read the per-stage `perf`
+  numbers. If rotate goes up more than the panel period comes down, revert.
+- §1.4 (`bb_invalidate_cache`) becomes more important, not less — it is the one change that reduces
+  the panel's effective cache/bandwidth cost rather than adding to it.
+- This is also the point where the `on_frame_buf_complete` guard stops being theoretical: margin is
+  85ms/26.6ms ≈ 3.2× now, and 16 MHz cuts the panel period to 16.6ms (≈5.1× — the guard gets *more*
+  margin from the frame side, but the swap-to-latch window shortens in wall-clock terms).
+
 ---
 
 ## 3. Tier 2 — Draw-level and scheduling work
@@ -1061,7 +1123,8 @@ of the time is in stage 3.
 | — | **`fill_bg` → `lv_color_fill` (C1)** | XS | **9.6× on the dominant call** | Low | ✅ done `fa63a03` |
 | — | **Decouple heading redraw (§3.2 → C2)** | XS | **1 Hz → 5 Hz rotation** | Low | ✅ done |
 | — | Mutex worst case (§3.3) | — | — | — | ✅ resolved by C2 |
-| 1 | CPU 240 MHz (§1.1) | XS | **High** | Low (power) | open |
+| 1 | CPU 240 MHz (§1.1) | XS | **101.5 → 85.2 ms** | Low (power) | ✅ done `feb6f59` |
+| — | **Sensor rate 5 → 10 Hz** (compass + GPS) | XS | felt smoothness, not ms | Low | ✅ done `feb6f59` |
 | 2 | `bb_invalidate_cache` (§1.4) | XS | **High** | Low | open |
 | 3 | Flash mode DIO → QIO (§1.8) | XS | — | — | ❌ void — already QIO |
 | 3b | `-O2` + silent assertions (§1.2) | XS | Medium | Low (flash) | open |
@@ -1073,7 +1136,7 @@ of the time is in stage 3.
 | 8b | **`clip_corner` cover-check fix (C5)** | XS | **210 → 149 ms** | Low | ✅ done `44f6d0d` |
 | 9b | **Transpose tuning: `IRAM_ATTR` + SRAM scratch tile (→ C6)** | S | 64.1 → 55.7 ms rotation | Low | ✅ done `311ca3c` |
 | 9 | **`num_fbs = 2`, transpose into the back FB (§2.3 → C7)** | M | **flush 34 → 0.02 ms, frame 145 → 94 ms** | Medium | ✅ done `311ca3c` |
-| 10 | Re-test higher PCLK (§2.4) | S | High (60 Hz) | **Medium-high** | open |
+| 10 | Re-test higher PCLK (§2.4) | S | ~~High (60 Hz)~~ **may be negative** — see §2.4 re-assessment | **Medium-high** | open, deprioritized |
 | 11 | Waypoint memory (see ROADMAP) | M | Raises the 50-waypoint cap | Low | open |
 | 12 | Serial flush / recompute-per-frame (§3.5–3.6) | S | Low–medium | Low | open |
 | 13 | Doc reconciliation (§4.1) | S | — | — | open |
