@@ -1,7 +1,7 @@
 # Performance Optimization Backlog
 
-**Status**: Largely implemented. **Frame ~499 ms → 149 ms (~0.8 → ~6.7 fps).** See "Completed"
-below for what shipped and the measured breakdown for where the remaining 149 ms sits. Sections 0–5
+**Status**: Largely implemented. **Frame ~499 ms → 94 ms (~0.8 → ~10 fps).** See "Completed"
+below for what shipped and the measured breakdown for where the remaining 94 ms sits. Sections 0–5
 are the **original 2026-07-27 analysis, preserved as written** — several of their conclusions were
 disproved by measurement, and the ones that were are flagged inline. Trust the ✅ sections over
 them.
@@ -89,11 +89,60 @@ painting inside the stage. One flag, both symptoms.
 
 Nothing lost visually: the panel is physically round, so the clipped corners are not on the glass.
 
+### C6. Transpose tuning (step 9b) — 2026-07-28
+
+Commit `311ca3c`. Measured: **rotation 64.1 → 55.7 ms**, short of the projected ~40 ms.
+
+`rotate90_tiled` gained `IRAM_ATTR` and an internal-SRAM scratch tile. Tiling alone still left one of
+the two PSRAM streams strided — whichever loop is innermost gets sequential access and the other hops
+by a 960-byte row stride. Transposing *via* a 2 KB SRAM tile makes both PSRAM sides sequential: read
+a source row run, scatter into SRAM (not cached on the S3, so free), emit each destination row run as
+one `memcpy`.
+
+**Why the ~40 ms projection was wrong, and how it could have been known in advance.** The answer was
+already in the step-8 measurements: `esp_lcd_panel_draw_bitmap` moved the same 460 KB PSRAM→PSRAM
+with an optimized `memcpy` in 34 ms — **27 MB/s**, a clean upper bound for this hardware on this
+access pattern. The transpose after tuning runs at ~16.5 MB/s. Real remaining headroom was ~1.6×, not
+1.6× *on top of* what tiling had already delivered. The ~40 ms number was another unmeasured guess;
+the bound to check it against was sitting two tables away.
+
+### C7. `num_fbs = 2`, zero-copy flush (§2.3, step 9) — 2026-07-28
+
+Commit `311ca3c`. Measured: **flush 34.0 → 0.02 ms** — deleted, not reduced — and **frame 145 → 94 ms**.
+
+The panel allocates two framebuffers. `rotate90_tiled` writes into the back one and hands that
+pointer to `esp_lcd_panel_draw_bitmap`, which scans its own framebuffer list, recognises the pointer,
+and just sets `cur_fb_index` (`esp_lcd_panel_rgb.c:614-624`). The staging-buffer write and the
+full-screen memcpy both disappear in one change.
+
+The revised plan in §2.3 was the right shape — `full_refresh` + `direct_mode` as originally written
+would not have worked, because the pixels still have to be rotated somewhere.
+
+**Rotation also fell, 55.7 → 47.4 ms.** Nothing about the transpose changed; the flush memcpy had
+been competing with it for PSRAM bandwidth and cache. This reversed a decision made during 9b: a
+64-pixel tile beat 32 by 3.4 ms *while the flush existed*, and by 0.5 ms (noise) once it was gone. The
+tile went back to 32 and kept 6 KB of SRAM. **Tuning constants measured against a pipeline you are
+about to change are provisional — re-measure them after.**
+
+**PSRAM −460 KB net**: +460 KB for the second framebuffer, −920 KB from no longer allocating the
+rotation staging buffers at all.
+
+Two constraints this introduced, both in `device_manager.cpp`:
+
+1. **`full_refresh = 1` is load-bearing for the zero-copy path.** A partial flush area would leave
+   the rest of the alternate framebuffer holding a two-frames-old image. It moves in lockstep with
+   the rotation mode in both `initLVGL()` and `applyPendingRotMode()`, because LVGL rejects
+   `full_refresh` together with `sw_rotate` — so `rot on` must clear it.
+2. **`on_frame_buf_complete` guards the transpose.** The driver latches `bb_fb_index = cur_fb_index`
+   only at a frame boundary (`esp_lcd_panel_rgb.c:831-834`), so between a swap and that latch the
+   "back" buffer is still the one being scanned out. At 94 ms/frame against a 26.6 ms panel period
+   this never blocks — it exists so step 10 cannot silently reintroduce tearing.
+
 ### Still open
 
-Steps 9 (`num_fbs = 2`, §2.3), transpose tuning, and 10 (higher PCLK, §2.4). Rotation at 64 ms and
-flush at 34 ms are now the top two items; both are addressed by code this project owns. See the
-measured breakdown above.
+Step 10 (higher PCLK, §2.4) and the Tier 0 build-config items, none of which have been attempted.
+Rotation at 47.4 ms is now half the frame and is close to its ceiling for this approach — see the
+measured breakdown below.
 
 ---
 
@@ -214,6 +263,7 @@ cause.** The pattern is worth stating explicitly because it survived two correct
 | "Software rotation is the single biggest item, 153 ms" (§2.2) | `refr` with nothing subtracted | Rotation was ~65 ms once isolated |
 | "The canvas blit is 131 ms" (§2.1, rank 2 above) | `refr − rot` | Blit was ~22 ms |
 | "Dropping the canvas saves ~104 ms" | `refr − rot − flush` | It saved ~28 ms |
+| "Transpose tuning gets 64 → ~40 ms" | nothing — pure guess | It got 55.7 ms (C6) |
 
 Each time the unmeasured remainder was given the name of whatever hypothesis was in play. Each time
 the real cost was something nobody had thought to bracket. The fix was never cleverness — it was
@@ -223,6 +273,18 @@ adding one more timer and letting the residual shrink until it pointed at someth
 "unmeasured" and bracket it before proposing work against it.** The instrumentation is cheap
 (`esp_timer_get_time()` either side of the suspect call); the rewrites justified by bad attribution
 are not.
+
+**Corollary, from C6: look for a bound before guessing.** The ~40 ms transpose estimate had no
+measurement behind it at all, but a hard upper bound on what it could ever achieve was already in the
+document — the flush moved the same 460 KB PSRAM→PSRAM with an optimized `memcpy` at 27 MB/s. Any
+hand-written per-pixel loop over the same bytes was going to land under that. When estimating a
+memory-bound rewrite, first find the cheapest existing operation that touches the same bytes and use
+its measured throughput as the ceiling.
+
+**Second corollary, from C7: constants tuned against a pipeline you are about to change are
+provisional.** The transpose tile size was measured at 64 during step 9b and re-measured at 32 after
+step 9 removed a competing memcpy — the 3.4 ms that justified the larger tile, and its 6 KB of SRAM,
+had evaporated. Re-check tuning parameters after any change to what runs alongside them.
 
 ---
 
@@ -254,18 +316,59 @@ component of `REFRESH`, not sequential with it. Frame = `label + refresh`. Addin
 double-counts, which is what the pre-step-8 FRAME TOTAL did — correctly, back when the canvas made
 the two stages sequential.
 
-### Where the 149 ms now sits
+### Where the 149 ms sat, and what steps 9b + 9 did to it
+
+| Item | Was | Now | Note |
+|---|---|---|---|
+| Tiled rotate | 64.1 ms | **47.4 ms** | 9b tuning, plus 8 ms it gained for free when the flush stopped contending |
+| Flush to framebuffer | 33.9 ms | **0.02 ms** | Deleted by the framebuffer swap |
+| Radar bg fill | 21.5 ms | 21.5 ms | At PSRAM write bandwidth for 460 KB; little headroom |
+| LVGL non-radar draw | 16.4 ms | ~23 ms | HUD widgets; varies with content, not touched by this work |
+| Radar paint | 13.1 ms | 9.4 ms | grid could use rects instead of 3px lines (§3.1) |
+| **FRAME** | **149.6 ms** | **94–101 ms** | ~6.7 → ~10 fps |
+
+The projection was ~91 ms / ~11 fps, so this landed close — but the split was nothing like predicted:
+9b returned less than half its estimate and 9 returned more than its own, because the two items were
+not independent. See C6 and C7.
+
+---
+
+## ✅ MEASURED — 2026-07-28, after steps 9b + 9
+
+Full-frame refresh (230,400 px), TILED rotation into the back framebuffer, indoors:
+
+```
+--- label stage (updateRadarDisplay): 0.3 ms ---
+--- paint stage (radarDrawEventCb — NESTED inside REFRESH) ---
+  grid:            4489 us  (  4.5 ms)
+  waypoints:       3148 us  (  3.1 ms)
+  triangle+N+gauge:1709 us  (  1.7 ms)
+  PAINT TOTAL:     9365 us  (  9.4 ms)
+--- refresh stage ---
+  REFRESH:           94 ms   (230400 px)
+    tiled rotate:           47359 us ( 47.4 ms)
+    flush to framebuffer:      24 us (  0.0 ms)
+    radar bg fill:          21475 us ( 21.5 ms)
+    radar paint:             9365 us (  9.4 ms)
+    LVGL non-radar draw:    23213 us ( 23.2 ms)
+FRAME TOTAL:       94.3 ms  (label 0.3 + refresh 94)
+```
+
+**Frame ~499 ms → 94 ms across the whole effort (~0.8 → ~10 fps).**
+
+### Where the 94 ms now sits
 
 | Item | Cost | Share | Next move |
 |---|---|---|---|
-| Tiled rotate | 64.1 ms | 43% | `IRAM_ATTR` + sequential writes → ~40 ms |
-| Flush to framebuffer | 33.9 ms | 23% | `num_fbs = 2`: transpose into the back buffer, swap — deletes this entirely |
-| Radar bg fill | 21.5 ms | 14% | At PSRAM write bandwidth for 460 KB; little headroom |
-| LVGL non-radar draw | 16.4 ms | 11% | HUD widgets. Small. |
-| Radar paint | 13.1 ms | 9% | grid could use rects instead of 3px lines (§3.1) |
+| Tiled rotate | 47.4 ms | 50% | ~16.5 MB/s against a ~27 MB/s memcpy ceiling. Remaining headroom is ~1.6× *at best* and needs hand-tuned Xtensa, not another loop rewrite |
+| LVGL non-radar draw | 23.2 ms | 25% | HUD widgets — now the second-largest item and never yet investigated |
+| Radar bg fill | 21.5 ms | 23% | 460 KB at PSRAM write bandwidth; little headroom |
+| Radar paint | 9.4 ms | 10% | grid as rects instead of 3px lines (§3.1) is worth ~4 ms |
 
-Steps 9 + transpose tuning together project to **~91 ms / ~11 fps**, and unlike everything above
-they touch only code this project owns.
+Note the two 460 KB full-screen writes that remain (rotate + bg fill) are **69 ms of the 94** and both
+are near the memory ceiling. Further large wins have to come from doing fewer full-screen passes or
+from raising the memory clock — i.e. the Tier 0 items (§1.1 CPU 240 MHz, §1.4 `bb_invalidate_cache`)
+and step 10, not from more of what steps 7–9 did.
 
 ### Also corrected by the boot log
 
@@ -282,7 +385,9 @@ at runtime by the bootloader's `qio_mode` step. Remove this item; there is nothi
 ---
 **Scope**: Render pipeline, build configuration, task architecture.
 **Goal**: Smooth navigation. Reduce per-frame cost so the radar can rotate/translate at 10–20 Hz.
-**Progress**: ~1 Hz → **~6.7 Hz**. Rotation and translation both track the compass/GPS at 5 Hz.
+**Progress**: ~1 Hz → **~10 Hz**. Rotation and translation both track the compass/GPS at 5 Hz, so
+the **sensor rate is now the binding constraint** — the radar can render roughly twice as fast as it
+is being asked to. §3.2's "raise the compass rate" is the highest-value item left for smoothness.
 
 ---
 
@@ -868,8 +973,8 @@ of the time is in stage 3.
 | 7 | **Tiled transpose, drop `sw_rotate` (§2.2 A → C3)** | M | **162 → 64.3 ms rotation** | Medium | ✅ done `ff82116` |
 | 8 | **Drop the canvas → `DRAW_MAIN` (§2.1 → C4)** | M–L | 238 → 210 ms, −460 KB PSRAM | Medium | ✅ done `816b421` |
 | 8b | **`clip_corner` cover-check fix (C5)** | XS | **210 → 149 ms** | Low | ✅ done `44f6d0d` |
-| 9 | `num_fbs = 2` + direct mode (§2.3) | M | **High (−34 ms flush)** | Medium | open |
-| 9b | Transpose tuning: `IRAM_ATTR` + sequential writes | S | **High (64 → ~40 ms)** | Low | open |
+| 9b | **Transpose tuning: `IRAM_ATTR` + SRAM scratch tile (→ C6)** | S | 64.1 → 55.7 ms rotation | Low | ✅ done `311ca3c` |
+| 9 | **`num_fbs = 2`, transpose into the back FB (§2.3 → C7)** | M | **flush 34 → 0.02 ms, frame 145 → 94 ms** | Medium | ✅ done `311ca3c` |
 | 10 | Re-test higher PCLK (§2.4) | S | High (60 Hz) | **Medium-high** | open |
 | 11 | Waypoint memory (see ROADMAP) | M | Raises the 50-waypoint cap | Low | open |
 | 12 | Serial flush / recompute-per-frame (§3.5–3.6) | S | Low–medium | Low | open |
@@ -888,9 +993,13 @@ inverse of this table's original estimates:
 | `clip_corner` fix (C5) | XS — one style flag | **−61 ms** |
 | `fill_bg` → `lv_color_fill` (C1) | XS — a few lines | **−184 ms** |
 | Tiled transpose (C3) | M — one function | −98 ms |
+| `num_fbs = 2` (C7) | M — config + flush path | −51 ms |
 | Drop the canvas (C4) | M–L — 62 call sites | −28 ms |
+| Transpose tuning (C6) | S — one function | −8 ms |
 
 The two cheapest changes delivered the most. Both were found by measurement, not by reading code and
 reasoning about it — and C4, the largest rewrite in the list, returned the least. Bracket first.
 
-Steps 9 + 9b project to **~91 ms / ~11 fps** and touch only code this project owns.
+**Frame ~499 ms → 94 ms (~0.8 → ~10 fps).** What remains is 69 ms of full-screen PSRAM writes
+(rotate 47.4 + bg fill 21.5) sitting near the memory ceiling, so the next real wins are the untried
+Tier 0 items and step 10 — raising the clocks — not more pipeline surgery.

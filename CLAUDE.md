@@ -719,7 +719,8 @@ BLE-based item finder that activates at 50m zoom. Scans for a configured beacon 
 
 **Status**: Optimized ✅ | [Backlog + measurements](docs/performance_optimization_backlog.md)
 
-Frame time went **~499ms → ~149ms (~0.8 → ~6.7 fps)**. The radar no longer uses an `lv_canvas`.
+Frame time went **~499ms → ~94ms (~0.8 → ~10 fps)**. The radar no longer uses an `lv_canvas`, and
+the flush no longer copies anything.
 
 **Current architecture**:
 - **`radar_obj`** — a plain `lv_obj` that paints itself from an `LV_EVENT_DRAW_MAIN` handler
@@ -731,9 +732,13 @@ Frame time went **~499ms → ~149ms (~0.8 → ~6.7 fps)**. The radar no longer u
   the user `DRAW_MAIN` callback — user callbacks run after `lv_obj_event_base` (`lv_event.c`,
   `event_send_core`).
 - **90° rotation is a tiled transpose** in `lvgl_flush_cb`, not LVGL's `sw_rotate`
-  (`device_manager.cpp`, `rotate90_tiled`). Runtime-switchable with `rot on|off|tiled`.
+  (`device_manager.cpp`, `rotate90_tiled`). It transposes via a 2KB internal-SRAM scratch tile so
+  both PSRAM streams stay sequential. Runtime-switchable with `rot on|off|tiled`.
+- **The panel has two framebuffers** (`num_fbs = 2`). The transpose writes directly into the back
+  one; `esp_lcd_panel_draw_bitmap` recognises its own framebuffer and swaps `cur_fb_index` instead of
+  copying. The flush costs **0.02ms** — there is no full-screen memcpy in the pipeline.
 
-**Two constraints that are load-bearing — do not "clean these up"**:
+**Four constraints that are load-bearing — do not "clean these up"**:
 
 1. **`clip_corner` must stay OFF on the radar stage** (`ui_manager.cpp`). LVGL answers
    `LV_EVENT_COVER_CHECK` with `LV_COVER_RES_MASKED` for any object with `clip_corner`, and
@@ -747,9 +752,26 @@ Frame time went **~499ms → ~149ms (~0.8 → ~6.7 fps)**. The radar no longer u
    and swallows presses before they reach the stage handler calling `handleTapAt()` — waypoint
    detail taps silently stop working while the display looks perfect.
 
+3. **`full_refresh` must stay `1` whenever the zero-copy path is active**, and `0` otherwise. The
+   transpose rewrites the entire back framebuffer; a partial flush area would leave the rest of it
+   holding a two-frames-old image. It is set from the rotation mode in both `initLVGL()` and
+   `applyPendingRotMode()` and must move with it, because LVGL rejects `full_refresh` together with
+   `sw_rotate` — so `rot on` has to clear it.
+
+4. **The `on_frame_buf_complete` guard is not dead code.** The driver latches
+   `bb_fb_index = cur_fb_index` only at a frame boundary, so between a swap and that latch the "back"
+   buffer is still being scanned out. At 94ms/frame against a 26.6ms panel period it never blocks —
+   it exists so that raising PCLK or shaving the frame further cannot silently reintroduce tearing.
+
 **Timing semantics**: painting runs *inside* the LVGL refresh, so `paint_us` is a component of
 `refr_ms`, not sequential with it. **Frame = `label_us + refr_ms`** — adding `paint` double-counts.
 Read via the `perf` serial command or the DEV tab.
+
+**Where the 94ms sits**: rotate 47.4 + non-radar LVGL draw 23.2 + radar bg fill 21.5 + radar paint
+9.4. The two full-screen 460KB PSRAM writes (rotate, bg fill) are 69ms of that and sit near the
+memory ceiling — a plain optimized `memcpy` over the same bytes measures ~27 MB/s. Further large wins
+need higher clocks (CPU is at 160MHz, not the 240MHz quoted above; PCLK at 10MHz), not more pipeline
+rewriting. **The render is now roughly 2× faster than the 5Hz sensor rate feeding it.**
 
 **Methodology note**: three separate estimates in the backlog were wrong because a *residual*
 (`total − known`) was named after a hypothesis. Never attribute an un-instrumented remainder; bracket
