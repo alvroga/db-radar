@@ -9,6 +9,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+**Sonar rhythm: the beat grid was walking, and the waypoint tempo had no hysteresis** — ⏳ *awaiting
+hardware verification*
+
+Found by a full-subsystem audit (2026-07-31) prompted by the question "did anyone check anything
+other than the render?" — the answer was no; the whole optimization effort had been scoped to frame
+time. Two independent defects, both audible, neither related to CPU speed.
+
+**1. The sonar beat grid re-based off actual fire time** (`buzzer.cpp`). `sonar_next_beep_ms = now +
+interval` used `now` — whenever `update()` happened to run, up to one I2C Task period (20 ms) late.
+Every period was therefore `interval + (0..20 ms)`:
+
+- per-beat jitter up to 20 ms — **8% at the 250 ms CLOSE interval**, well above the ~10 ms the ear
+  resolves;
+- tempo systematically **~4% flat**, because the grid absorbed the mean lateness instead of holding.
+
+Now advances by a fixed step (`+= interval`) so the average tempo is exact, with a catch-up guard
+that resyncs rather than firing backdated beeps if a stall puts it more than one interval behind.
+
+**2. Waypoint proximity sonar had no hysteresis at all** (`navigation.cpp`). Distance→tempo was a
+bare if/else ladder with hard boundaries at 5/10/30/50 m, evaluated at the 10 Hz sensor rate against
+a GPS position that jitters ±2–5 m even with a good fix. Standing still near a boundary made the
+tempo flip between two rates at random — a beep interval alternating between 500 and 750 ms sounds
+broken.
+
+Replaced with a zone state machine mirroring the one `beacon_proximity` already used for RSSI:
+**±3 m hysteresis** on the exit threshold of the current zone, plus a **1000 ms confirmation hold**
+before a zone change commits. Both guards are needed — hysteresis alone still flips on one large GPS
+excursion, confirmation alone still flips on sustained jitter across the boundary. Zone state resets
+on every disengage path so re-engaging never inherits a stale zone.
+
+### Removed
+
+**Blocking `buzzer::rapidPulse()`** — spun in `delay()` for ~60 ms and had no callers left after
+`rapidPulseAsync()` superseded it. Called from the UI Task it would have stalled LVGL for most of a
+frame.
+
+**Build impact**: RAM 195,592 → 195,600 (**+8 B**), flash 1,666,247 → 1,666,611 (**+364 B**).
+
+**Also documented, not yet implemented**: [`docs/performance_optimization_backlog.md`](docs/performance_optimization_backlog.md)
+§7 (beacon BLE feed is rate-starved at 2 Hz against a 5 Hz source — not a CPU problem) and §8 (audit
+of every remaining subsystem). Plus [`docs/beacon_direction_finding.md`](docs/beacon_direction_finding.md)
+— whether the device can tell you which way to walk. Short answer: BT 5.1 AoA is impossible on this
+hardware, but body-shadow DF using the compass works, and is blocked on §7 because at 2 Hz a rotation
+yields 1.7 samples per 30° bin.
+
 ### Performance
 
 **CPU restored to 240MHz, and sensors raised to 10Hz now that the render outruns them**

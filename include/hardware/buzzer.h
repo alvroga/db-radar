@@ -39,16 +39,12 @@ void doubleBeep();
 void patternBeep(uint16_t main_duration_ms = 150);
 
 /**
- * @brief Play 3x rapid pulses (for button press feedback)
- * Pattern: 10ms on, 10ms off x3 = 60ms total
- * Note: This is a blocking call for simplicity
- */
-void rapidPulse();
-
-/**
  * @brief Request 3x rapid pulses asynchronously (non-blocking)
  * State is set here; actual I2C toggling is driven by update() in the I2C Task.
- * Use this from UI Task instead of rapidPulse() to avoid blocking LVGL.
+ *
+ * This is the only rapid-pulse entry point. A blocking rapidPulse() that spun in
+ * delay() for ~60ms was removed 2026-07-31 — it had no callers left and calling it
+ * from the UI Task would have stalled LVGL for most of a frame.
  */
 void rapidPulseAsync();
 

@@ -757,11 +757,110 @@ static void drawWaypoints(lv_draw_ctx_t* ctx, int screen_size) {
     }
 }
 
+// ── Waypoint sonar zones ────────────────────────────────────────────────────
+// Distance→tempo used to be a bare if/else ladder on the raw Haversine result.
+// That ladder had no hysteresis, and it is evaluated at the 10Hz sensor rate
+// against a GPS position that jitters by ±2-5m even with a good fix — so standing
+// still near a boundary made the tempo flip between two rates at random. A beep
+// interval alternating between 500 and 750ms sounds broken.
+//
+// This mirrors the structure beacon_proximity already uses for RSSI zones
+// (classifyRSSI + pending-zone confirmation): widen the exit threshold of
+// whichever zone we are currently in, then require the new zone to persist before
+// committing to it. Both guards are needed — hysteresis alone still flips on a
+// single large GPS excursion, and confirmation alone still flips on sustained
+// jitter across the boundary.
+enum class WaypointSonarZone : uint8_t {
+    NONE = 0,   // beyond 50m — silent
+    FAR,        // 30-50m
+    MID,        // 10-30m
+    NEAR,       //  5-10m
+    IMMEDIATE   //   <=5m
+};
+
+// Zone boundaries in metres, and the guard constants.
+static constexpr float WP_SONAR_IMMEDIATE_M =  5.0f;
+static constexpr float WP_SONAR_NEAR_M      = 10.0f;
+static constexpr float WP_SONAR_MID_M       = 30.0f;
+static constexpr float WP_SONAR_FAR_M       = 50.0f;
+
+// 3m ≈ the upper end of good-fix GPS jitter. Large enough to absorb it, small
+// enough that the boundaries still land near their nominal distances.
+static constexpr float    WP_SONAR_HYSTERESIS_M  = 3.0f;
+// Hold the pending zone this long before committing. 1000ms matches the effective
+// confirmation window the beacon path had at its old sample rate.
+static constexpr uint32_t WP_SONAR_CONFIRM_MS    = 1000;
+
+/**
+ * @brief Classify distance into a sonar zone, with the current zone's exit
+ *        threshold widened by WP_SONAR_HYSTERESIS_M.
+ *
+ * Direction of the widening is inverted relative to the beacon's RSSI version:
+ * here a *smaller* value means closer, so leaving a zone outward means exceeding
+ * a raised threshold, and entering it from outside means beating a lowered one.
+ */
+static WaypointSonarZone classifyWaypointDistance(float d, WaypointSonarZone current) {
+    float t_immediate = WP_SONAR_IMMEDIATE_M;
+    float t_near      = WP_SONAR_NEAR_M;
+    float t_mid       = WP_SONAR_MID_M;
+    float t_far       = WP_SONAR_FAR_M;
+
+    switch (current) {
+        case WaypointSonarZone::IMMEDIATE:
+            t_immediate += WP_SONAR_HYSTERESIS_M;   // must pass 8m to leave IMMEDIATE
+            break;
+        case WaypointSonarZone::NEAR:
+            t_immediate -= WP_SONAR_HYSTERESIS_M;   // must reach 2m to enter IMMEDIATE
+            t_near      += WP_SONAR_HYSTERESIS_M;   // must pass 13m to leave NEAR
+            break;
+        case WaypointSonarZone::MID:
+            t_near      -= WP_SONAR_HYSTERESIS_M;   // must reach 7m to enter NEAR
+            t_mid       += WP_SONAR_HYSTERESIS_M;   // must pass 33m to leave MID
+            break;
+        case WaypointSonarZone::FAR:
+            t_mid       -= WP_SONAR_HYSTERESIS_M;   // must reach 27m to enter MID
+            t_far       += WP_SONAR_HYSTERESIS_M;   // must pass 53m to leave FAR
+            break;
+        case WaypointSonarZone::NONE:
+            t_far       -= WP_SONAR_HYSTERESIS_M;   // must reach 47m to enter FAR
+            break;
+    }
+
+    if (d <= t_immediate) return WaypointSonarZone::IMMEDIATE;
+    if (d <= t_near)      return WaypointSonarZone::NEAR;
+    if (d <= t_mid)       return WaypointSonarZone::MID;
+    if (d <= t_far)       return WaypointSonarZone::FAR;
+    return WaypointSonarZone::NONE;
+}
+
+/** @brief Sonar interval for a confirmed zone. 0 = silent. */
+static uint32_t waypointSonarInterval(WaypointSonarZone zone) {
+    switch (zone) {
+        case WaypointSonarZone::IMMEDIATE: return 250;
+        case WaypointSonarZone::NEAR:      return 500;
+        case WaypointSonarZone::MID:       return 750;
+        case WaypointSonarZone::FAR:       return 1500;
+        default:                           return 0;
+    }
+}
+
+// Confirmed zone state. Reset by resetWaypointSonarZone() whenever the sonar is
+// disengaged, so re-engaging never inherits a stale zone from a previous fix.
+static WaypointSonarZone s_wp_zone         = WaypointSonarZone::NONE;
+static WaypointSonarZone s_wp_pending_zone = WaypointSonarZone::NONE;
+static uint32_t          s_wp_pending_since_ms = 0;
+
+static void resetWaypointSonarZone() {
+    s_wp_zone             = WaypointSonarZone::NONE;
+    s_wp_pending_zone     = WaypointSonarZone::NONE;
+    s_wp_pending_since_ms = 0;
+}
+
 /**
  * @brief Drive proximity sonar for a fixed (user-selected) waypoint.
  *
  * Maps GPS distance to sonar interval, taking sonar priority from beacon proximity.
- * Called every time updateRadarDisplay() runs (~5Hz with GPS lock).
+ * Called every time updateRadarDisplay() runs (~10Hz with GPS lock).
  * Respects the master sound setting (button_sound_enabled).
  */
 static void updateWaypointFixSonar() {
@@ -769,6 +868,7 @@ static void updateWaypointFixSonar() {
 
     if (ui.fixed_waypoint_index < 0 || ui.fixed_waypoint_index >= ui.waypoint_count) {
         beacon_proximity::suppressSonar(false);
+        resetWaypointSonarZone();
         return;
     }
 
@@ -776,18 +876,21 @@ static void updateWaypointFixSonar() {
     if (ui.current_zoom != ui_manager::ZoomLevel::ZOOM_50M) {
         beacon_proximity::suppressSonar(false);
         buzzer::stopSonar();
+        resetWaypointSonarZone();
         return;
     }
 
     const auto& settings = settings_manager::getSettings();
     if (!settings.button_sound_enabled) {
         beacon_proximity::suppressSonar(false);
+        resetWaypointSonarZone();
         return;
     }
 
     const ui_manager::Waypoint& wp = ui.waypoints[ui.fixed_waypoint_index];
     if (!wp.valid || ui.center_lat == 0.0 || ui.center_lon == 0.0) {
         beacon_proximity::suppressSonar(false);
+        resetWaypointSonarZone();
         return;
     }
 
@@ -800,16 +903,33 @@ static void updateWaypointFixSonar() {
                cos(lat1) * cos(lat2) * sin(dLon / 2.0) * sin(dLon / 2.0);
     float distance_m = (float)(EARTH_RADIUS_M * 2.0 * atan2(sqrt(a), sqrt(1.0 - a)));
 
-    // Map distance to sonar interval — 4 zones, silent beyond 50m
-    uint32_t interval_ms = 0;
-    if      (distance_m <=  5.0f)  interval_ms = 250;
-    else if (distance_m <= 10.0f)  interval_ms = 500;
-    else if (distance_m <= 30.0f)  interval_ms = 750;
-    else if (distance_m <= 50.0f)  interval_ms = 1500;
+    // Classify with hysteresis, then require the new zone to hold for
+    // WP_SONAR_CONFIRM_MS before the tempo actually changes. Without this the
+    // tempo tracked GPS noise directly — see the WaypointSonarZone comment above.
+    const uint32_t now = millis();
+    const WaypointSonarZone candidate = classifyWaypointDistance(distance_m, s_wp_zone);
+
+    if (candidate == s_wp_zone) {
+        // Still in the confirmed zone — drop any pending change
+        s_wp_pending_zone     = s_wp_zone;
+        s_wp_pending_since_ms = 0;
+    } else if (candidate == s_wp_pending_zone) {
+        // Same candidate as last time — commit once it has held long enough
+        if (s_wp_pending_since_ms != 0 &&
+            (now - s_wp_pending_since_ms) >= WP_SONAR_CONFIRM_MS) {
+            s_wp_zone             = candidate;
+            s_wp_pending_since_ms = 0;
+        }
+    } else {
+        // New candidate — start its hold timer
+        s_wp_pending_zone     = candidate;
+        s_wp_pending_since_ms = now;
+    }
 
     // Suppress beacon sonar so waypoint fix has priority
     beacon_proximity::suppressSonar(true);
 
+    const uint32_t interval_ms = waypointSonarInterval(s_wp_zone);
     if (interval_ms > 0) buzzer::setSonarInterval(interval_ms, 30);
     else                  buzzer::stopSonar();
 }

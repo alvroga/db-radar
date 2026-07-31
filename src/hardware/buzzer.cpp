@@ -134,19 +134,6 @@ void patternBeep(uint16_t main_duration_ms) {
     on();
 }
 
-void rapidPulse() {
-    if (!g_state.initialized) return;
-
-    // 3x rapid pulses: 10ms on, 10ms off (bz 21 pattern)
-    // Blocking call for simplicity - total ~60ms
-    for (int i = 0; i < 3; i++) {
-        on();
-        delay(10);
-        off();
-        delay(10);
-    }
-}
-
 void rapidPulseAsync() {
     if (!g_state.initialized) return;
     // Skip if already running
@@ -205,14 +192,32 @@ void update() {
         return;  // Rapid pulse owns the buzzer until all pulses are done
     }
 
-    // Sonar mode: autonomous rhythmic beeping (10ms precision)
-    // Pattern beeps (button feedback) take priority over sonar
+    // Sonar mode: autonomous rhythmic beeping.
+    // Pattern beeps (button feedback) take priority over sonar.
     if (g_state.sonar_active && g_state.sonar_interval_ms > 0
         && g_state.pattern_state == PatternState::IDLE) {
-        if (now >= g_state.sonar_next_beep_ms) {
+        if ((int32_t)(now - g_state.sonar_next_beep_ms) >= 0) {
             on();
             g_state.off_time_ms = now + g_state.sonar_beep_duration_ms;
-            g_state.sonar_next_beep_ms = now + g_state.sonar_interval_ms;
+
+            // Advance the beat grid, do NOT re-base it off `now`.
+            //
+            // This used to be `= now + interval`, where `now` is whenever update()
+            // happened to run — up to one caller period late (I2C Task, 20ms). That
+            // made every period `interval + (0..20ms)`, so the tempo ran flat by the
+            // mean lateness (~4% at the 250ms CLOSE interval) and the grid walked
+            // instead of holding. The ear resolves ~10ms, so it was audible.
+            //
+            // Advancing by a fixed step keeps the average tempo exact; jitter stays
+            // bounded by the caller period but no longer accumulates into drift.
+            g_state.sonar_next_beep_ms += g_state.sonar_interval_ms;
+
+            // Catch-up guard: if we fell more than one interval behind (long I2C
+            // stall, or the interval was just shortened), resync to `now` rather
+            // than firing a burst of backdated beeps to "catch up".
+            if ((int32_t)(now - g_state.sonar_next_beep_ms) >= 0) {
+                g_state.sonar_next_beep_ms = now + g_state.sonar_interval_ms;
+            }
         }
     }
 

@@ -529,6 +529,7 @@ Detailed component documentation is available in the `docs/` directory:
 - [`docs/display.md`](docs/display.md) - ST7701 display configuration and timing
 - [`docs/touch.md`](docs/touch.md) - CST820 touch controller integration
 - [`docs/waypoint_filtering.md`](docs/waypoint_filtering.md) - **NEW**: Waypoint filtering system and off-screen indicators
+- [`docs/beacon_direction_finding.md`](docs/beacon_direction_finding.md) - **NEW**: can we tell the direction to the beacon? (yes, via body-shadow DF — blocked on BLE rate work)
 - [`docs/i2c.md`](docs/i2c.md) - I2C bus management and device communication
 - [`docs/memory_management.md`](docs/memory_management.md) - Advanced memory management system guide
 - [`docs/peripherals.md`](docs/peripherals.md) - RTC, GPS integration guides
@@ -704,6 +705,19 @@ BLE-based item finder that activates at 50m zoom. Scans for a configured beacon 
 
 **Serial Commands**: `beacon status`, `beacon scan`, `beacon test`, `beacon zone`, `beacon trend`
 
+**⚠️ Known limitation — the BLE feed is rate-starved at 2 Hz** (audit 2026-07-31). Three things cap
+it at one RSSI sample per 500 ms: NimBLE's default controller-side duplicate filtering, the
+`g_pScan->stop()` on first hit, and `SCAN_INTERVAL_MS = 500`. The tag advertises at 200 ms, so most
+packets are discarded. The EMA and zone constants were tuned against that starved feed, giving ~3.3 s
+of end-to-end latency. **This is not a CPU problem — 240 MHz bought it nothing.** Fix is a continuous
+passive scan plus τ-based (time-derived, not sample-derived) smoothing. See
+[`docs/performance_optimization_backlog.md`](docs/performance_optimization_backlog.md) §7.
+
+**Direction finding** ("which way do I walk?") is possible via body-shadow DF using the compass, but
+is **blocked on that rate work** — at 2 Hz a rotation yields 1.7 samples per 30° bin, which is noise.
+True BT 5.1 AoA is impossible on this hardware (single antenna, no CTE IQ). Design:
+[`docs/beacon_direction_finding.md`](docs/beacon_direction_finding.md).
+
 **Code References**:
 - Arc drawing: `src/ui/navigation.cpp:390-420` - `drawBeaconProximityGauge()`
 - BLE module: `src/hardware/connectivity/beacon_proximity.cpp` - scanning, EMA, zones
@@ -814,6 +828,20 @@ what makes the rotation feel right.
 (`total − known`) was named after a hypothesis. Never attribute an un-instrumented remainder; bracket
 it with `esp_timer_get_time()` first. See "The residual trap" in the backlog.
 
+**⚠️ The backlog is no longer render-only.** It was scoped to a single number — frame time — and every
+other subsystem went unexamined until a 2026-07-31 audit. Two now carry the highest-value open work,
+and **neither is a CPU problem**:
+- **§7 — beacon proximity** is rate-starved at 2 Hz against a 5 Hz source.
+- **§8 — sonar/buzzer** has a walking beat grid (`= now + interval` instead of `+=`, ~8% jitter and a
+  ~4% flat tempo) and **no hysteresis at all** on the waypoint distance→tempo mapping, so the beat
+  flickers when GPS jitters across a boundary.
+
+§8 also grades the rest: input latency adequate for taps and coarse for drags; GPS healthy bar a
+syscall-per-byte UART drain; **compass and battery healthy, no action.** The compass is the example to
+follow — when its rate went 5→10 Hz someone correctly re-derived the heading EMA (1.5° → 0.5°). The
+recurring defect everywhere else is *a rate or quantization constant nobody re-derived after the
+pipeline around it changed*.
+
 ---
 
 ## Documentation Standards
@@ -856,4 +884,4 @@ it with `esp_timer_get_time()` first. See "The residual trap" in the backlog.
 
 *This document serves as the master reference for ESP32-S3 Touch LCD projects. Keep it updated as the architecture evolves.*
 
-**Last updated**: 2026-03-20 (NimBLE migration, logger heap, LVGL 480-line buffers, BH-880/compass/WMM)
+**Last updated**: 2026-07-31 (full-subsystem performance audit: beacon BLE rate, sonar rhythm, direction-finding feasibility)

@@ -1,11 +1,19 @@
 # Performance Optimization Backlog
 
-**Status**: Largely implemented. **Frame ~499 ms → 94 ms (~0.8 → ~10 fps).** See "Completed"
-below for what shipped and the measured breakdown for where the remaining 94 ms sits. Sections 0–5
-are the **original 2026-07-27 analysis, preserved as written** — several of their conclusions were
-disproved by measurement, and the ones that were are flagged inline. Trust the ✅ sections over
-them.
-**Date**: 2026-07-27 (measurements + completions: 2026-07-28)
+**Status**: Render work largely implemented. **Frame ~499 ms → 85.2 ms (~0.8 → ~11.7 fps).** See
+"Completed" below for what shipped and the measured breakdown for where the remaining 85 ms sits.
+Sections 0–5 are the **original 2026-07-27 analysis, preserved as written** — several of their
+conclusions were disproved by measurement, and the ones that were are flagged inline. Trust the ✅
+sections over them.
+
+**§7 and §8 are not about the render.** They were added 2026-07-31 after the question "did anyone
+check anything other than the render?" — the answer was no; this document had been scoped to a single
+number, frame time. §7 covers **beacon proximity** (rate-starved at 2 Hz against a 5 Hz source); §8 is
+a **full audit of every remaining subsystem** — sonar/buzzer, input latency, GPS, compass, battery.
+**The highest-value open work in this document is now in those two sections, not in §1–§6.** Unlike
+§1–§6 none of it is measured on hardware yet; the confidence of each claim is stated inline.
+
+**Date**: 2026-07-27 (measurements + completions: 2026-07-28; §7 + §8 added 2026-07-31)
 
 ---
 
@@ -145,7 +153,12 @@ At 85.2 ms/frame (~11.7 fps capability) against a 10 Hz sensor rate, the pipelin
 feeds it. Verified outdoors with satellites locked: rotation, buttons and touch all good. Everything
 remaining is optional.
 
-Ranked by what is actually worth trying:
+**The best remaining work is not in the render at all — it is §7, beacon proximity.** That subsystem
+has the same defect the render had before C2 (rate-starved, not compute-bound), it is still at 2 Hz
+against a 5 Hz source, and unlike everything below it is a *felt* improvement rather than milliseconds.
+Start there.
+
+Ranked by what is actually worth trying, within the render:
 
 1. **§1.4 `bb_invalidate_cache = 1`** — one flag, low risk, and the only remaining item that reduces
    PSRAM/cache pressure rather than adding to it. Best value/effort left.
@@ -174,6 +187,392 @@ Deprioritized or not worth it:
 Rotation at 38.3 ms remains the largest single stage (~45% of the frame). The 240 MHz measurement
 showed it had ~24% CPU headroom, so it is *not* purely bandwidth-bound as previously assumed — it is
 the best target if anyone wants to keep going.
+
+---
+
+## 7. Beacon proximity — the same shape of problem, a different subsystem
+
+**Added 2026-07-31.** Everything above this section is about the render pipeline; this section is the
+answer to "did anyone check the *other* subsystems?" The answer was no — the whole effort was scoped
+to one number, frame time. A read of the beacon path found a second subsystem with the same
+structural defect the render had, and it is the only one. Compass and GPS are at 10 Hz and bounded by
+the render; input polling is bounded by frame time and verified fine outdoors; battery sampling is
+5 s and irrelevant; the buzzer's sonar timer is autonomous at 10 ms and already tight.
+
+**The 240 MHz change buys the beacon nothing.** It was never compute-bound. Like the render before
+C2, it is *rate*-starved: the pipeline is fed too rarely, and no amount of CPU fixes that.
+
+### 7.1 The measurement: the feed is 2.0 Hz, the tag offers 5
+
+Three things in `src/hardware/connectivity/beacon_proximity.cpp` combine into a hard ceiling of one
+RSSI sample per 500 ms:
+
+1. NimBLE defaults to **controller-side duplicate filtering** — `m_scan_params.filter_duplicates = 1`
+   (`NimBLEScan.cpp:37`). `NimBLEScan.cpp:137` then suppresses every callback after the first for a
+   given device within a scan session. One packet per device per scan, however many arrive.
+2. `onResult` calls `g_pScan->stop()` (`:93`), deliberately ending the scan on the first hit.
+3. The next scan is gated by `SCAN_INTERVAL_MS = 500` (`:18`).
+
+| | effective samples/sec |
+|---|---|
+| today | **2.0** |
+| continuous scan, tag at 200 ms (current tag setting) | 5 (~4 at the current 80 % scan duty) |
+| continuous scan, tag at 100 ms (tag's fastest) | 10 (~8) |
+
+**Tag advertising interval is 200 ms, configurable down to 100 ms** — user-confirmed 2026-07-31, so
+unlike the render work this one did *not* need instrumenting first; the ceiling is a known quantity.
+That is the only reason a number appears here without a bracket around it.
+
+The 80 % is our own choice, not a limit: `setInterval(100)` / `setWindow(80)` (`:284-285`) are in
+NimBLE's 0.625 ms units, i.e. **62.5 ms interval / 50 ms window**. Setting window == interval listens
+continuously and captures ~every advertising event instead of ~4 in 5.
+
+### 7.2 What the 2 Hz feed costs, in seconds
+
+The smoothing constants were tuned against that starved feed and encode it implicitly:
+
+- `EMA_ALPHA = 0.4` (`:21`) → 90 % settle at `ln(0.1)/ln(0.6)` = **4.51 samples** = **2.25 s** at 2 Hz.
+- `ZONE_CHANGE_SAMPLES = 2` (`:31`) → **+1.0 s** before a zone change is confirmed.
+
+**≈3.3 s from the user actually moving to the ring changing width.** That is the sluggishness, and it
+is structurally the same finding as C2: the redraw wasn't slow, it was being skipped.
+
+### 7.3 Three items
+
+#### 7.3a Continuous passive scan — the 2.5× ⭐
+
+Replace the stop/restart cycle with a scan that never stops:
+
+```cpp
+g_pScan->setActiveScan(false);       // passive — see 7.3d, we only need MAC + RSSI
+g_pScan->setDuplicateFilter(false);  // controller stops deduping
+g_pScan->setMaxResults(0);           // callbacks only; library erases each device after
+                                     //   the callback (NimBLEScan.cpp:155-157), so no
+                                     //   unbounded vector growth in a forever-scan
+g_pScan->setInterval(62.5 / 0.625);  // window == interval → 100% duty (optional, +25%)
+g_pScan->setWindow  (62.5 / 0.625);
+g_pScan->start(0, nullptr, false);   // 0 = BLE_HS_FOREVER
+```
+
+Then delete the `stop()` at `:93`, `SCAN_INTERVAL_MS`, `SCAN_DURATION_SEC`, `g_scan_in_progress`, and
+the entire results-sweep block in `update()` (`:419-467`) — with per-packet callbacks there is no
+result vector left to sweep. `update()` shrinks to: lost-beacon timeout, then zone/trend/distance off
+the current EMA.
+
+A `duration == 0` scan with a callback set is **restarted automatically after a host resync**
+(`NimBLEScan.cpp:494-496`), so it is self-healing. Still worth an `if (!g_pScan->isScanning())
+g_pScan->start(0, ...)` guard in `update()` as belt-and-braces.
+
+**Cost: power.** Today the radio is off for a good part of every 500 ms window. This turns it on
+continuously. Beacon mode is zoom-gated to 50 m so it is not always-on, which bounds the damage, but
+this is a battery device and the trade is real. Worth a battery-drain observation before committing.
+
+#### 7.3b Re-tune in *time*, not in samples ⭐
+
+Do not simply keep `α = 0.4` — it means something different at 5 Hz than at 2 Hz. Derive it from a
+time constant using **measured** elapsed ms, since BLE advertising is lossy and the inter-sample gap
+will not be a clean 200 ms:
+
+```cpp
+const float dt_s = (now - last_sample_ms) / 1000.0f;
+const float alpha = 1.0f - expf(-dt_s / TAU_S);
+```
+
+This is the direct application of the C7 lesson — *tuning constants measured against a pipeline you
+are about to change are provisional*. Today's `α = 0.4` at 500 ms is `τ ≈ 0.98 s`. At 5 Hz you get to
+pick a point on the latency/jitter curve; every point below beats today. EMA output jitter scales as
+`√(α/(2−α))`, so more samples per time constant is strictly less noise:
+
+| | τ | α @ 200 ms | 90 % settle | jitter vs today |
+|---|---|---|---|---|
+| today (2 Hz) | 0.98 s | 0.400 @ 500 ms | 2.25 s | 1.00× |
+| A — keep α=0.4 | 0.39 s | 0.400 | **0.90 s** | 1.00× (but updates 2.5× more often, looks twitchier) |
+| B — keep today's smoothing | 0.98 s | 0.185 | 2.25 s | **1.57× less** |
+| C — **recommended** | 0.50 s | 0.330 | **1.15 s** | **1.12× less** |
+
+Option C is ~2× faster *and* quieter — both dimensions improve, which is why it's the pick. At a
+100 ms tag the same τ = 0.5 s gives **1.58× less jitter** at that same 1.15 s, and option B's point
+becomes **2.21× less jitter**. That is where reconfiguring the tag pays off: RSSI's ±10 dBm multipath
+swings are the real enemy here and more packets is directly more averaging.
+
+`ZONE_CHANGE_SAMPLES` must become **time-based** too (`ZONE_CONFIRM_MS`), or 2 samples silently drops
+from 1.0 s of confirmation to 0.4 s and the ring starts flickering between zones. Keep it at 1000 ms
+for the first hardware test — change one thing at a time — then try 600 ms once the lower noise floor
+is confirmed.
+
+**Note what then dominates**: with option C the EMA contributes 1.15 s and the zone confirmation
+1.0 s. The confirmation term becomes the larger half of the latency, which is the argument for 7.3c.
+
+`BEACON_LOST_TIMEOUT_MS = 15000` (`:38`) is also sized for a 2 Hz feed. At 5 Hz you'd know the tag
+was gone within ~2 s; 4–5 s is plenty.
+
+#### 7.3c Continuous ring width — the part you actually see ⭐
+
+**`rssi_display` is dead code.** The slow α = 0.25 "analog meter feel" second-stage EMA is computed on
+every sample (`:113`) and **nothing reads it**. The ring is purely zone-driven: `ring_width` is a
+`switch` on `state.zone` giving 8 / 16 / 28 px (`src/ui/navigation.cpp:488-494`), plus the solid CLOSE
+fill. Four states. Even with a perfect 10 Hz feed the user would see three discrete jumps.
+
+Driving ring width continuously from `rssi_display` is the exact analogue of C2 — decouple the
+continuous visual channel from the slow discrete one:
+
+- **Ring width** ← `rssi_display`, continuous, fast. No hysteresis, no confirmation delay; it can
+  move on every packet because a width that drifts by a pixel reads as *analog*, not as flicker.
+- **Sonar tempo** ← `state.zone`, discrete, hysteresis-gated, deliberately slow. Tempo changes
+  *must* be confirmed — a beep interval that jitters between 500 and 750 ms sounds broken in a way a
+  drifting ring never looks.
+
+This bypasses the 7.3b zone-confirm term entirely for the visual, which is why it is likely the
+largest *felt* improvement of the three despite being the smallest change.
+
+Either wire it up or delete it — it should not stay as a computed-but-unread field.
+
+#### 7.3d Suspected: active scan is deferring the callback by a full second — **unconfirmed**
+
+`setActiveScan(true)` (`:283`) sets `passive = 0`. `NimBLEScan.cpp:143` then fires `onResult`
+immediately only if `passive || !isLegacyAdv || advType ∉ {ADV_IND, ADV_SCAN_IND}`. For a legacy
+`ADV_IND` advertiser under active scan, the callback waits for the **scan response** — and if the tag
+doesn't answer promptly, it is deferred all the way to `BLE_GAP_EVENT_DISC_COMPLETE`, i.e. the full
+`SCAN_DURATION_SEC = 1` s.
+
+If true, that is a second full second of latency on top of the 3.3 s, and it would also mean the
+"stop early on first hit" optimization at `:93` rarely fires as intended.
+
+**This is a hypothesis, not a measurement** — it depends on the tag's advertising type, which nobody
+has looked at. Per the residual trap, do not act on it as fact. The one-line test, before changing
+anything: log `advertisedDevice->getAdvType()` and `millis() - scan_start_ms` in `onResult`. If the
+type is `ADV_IND` and the delta is ~1000 ms, it's confirmed. 7.3a's switch to passive scanning fixes
+it either way and also halves radio traffic, so the test is for the record, not for the decision.
+
+### 7.4 Expected result
+
+| | today | after 7.3a + 7.3b (option C) + 7.3c |
+|---|---|---|
+| sample rate | 2.0 Hz | 5 Hz (10 Hz if the tag is set to 100 ms) |
+| ring response | ~3.3 s, 4 discrete states | continuous, ~1.2 s |
+| zone/tempo response | ~3.3 s | ~2.2 s, and quieter |
+
+**Caveats, stated up front.** The sample-rate gain is capped by the tag's own advertising interval —
+5× only exists if the tag is reconfigured to 100 ms, and 2.5× is what today's 200 ms setting yields.
+The latency figures are derived from the EMA step response, not measured on hardware; they should be
+confirmed the same way the render numbers were. And 7.3a costs radio power on a battery device.
+
+7.3a and 7.3b are one file. 7.3c touches the `DRAW_MAIN` handler, so it needs a re-check of the paint
+stage — though the ring is a single `lv_draw_arc` and should not move the 9.3 ms.
+
+---
+
+## 8. Full-subsystem audit — everything that is not the render
+
+**Added 2026-07-31**, in response to "look at *all* the functionality, not just the render." §7 covers
+beacon proximity; this section covers everything else. Each subsystem was read for the same class of
+defect the render had — **a rate or a quantization that nobody re-derived after the pipeline around it
+changed** — and graded.
+
+| Subsystem | Verdict |
+|---|---|
+| **Sonar / buzzer** | ⭐ **Worst offender after the beacon.** Rhythm drifts, tempo flickers, no hysteresis. §8.1 |
+| **Beacon proximity** | ⭐ Rate-starved at 2 Hz. See §7 |
+| Input latency (touch/button) | Adequate for taps, poor for drag. §8.2 |
+| GPS | Healthy; one syscall-per-byte inefficiency. §8.3 |
+| Compass | ✅ Healthy — no action. §8.4 |
+| Battery | ✅ Healthy — no action. §8.4 |
+
+### 8.1 Sonar and buzzer — the rhythm is measurably wobbly ⭐
+
+This is the item to do after §7, and it is arguably more felt, because **rhythm error is far more
+perceptible than visual lag.** The ear resolves timing deviations down to ~10 ms; the eye does not
+care about 20 ms of frame jitter.
+
+**The load-bearing constraint**: the buzzer is on **TCA9554 EXIO pin 7**, i.e. behind I2C — not a
+GPIO. There is no LEDC / hardware PWM path to it. Every edge is a bus transaction and all timing is
+software timing. That is *why* the items below matter; on a plain GPIO most of them would be moot.
+
+#### 8.1a The sonar grid re-bases off the actual fire time, so tempo runs flat ⭐
+
+`src/hardware/buzzer.cpp:215`:
+
+```cpp
+g_state.sonar_next_beep_ms = now + g_state.sonar_interval_ms;   // ← now, not the ideal grid
+```
+
+`now` is when `update()` *happened* to run, which is up to one task period late. So each period is
+`interval + (0..20 ms)`:
+
+- **per-beat jitter up to 20 ms** — at the CLOSE-zone 250 ms interval that is **8 %**, well above the
+  ~10 ms audibility threshold;
+- **the tempo runs systematically flat** by the mean lateness, ~10 ms → 250 ms becomes ~260 ms, ~4 %.
+
+Fix is one character's worth of intent — phase-lock to the grid instead of re-basing:
+
+```cpp
+g_state.sonar_next_beep_ms += g_state.sonar_interval_ms;
+if ((int32_t)(now - g_state.sonar_next_beep_ms) > 0) {      // fell far behind (e.g. long I2C stall)
+    g_state.sonar_next_beep_ms = now + g_state.sonar_interval_ms;   // resync rather than machine-gun
+}
+```
+
+Per-beat jitter stays bounded by the task period, but the grid stops walking and the average tempo
+becomes exact. **XS effort, directly audible.**
+
+#### 8.1b The quantization floor is 20 ms, and the comment says 10
+
+`buzzer::update()` is called from the **I2C Task** (`task_manager.cpp:265`) at
+`I2C_PROCESS_MS = 20`. The comment at `buzzer.cpp:28` — *"driven by `buzzer::update()` at 10ms"* — is
+stale, and `task_manager.cpp:264` claims *"20ms loop gives precise sonar rhythm"*, which 8.1a shows it
+does not.
+
+After 8.1a, 20 ms is the remaining jitter floor. Options, in increasing cost:
+
+1. **Leave it.** With the grid fixed, ±20 ms of edge placement on a stable grid is much less
+   objectionable than a walking tempo. Do 8.1a first and re-listen before spending anything here.
+2. **`I2C_PROCESS_MS` 20 → 10.** Halves jitter; doubles I2C Task wakeups on Core 0. Cheap, slightly
+   wasteful.
+3. **Dedicated FreeRTOS timer / high-priority task** owning only the buzzer edges, at 5 ms. Correct,
+   but it needs `i2c_mutex` discipline since the bus is shared with touch and RTC.
+
+Do 1, measure by ear, then decide. Do not jump to 3.
+
+#### 8.1c Every buzzer edge costs two I2C transactions instead of one
+
+`on()` and `off()` both do `i2c_manager::exio::readOutput()` **then** `exio::set()`
+(`buzzer.cpp:78-84`, `:94-100`) — a read-modify-write of a register whose contents we already know,
+because we are the only writer at runtime.
+
+At the CLOSE-zone 250 ms interval that is 8 edges/sec × 2 = **16 transactions/sec** of avoidable
+traffic on the 400 kHz bus shared with the CST820 touch controller. Caching the output byte in
+`exio_state` and writing only would halve it.
+
+**Caveat that makes this a real decision, not a freebie**: EXIO also holds `LCD_RST`, `TP_RST` and
+`LCD_CS`. Those are set during init and not touched afterwards, so a cache is safe *today* — but it
+makes the cached byte the single source of truth, and any future code that writes EXIO without going
+through it silently corrupts the buzzer state. Only worth doing if 8.1b option 3 is chosen and the
+edge rate goes up.
+
+#### 8.1d Waypoint sonar has no hysteresis — the tempo flickers when you stand still ⭐
+
+`src/ui/navigation.cpp:804-808`:
+
+```cpp
+if      (distance_m <=  5.0f)  interval_ms = 250;
+else if (distance_m <= 10.0f)  interval_ms = 500;
+else if (distance_m <= 30.0f)  interval_ms = 750;
+else if (distance_m <= 50.0f)  interval_ms = 1500;
+```
+
+Hard boundaries, evaluated at 10 Hz against a GPS position that jitters by **±2–5 m even with a good
+fix**. Stand still at ~10 m from the waypoint and the interval flips between 500 and 750 ms at random.
+That is not a subtle artifact — a beep tempo alternating between two rates sounds broken.
+
+The beacon path already solved exactly this: ±3 dBm hysteresis plus N-consecutive-reading confirmation
+(`beacon_proximity.cpp:181-243`). **The waypoint path has neither.** It should have both — a few
+metres of hysteresis per boundary, and a confirmation hold — ported from the beacon's `classifyRSSI`
+shape.
+
+This is the single clearest bug in the audit and it is independent of everything else.
+
+#### 8.1e Waypoint zones are 4 steps of wildly uneven width
+
+The zones above are 5 m, 5 m, 20 m, 20 m wide. The 10–50 m band — where you spend most of an approach
+— is just two tempi, so for most of the walk the sonar tells you nothing is changing. Then it
+quadruples in the last 10 m.
+
+Same fix as §7.3c: **map distance to interval continuously** (e.g. geometric between 1500 ms at 50 m
+and 250 ms at 2 m) rather than in steps. With 8.1d's hysteresis no longer needed for a continuous
+mapping — a continuously drifting tempo doesn't flicker, it glides — this may *replace* 8.1d rather
+than follow it. Decide which after hearing 8.1d.
+
+Note the pairing with §7.3c: **the visual channel and the audio channel want the same treatment for
+the same reason.** Continuous for the analogue quantity, discrete-with-hysteresis only where a
+discrete decision is genuinely being made.
+
+#### 8.1f Dead code: blocking `rapidPulse()`
+
+`buzzer.cpp:137-148` blocks for ~60 ms in `delay()`. It was superseded by `rapidPulseAsync()`
+(`:150`) and has no remaining callers — `button.cpp:152` uses the async form. Delete it before someone
+calls it from the UI Task.
+
+### 8.2 Input latency — fine for taps, poor for drags
+
+Both input paths are polled **once per UI Task loop**, and with a GPS fix that loop is one frame
+(~85 ms):
+
+- **Button** — `device_manager::updateButton()` at `task_manager.cpp:150`, deliberately placed before
+  the mutex so it isn't stuck behind the queue drain. ~85 ms worst case. Already verified fine
+  outdoors: a real press is 132–186 ms, so nothing is missed. **No action.**
+- **Touch** — read by LVGL's indev timer *inside* `lv_timer_handler()` (`:162`), so it inherits the
+  same rate. LVGL's `LV_INDEV_DEF_READ_PERIOD` is irrelevant; the handler cannot sample faster than
+  it is called. **Effective touch sampling ~11.7 Hz.**
+
+11.7 Hz is fine for taps — a tap is a single edge. It is poor for **drag and scroll**: a swipe through
+the settings lists gets 2–3 sample points, so the gesture reads as coarse and steppy rather than as
+tracking the finger. It is better than it sounds on the settings screen, because the radar's paint and
+background fill are not in that frame — expect ~17–20 Hz there — but it is still the one place a user
+touches the device continuously rather than discretely.
+
+If it is worth fixing, the fix is the C2 pattern again: **poll the touch controller on its own
+cadence, decoupled from the render**, and feed LVGL from the latest cached sample. That is a real
+change (CST820 reads must respect the shared-bus constraint in `docs/compass_i2c_constraint.md`) and
+should only be taken on if scrolling actually annoys someone. **Measure the annoyance before paying
+for it** — this is exactly the kind of item the render work showed can be over-estimated from code
+reading alone.
+
+### 8.3 GPS — healthy, one inefficiency
+
+Sampling is correct: 10 Hz gate (`GPS_UPDATE_INTERVAL_MS = 100`) against the BH-880's native 10 Hz
+NAV-PVT rate, and `read()` drains the whole UART buffer each call, so nothing backs up.
+
+The one flaw is how it drains (`gps_bh880.cpp:328`):
+
+```cpp
+while (s_uart_installed && uart_read_bytes(GPS_UART, &c, 1, 0) > 0) {
+```
+
+**One `uart_read_bytes()` syscall per byte** — each taking the driver's ring-buffer lock. At 115200
+baud with 10 Hz NAV-PVT that is on the order of 1–3 k calls/sec. A bulk read into a local buffer
+followed by a byte loop over it would cut the syscall count ~100×.
+
+This is on **Core 0**, so it never touches the render, and the device works. Low priority, but it is
+free CPU sitting on the floor next to the compass and I2C tasks.
+
+Also stale: the comment at `task_manager.cpp:~1205` still says *"Sampling runs at 5Hz
+(GPS_UPDATE_INTERVAL_MS)"*. It is 10 Hz. Folds into §4.1 doc reconciliation.
+
+### 8.4 Healthy — no action
+
+**Compass.** The QMC5883L runs continuous at **200 Hz ODR with 512× oversampling**
+(`compass_qmc5883l.cpp:49-51`), read at 10 Hz. Reading 1-in-20 samples looks wasteful but isn't: with
+OSR 512 the chip's own output is already heavily averaged, so each read is clean rather than a random
+instantaneous sample. The heading EMA was correctly re-derived when the rate changed — 1.5° → 0.5°
+(`task_manager.cpp:717`) — which is precisely the discipline §7.3b is asking for on the beacon side.
+**This subsystem is the example the others should follow.**
+
+**Battery.** 15-sample ADC averaging (`battery.cpp:26`, `:259-267`), 30 s history interval, 5 s
+display updates. Nothing about battery is user-perceptible in real time and the filtering is sound.
+
+### 8.5 One cross-cutting consequence worth knowing
+
+`full_refresh = 1` is load-bearing for the zero-copy flush (C7 constraint 1), and it means **any pixel
+change costs a full-screen rotate (~38 ms)** — a single label update on the settings screen is as
+expensive as a whole radar frame. LVGL still only flushes when something is invalidated, so an idle
+screen costs nothing. This is inherent to the zero-copy path, not a defect, but it is why UI outside
+the radar does not feel proportionally faster than the radar does.
+
+### 8.6 Recommended order
+
+1. **§8.1d** — waypoint sonar hysteresis. Clearest bug in the audit, independent of everything else.
+2. **§8.1a** — phase-lock the sonar grid. XS, directly audible.
+3. **§7.3a–c** — the beacon rate work. Largest single improvement, three related changes in ~two files.
+4. **§8.1e** — continuous waypoint tempo. Do after hearing 1 and 2; it may subsume 1.
+5. **§8.1f** — delete `rapidPulse()`. Trivial hygiene.
+6. **§8.1b / §8.2 / §8.3** — only if 1–4 leave something still feeling wrong. All three are
+   speculative-benefit and should be justified by observation, not by reading this document.
+
+**None of this is measured on hardware.** Every claim above is derived from reading the code, and the
+render effort's own record (§6, "the two cheapest changes delivered the most, and the largest rewrite
+returned the least") is the standing warning about how badly that can go. The audibility arguments in
+§8.1 are the strongest because they rest on arithmetic over constants in the source; §8.2 is the
+weakest and is flagged as such.
 
 ---
 
@@ -1140,6 +1539,20 @@ of the time is in stage 3.
 | 11 | Waypoint memory (see ROADMAP) | M | Raises the 50-waypoint cap | Low | open |
 | 12 | Serial flush / recompute-per-frame (§3.5–3.6) | S | Low–medium | Low | open |
 | 13 | Doc reconciliation (§4.1) | S | — | — | open |
+| **14** | **Waypoint sonar hysteresis (§8.1d)** | XS | **stops audible tempo flicker** | Very low | ✅ built, ⏳ unverified |
+| **15** | **Phase-lock the sonar grid (§8.1a)** | XS | **removes 8 % beat jitter + 4 % flat tempo** | Very low | ✅ built, ⏳ unverified |
+| **16** | **Beacon: continuous passive scan (§7.3a)** | S | **2 → 5 Hz sample rate** | Low (power) | open ⭐ |
+| **17** | **Beacon: τ-based EMA + time-based zone confirm (§7.3b)** | S | **3.3 → 2.2 s, less jitter** | Low | open ⭐ |
+| **18** | **Beacon: continuous ring width from `rssi_display` (§7.3c)** | S | **4 states → continuous** | Low | open ⭐ |
+| 19 | Continuous waypoint sonar tempo (§8.1e) | S | may subsume step 14 | Low | open |
+| 20 | Delete blocking `rapidPulse()` (§8.1f) | XS | — (hygiene) | Very low | ✅ done |
+| 21 | Beacon: confirm active-scan callback deferral (§7.3d) | XS | — (diagnostic) | — | open |
+| 22 | Buzzer tick 20 → 10 ms (§8.1b) | XS | halves residual jitter | Low | open, do step 15 first |
+| 23 | Decouple touch polling from the render (§8.2) | M | drag/scroll feel | Medium | open, justify first |
+| 24 | GPS bulk UART read (§8.3) | S | Core 0 CPU only | Low | open |
+
+Steps 14–18 are the highest-value open items in this document, and **none of them are render work**.
+Steps 14, 15 and 20 are XS and independent of everything else — see §8.6 for the recommended order.
 
 **What the completed work changed about this plan.** The original ordering assumed smoothness had to
 be bought with steps 7–10 first, and listed the heading decouple last as the thing that finally cashes

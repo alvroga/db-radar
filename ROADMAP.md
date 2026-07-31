@@ -69,8 +69,47 @@ For completed features and history, see [CHANGELOG.md](CHANGELOG.md).
 
 ---
 
-### Beacon Advertising Interval Note
-The beacon proximity system is most responsive when the target beacon advertises at a short interval (~100ms). Longer advertising intervals (500ms+) cause noticeable lag between physical proximity change and RSSI update. Consider documenting the recommended beacon configuration in `docs/beacon_proximity.md`.
+### Beacon Responsiveness — the BLE feed is rate-starved at 2 Hz
+**Severity**: High — this is the largest open non-render improvement in the project
+
+**Symptom**: beacon proximity feels sluggish. ~3.3 s from moving to the ring changing, and the ring only has 4 states.
+
+**Root cause**: not CPU — the 240 MHz change bought this nothing. Three things combine into a hard ceiling of **one RSSI sample per 500 ms**: NimBLE's default controller-side duplicate filtering, `g_pScan->stop()` on first hit (`beacon_proximity.cpp:93`), and `SCAN_INTERVAL_MS = 500`. The tag advertises at **200 ms** (configurable to 100 ms), so 60–80% of available packets are discarded. The EMA and zone-confirmation constants were then tuned against that starved feed and encode it implicitly.
+
+**Fix**: continuous passive scan (2 → 5 Hz, or 10 Hz with the tag at 100 ms), τ-based EMA re-derived in *time* rather than samples, and continuous ring width driven from the already-computed-but-unread `rssi_display`.
+
+**Full analysis**: [`docs/performance_optimization_backlog.md`](docs/performance_optimization_backlog.md) §7 — steps 16–18
+
+---
+
+### Sonar Rhythm Defects
+**Severity**: High — audible, and rhythm errors are more perceptible than visual ones
+
+Two independent defects found in the 2026-07-31 audit:
+
+1. **The sonar grid re-bases off actual fire time** (`buzzer.cpp:215` uses `= now + interval`, not `+= interval`), giving up to **20 ms jitter per beat (8% at the 250 ms CLOSE interval)** and a systematically **~4% flat tempo**. The ear resolves ~10 ms. One-line fix.
+2. **Waypoint sonar has no hysteresis** (`navigation.cpp:804-808`) — hard boundaries at 5/10/30/50 m evaluated at 10 Hz against ±2–5 m of GPS jitter. Stand still near a boundary and the tempo flips between two rates at random. The beacon path solved this with ±3 dBm hysteresis and confirmation counts; the waypoint path never got either.
+
+Also: waypoint zones are 5/5/20/20 m wide, so the 10–50 m approach band is only two tempi; and `buzzer::rapidPulse()` is dead blocking code (60 ms of `delay()`).
+
+**Full analysis**: [`docs/performance_optimization_backlog.md`](docs/performance_optimization_backlog.md) §8.1 — steps 14, 15, 19, 20
+
+---
+
+### Beacon Direction Finding — "which way do I start walking?"
+**Severity**: Feature — the highest-value thing this hardware could still learn to do
+
+**Can we do it?** True Bluetooth 5.1 AoA is **impossible** here — single antenna, no CTE IQ samples. But **body-shadow DF** works: the body attenuates 2.4 GHz by 10–20 dB, so rotating in place produces a directional RSSI signature, and the QMC5883L supplies the heading for every sample. Bearing comes from a first-circular-harmonic fit with a resultant-length confidence gate, not from `argmax`.
+
+**Hard blocker**: at today's 2 Hz BLE rate a 10-second rotation yields **1.7 samples per 30° bin** — pure noise. At 10 Hz it yields 8.3, which gives 7–14 dB of SNR on the feature. **This is blocked on the beacon rate work above, not on algorithm design.**
+
+**Expected**: ±30–45° outdoors at 10–40 m — reliable quadrant, i.e. "start walking that way". Unreliable indoors (multipath); the confidence gate must refuse rather than guess.
+
+**Must be measured, not derived**: the sign of the peak. Body shadowing says peak = beacon direction, but the device's own asymmetric pattern may offset or invert it. Calibrate against a known bearing before trusting it.
+
+**Complement**: GPS gradient DF — log `(lat, lon, rssi)` while walking and trilaterate over two ~15 m legs. More robust outdoors, needs no user ritual, and could be built first.
+
+**Full design**: [`docs/beacon_direction_finding.md`](docs/beacon_direction_finding.md)
 
 ---
 
