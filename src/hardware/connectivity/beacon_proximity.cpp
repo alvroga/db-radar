@@ -841,8 +841,30 @@ void debugScanAll() {
         int rssi = device.getRSSI();
         String name = device.haveName() ? device.getName().c_str() : "(no name)";
 
-        Serial.printf("  %2d: MAC=%s  RSSI=%d dBm  Name=%s\n",
-                      i + 1, mac.c_str(), rssi, name.c_str());
+        // HCI address type only says public vs random; for random addresses the
+        // *sub*-type lives in the top two bits of the MSB, and that is the bit
+        // that matters here — a resolvable-private address rotates every ~15 min,
+        // so it can never be matched by a fixed MAC, whereas a random-static one
+        // is stable for the life of the device.
+        //   11 = static, 01 = resolvable private, 00 = non-resolvable private
+        // advType: 0=ADV_IND (connectable, typical of phones), 3=ADV_NONCONN_IND
+        // (broadcast-only — what a beacon/tag does), 4=SCAN_RSP.
+        const uint8_t atype = device.getAddressType();
+        const uint8_t msb   = device.getAddress().getNative()[5];  // native order is little-endian
+        const char* atype_s;
+        if (atype == 0) {
+            atype_s = "public";
+        } else {
+            switch (msb >> 6) {
+                case 0b11: atype_s = "random-static";  break;
+                case 0b01: atype_s = "resolvable-priv"; break;
+                case 0b00: atype_s = "non-resolvable"; break;
+                default:   atype_s = "random-?";       break;
+            }
+        }
+        Serial.printf("  %2d: MAC=%s  RSSI=%4d dBm  addr=%-18s adv=%u  Name=%s\n",
+                      i + 1, mac.c_str(), rssi, atype_s,
+                      (unsigned)device.getAdvType(), name.c_str());
     }
 
     Serial.println("----------------------------------------");
