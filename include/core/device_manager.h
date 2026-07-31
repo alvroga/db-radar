@@ -114,6 +114,18 @@ bool isLVGLUnlocked();
 SemaphoreHandle_t getVsyncSemaphore();
 
 /**
+ * @brief Which core the RGB panel's vsync ISR is actually running on.
+ *
+ * Diagnostic for backlog §1.5: esp_intr_alloc() binds an interrupt to whichever
+ * core calls it, and the panel is created from the boot path, which sdkconfig
+ * pins to Core 1 — the same core as uiTask. Recorded by the ISR rather than
+ * printed from it (printf is not ISR-safe) and reported by `perf`.
+ *
+ * @return 0 or 1, or -1 if no vsync has fired yet.
+ */
+int getVsyncIsrCore();
+
+/**
  * @brief How the 90° display rotation is performed.
  *
  * The panel is mounted 90° CCW (GPS module placement — see ROADMAP), so the image

@@ -78,6 +78,10 @@ static lv_disp_drv_t* g_current_disp_drv = nullptr;
 // uiTask takes it to gate lv_timer_handler() to frame boundaries (tear-free).
 static SemaphoreHandle_t g_vsync_sem = nullptr;
 
+// Core the RGB panel's vsync ISR actually runs on. Written by the ISR, read by
+// `perf`. -1 until the first vsync fires. See §1.5 in the perf backlog.
+static volatile int8_t g_vsync_isr_core = -1;
+
 // Display timing pin array
 static const int DATA_PINS[16] = { 5,45,48,47,21, 14,13,12,11,10,9, 46,3,8,18,17 };
 
@@ -890,6 +894,14 @@ static bool IRAM_ATTR on_color_trans_done(esp_lcd_panel_handle_t panel, const es
 // Phase 3 — Item 3: VSYNC flush scheduling (tickets/ui_espidf_improvements.md)
 static bool IRAM_ATTR on_vsync_cb(esp_lcd_panel_handle_t panel, const esp_lcd_rgb_panel_event_data_t* edata, void* user_ctx) {
     BaseType_t hp_woken = pdFALSE;
+
+    // §1.5 measurement, not a behaviour change. esp_intr_alloc() binds an interrupt
+    // to whichever core called it, and esp_lcd_new_rgb_panel() runs from the boot
+    // path — which sdkconfig pins to Core 1, the same core as uiTask. If that is
+    // true, the panel's DMA/bounce ISR is stealing cycles from the render loop.
+    // Recorded rather than printed: printf is not ISR-safe. Read it with `perf`.
+    g_vsync_isr_core = (int8_t)xPortGetCoreID();
+
     if (g_vsync_sem) {
         xSemaphoreGiveFromISR(g_vsync_sem, &hp_woken);
     }
@@ -912,6 +924,10 @@ static bool IRAM_ATTR on_frame_buf_complete(esp_lcd_panel_handle_t panel, const 
 
 SemaphoreHandle_t getVsyncSemaphore() {
     return g_vsync_sem;
+}
+
+int getVsyncIsrCore() {
+    return (int)g_vsync_isr_core;
 }
 
 // ---------------------------------------------------------------------------

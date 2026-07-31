@@ -1211,6 +1211,10 @@ So the RGB panel's DMA/bounce ISR is very likely installed on **Core 1 — the s
   whole display init there), so the ISR lands on Core 0 alongside the I2C/Network/System tasks.
 - **Verify first**: print `xPortGetCoreID()` from `on_vsync_cb` — it runs in ISR context on the core
   the interrupt was allocated on. That single line confirms or kills this hypothesis.
+  **✅ Instrumented 2026-07-31, ⏳ result not yet read off hardware.** `on_vsync_cb` records
+  `xPortGetCoreID()` into a volatile (recorded, not printed — `printf` is not ISR-safe) and `perf`
+  reports it as `Panel ISR: core N (uiTask on core M) — SHARED / separate`. Read it with `perf` and
+  then either act on the suggested change below or delete this section. Flash +264 B.
 - **Expected gain**: meaningful if confirmed — it removes a continuous ISR load from the render core.
 - **Risk**: low-medium. Core 0 also runs the WiFi/BLE stack; watch for interaction during WiFi mode
   (radar is disabled in WiFi mode anyway, per `navigation.cpp:110`).
@@ -1512,18 +1516,49 @@ and the take returns immediately — so the loop spins with no delay at all unti
 works as intended only once frames are under one panel period. Worth a comment, or a counting
 semaphore, so the intent survives.
 
-### 3.5 `Serial` flushes on every call
+### 3.5 `Serial` flushes on every call — ✅ done 2026-07-31, ⏳ unverified
 
-`SerialClass::printf` and every `print` overload end in `fflush(stdout)`
-(`src/core/arduino_compat.cpp:25-71`). With `CONFIG_ESP_CONSOLE_USB_CDC`, each flush is a write into
-the TinyUSB CDC path and can stall when no host is draining it. There are 94 `Serial.*` calls in
-`navigation.cpp` + `task_manager.cpp` alone, several on interaction paths (zoom change, screen
-transitions).
+**⚠️ The stated rationale for this item was wrong, and the fix is right anyway.** It was filed as
+*"reliability, not performance — `fflush` stalls unboundedly on the USB CDC path when the host isn't
+draining, so that's System Task blocking."* Checking the IDF 5.5 source before implementing (the
+standing rule that has now caught **four** items) shows **the write path cannot stall**:
 
-- **Suggested**: add a global "logging enabled" gate that early-returns before formatting, and drop
-  the unconditional `fflush` (stdout is line-buffered already).
-- Also note `SerialClass::available()` calls `fgetc(stdin)` — it consumes a byte to test for one.
-  It works because of the ring buffer behind it, but it's fragile and does a VFS call per poll.
+- `cdcacm_write` (`esp_vfs_console/vfs_cdcacm.c:81`) → `esp_usb_console_write_buf` →
+  `esp_usb_console_flush_internal` (`esp_system/port/usb_console.c:356`) → `cdc_acm_fifo_fill`.
+  When the host is not draining, `sent == 0`, and it **rolls back the buffer position and returns**.
+  It silently drops bytes; it never waits.
+- The only `xSemaphoreTake(..., portMAX_DELAY)` in that file is on the **read** side
+  (`vfs_cdcacm.c:184`), and `s_blocking` is `false` by default (`:57`) — nothing in this project
+  clears `O_NONBLOCK` to enable it. So `available()` does not stall either.
+
+So there is no unbounded stall anywhere on this console, in or out. **Demote this item from
+"reliability" to "small efficiency".** What *is* true:
+
+- stdout is **line buffered** — IDF returns `S_IFCHR` from `_fstat_r_console`
+  (`newlib/src/reent_syscalls.c:75-81`, whose comment says so verbatim), so newlib picks `_IOLBF` and
+  a trailing `\n` already flushes.
+- Therefore the unconditional `fflush` was not merely redundant, it **defeated the line buffering**:
+  `print("x"); print(1); print("\r\n")` became three separate `cdcacm_write` calls where one would do,
+  and `cdcacm_write` loops the VFS layer **one byte at a time** taking a recursive lock per byte.
+
+**Implemented** (`arduino_compat.cpp`, `arduino_compat.h`, `diagnostics.cpp`):
+
+- Removed all nine unconditional `fflush(stdout)` calls. Explicit `Serial.flush()` still exists for
+  the cases that genuinely want a partial line out.
+- Added the global gate the item asked for: `SerialClass::setLogEnabled(bool)`, checked **before**
+  formatting in every `printf`/`print` overload (the numeric ones gate before their `snprintf`, which
+  is the half `print(const char*)` can't skip for them). Default ON, so nothing changes unless asked.
+  Its value is field/battery mode, where no host is attached and every log line is pure wasted CPU —
+  not the stall that does not exist.
+- `serial on | serial off | serial` command. **Input is never gated**, so the command still works with
+  logging off, and `serial off` prints its confirmation *before* muting.
+
+**Build impact**: **±0 flash, ±0 RAM** — deleting the nine `fflush` calls paid for the gate and the
+command exactly.
+
+Still open, unchanged: `SerialClass::available()` calls `fgetc(stdin)` — it consumes a byte to test
+for one. It works because of the ring buffer behind it, but it is fragile and does a VFS call per
+poll. Not a stall, just ugly.
 
 ### 3.6 Recompute less per frame
 
@@ -1644,8 +1679,8 @@ of the time is in stage 3.
 | 22 | Buzzer tick 20 → 10 ms (§8.1b) | XS | halves residual jitter | Low | open, do step 15 first |
 | 23 | Decouple touch polling from the render (§8.2) | M | drag/scroll feel | Medium | open, justify first |
 | 24 | GPS bulk UART read (§8.3) | S | Core 0 CPU only | Low | open |
-| 25 | Panel ISR core check (§1.5) | XS | — (diagnostic) | — | open ⭐ |
-| 26 | `Serial` fflush gating (§3.5) | S | **reliability**, not ms | Low | open ⭐ |
+| **25** | **Panel ISR core check (§1.5)** | XS | — (diagnostic) | — | ✅ instrumented, ⏳ read `perf` |
+| **26** | **`Serial` fflush gating (§3.5)** | S | ~~reliability~~ **small efficiency** — premise was wrong, see §3.5 | Low | ✅ built, ⏳ unverified |
 | 27 | Bounce-buffer A/B — remove for 18.75 KB SRAM (§1.4) | S | SRAM; ms unknown | Medium | open, measure first |
 
 Steps 14–18 are the highest-value open items in this document, and **none of them are render work**.

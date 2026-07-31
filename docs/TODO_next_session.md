@@ -11,8 +11,11 @@ flash 1,666,611 (79.5%).
 - Don't commit until the change is verified on hardware (docs-only commits excepted).
 - Measure build impact (RAM/flash) on every code change — stash-build-restore for the baseline.
 - Never attribute an un-instrumented residual to a hypothesis. Bracket it with `esp_timer_get_time()`.
-- Before implementing any ESP-IDF config flag, `grep -rn "<flag>" ~/.platformio/packages/framework-espidf/components/`
-  and confirm hits outside the header. Three backlog items were void.
+- Before implementing anything that rests on a claim about ESP-IDF behaviour — a config flag, a
+  blocking/non-blocking path, a buffering mode — **read the IDF source first**:
+  `grep -rn "<thing>" ~/.platformio/packages/framework-espidf/components/`. **Four** backlog items
+  have now been void or misattributed this way, most recently §3.5, whose entire "reliability"
+  rationale (a CDC write that stalls) turned out to describe a path that cannot stall.
 
 ---
 
@@ -45,17 +48,23 @@ silent the moment you tap the waypoint within 15 m. Check it re-engages if you u
 
 ---
 
-## 2. §1.5 + §3.5 — the two render items still worth doing *(XS + S)*
+## 2. ✅ DONE (⏳ unverified) — §1.5 + §3.5
 
-The rest of the render backlog is deprioritized or void; see the re-ranked "Still open" section. These
-two survive because neither is really about milliseconds.
+Built 2026-07-31. Combined flash +264 B, RAM ±0.
 
-- [ ] **§1.5 panel ISR core** *(XS)* — one `xPortGetCoreID()` printf in `on_vsync_cb`. Not a change,
-      a measurement: it either confirms the ISR is stealing Core 1 from the UI task, or kills the
-      hypothesis so the item can be deleted.
-- [ ] **§3.5 `Serial` fflush gating** *(S)* — **reliability, not performance.** `SerialClass` ends
-      every call in `fflush(stdout)`, which stalls unboundedly on the USB CDC path when the host isn't
-      draining. That's System Task blocking. Do it *before* item 4, because DF calibration logs heavily.
+- **§1.5 panel ISR core** — instrumented. `on_vsync_cb` records `xPortGetCoreID()` into a volatile
+  (recorded, not printed — `printf` is not ISR-safe); `perf` reports
+  `Panel ISR: core N (uiTask on core M) — SHARED / separate`.
+  **→ TO READ:** run `perf` once and report the line. If SHARED, §1.5's suggested fix (create the
+  panel from a Core 0 task) is justified; if separate, delete §1.5.
+- **§3.5 `Serial` fflush gating** — done, but **the item's rationale was wrong** and the backlog now
+  says so. There is no unbounded CDC stall to protect against: `cdcacm_write` rolls back and drops
+  bytes rather than waiting, and the only `portMAX_DELAY` in that driver is on the read side with
+  `s_blocking` false by default. The real (smaller) problem was that the unconditional `fflush`
+  *defeated* stdout's line buffering. Nine flushes removed; `SerialClass::setLogEnabled()` gate added,
+  default ON; `serial on|off` command added. **±0 flash** — the removals paid for the additions.
+  **→ TO TEST:** confirm boot logs still appear normally, `serial off` silences them, and `serial on`
+  restores them (input is deliberately never gated, so the command works while muted).
 
 **Explicitly do NOT do**: `-O2` (spends flash, the scarcest resource, at 79.5% of a 2 MB OTA slot, to
 buy ms that can't be spent) · cache sizes (costs 48 KB SRAM) · higher PCLK (may be net-negative) ·

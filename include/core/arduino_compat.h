@@ -292,6 +292,13 @@ public:
     String readStringUntil(char terminator);
     void flush();
 
+    // Global output gate. Defaults to enabled; when disabled every print/printf
+    // early-returns *before* formatting, so the varargs and the per-byte VFS
+    // write path cost nothing. Input (available/read) is unaffected, so serial
+    // commands still work with logging off. See `serial` in diagnostics.
+    static void setLogEnabled(bool enabled);
+    static bool isLogEnabled();
+
     operator bool() const { return true; }
 };
 

@@ -143,6 +143,23 @@ void parseCommand(const char* command) {
                           device_manager::isTiledRotateAvailable() ? "yes" : "no (alloc failed)");
             Serial.println("[ROT] Usage: rot on | rot off | rot tiled");
         }
+    } else if (strncmp(p, "serial", 6) == 0) {
+        // Global log gate (backlog §3.5). Input is never gated, so this command
+        // still works — including turning logging back on — with logging off.
+        const char* a = p + 6;
+        while (*a == ' ') a++;
+        if (strncmp(a, "off", 3) == 0) {
+            // Say so *before* muting, or the confirmation is the first casualty.
+            Serial.println("[SERIAL] Logging OFF — 'serial on' to restore");
+            SerialClass::setLogEnabled(false);
+        } else if (strncmp(a, "on", 2) == 0) {
+            SerialClass::setLogEnabled(true);
+            Serial.println("[SERIAL] Logging ON");
+        } else {
+            Serial.printf("[SERIAL] Logging is %s\n",
+                          SerialClass::isLogEnabled() ? "ON" : "OFF");
+            Serial.println("[SERIAL] Usage: serial on | serial off");
+        }
     } else if (strncmp(p, "version", 7) == 0) {
         Serial.printf("DRAC OS %s\n", FW_VERSION);
     } else {
@@ -662,6 +679,7 @@ void printAvailableCommands() {
     Serial.println("Available commands:");
     Serial.println("  help                 - Show this help");
     Serial.println("  version              - Show firmware version");
+    Serial.println("  serial on|off        - Enable/disable all serial logging");
     Serial.println("");
     Serial.println("GPS Commands (BH-880 / UBX):");
     Serial.println("  gps info             - Print chip SW/HW version (identifies actual chip)");
@@ -1208,6 +1226,19 @@ void handlePerfCommand(const char* args) {
         Serial.printf("Rotation:     %d deg — %s\n",
                       system_config::display::ROTATION_DEGREES,
                       device_manager::rotModeName(device_manager::getRotMode()));
+    }
+    // §1.5: does the panel ISR share a core with uiTask (UI_CORE = 1)?
+    {
+        const int isr_core = device_manager::getVsyncIsrCore();
+        if (isr_core < 0) {
+            Serial.println("Panel ISR:    core unknown (no vsync yet)");
+        } else {
+            Serial.printf("Panel ISR:    core %d  (uiTask on core %d) — %s\n",
+                          isr_core, (int)task_manager::TaskConfig::UI_CORE,
+                          isr_core == (int)task_manager::TaskConfig::UI_CORE
+                              ? "SHARED, competing with render"
+                              : "separate core, not competing");
+        }
     }
     Serial.printf("--- label stage (updateRadarDisplay): %.1f ms ---\n", nav.label_us / 1000.0);
     Serial.println("--- paint stage (radarDrawEventCb — NESTED inside REFRESH) ---");

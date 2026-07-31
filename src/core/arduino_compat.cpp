@@ -4,8 +4,29 @@
 #include <stdio.h>
 
 // ============================================================================
-// Serial — backed by printf() → UART0 (default ESP-IDF console)
-// Input reading uses stdin (available when UART console is connected).
+// Serial — backed by printf() → the ESP-IDF console, which this project
+// configures as USB CDC (CONFIG_ESP_CONSOLE_USB_CDC=y, UART_NUM=-1).
+// Input reading uses stdin.
+//
+// Output buffering (backlog §3.5, verified against IDF 5.5 rather than assumed):
+//
+//   * stdout is **line buffered**. IDF reports S_IFCHR from _fstat_r_console
+//     (newlib/src/reent_syscalls.c:79, with the comment saying so explicitly),
+//     which makes newlib pick _IOLBF. So a trailing '\n' already flushes.
+//   * The write path **cannot stall**. cdcacm_write (esp_vfs_console/
+//     vfs_cdcacm.c:81) → esp_usb_console_write_buf → esp_usb_console_flush_internal
+//     → cdc_acm_fifo_fill, which rolls back and returns 0 when the host is not
+//     draining. It silently drops bytes; it never waits. The only
+//     xSemaphoreTake(..., portMAX_DELAY) in that file is on the *read* side, and
+//     s_blocking is false by default anyway.
+//
+// Those two facts are why the unconditional fflush(stdout) that used to end every
+// call here is gone. It was not protecting against a stall — there is no stall to
+// protect against — and on a line-buffered stream it was worse than redundant: it
+// forced a partial write for every fragment of a composed line, so
+// `print("x"); print(1); print("\r\n")` became three cdcacm_write calls, each of
+// which loops the VFS layer one byte at a time. Explicit Serial.flush() remains
+// for the cases that genuinely want a partial line out (e.g. before a reboot).
 // ============================================================================
 
 // Simple ring buffer for stdin reads
@@ -17,57 +38,74 @@ static inline size_t ring_next(size_t pos) { return (pos + 1) % SERIAL_RING_SIZE
 
 SerialClass Serial;  // Singleton definition
 
+// Output gate. Formatting and the per-byte VFS write are the real cost of a log
+// line on this console, so the gate is checked before either happens.
+static bool s_log_enabled = true;
+
+void SerialClass::setLogEnabled(bool enabled) { s_log_enabled = enabled; }
+bool SerialClass::isLogEnabled() { return s_log_enabled; }
+
 void SerialClass::begin(uint32_t baud) {
     (void)baud;
-    // UART0 console is initialized by ESP-IDF boot loader — nothing to do here.
+    // The console is initialized by the ESP-IDF boot loader — nothing to do here.
 }
 
 int SerialClass::printf(const char* fmt, ...) {
+    if (!s_log_enabled) return 0;
     va_list args;
     va_start(args, fmt);
     int n = vprintf(fmt, args);
     va_end(args);
-    fflush(stdout);
     return n;
 }
 
 void SerialClass::print(const char* s) {
-    if (s) { fputs(s, stdout); fflush(stdout); }
+    if (!s_log_enabled) return;
+    if (s) fputs(s, stdout);
 }
 void SerialClass::print(const String& s) { print(s.c_str()); }
 
+// The numeric overloads gate before snprintf, not just before the write —
+// formatting is the half of the cost that print(const char*) cannot skip for them.
 void SerialClass::print(int v, int base) {
+    if (!s_log_enabled) return;
     char buf[24];
     if (base == 16) snprintf(buf, sizeof(buf), "%x", v);
     else            snprintf(buf, sizeof(buf), "%d", v);
     print(buf);
 }
 void SerialClass::print(unsigned int v, int base) {
+    if (!s_log_enabled) return;
     char buf[24];
     if (base == 16) snprintf(buf, sizeof(buf), "%x", v);
     else            snprintf(buf, sizeof(buf), "%u", v);
     print(buf);
 }
 void SerialClass::print(long v, int base) {
+    if (!s_log_enabled) return;
     char buf[24];
     if (base == 16) snprintf(buf, sizeof(buf), "%lx", v);
     else            snprintf(buf, sizeof(buf), "%ld", v);
     print(buf);
 }
 void SerialClass::print(unsigned long v, int base) {
+    if (!s_log_enabled) return;
     char buf[24];
     if (base == 16) snprintf(buf, sizeof(buf), "%lx", v);
     else            snprintf(buf, sizeof(buf), "%lu", v);
     print(buf);
 }
 void SerialClass::print(float v, int dec) {
+    if (!s_log_enabled) return;
     char buf[32]; snprintf(buf, sizeof(buf), "%.*f", dec, (double)v); print(buf);
 }
 void SerialClass::print(double v, int dec) {
+    if (!s_log_enabled) return;
     char buf[32]; snprintf(buf, sizeof(buf), "%.*f", dec, v); print(buf);
 }
 void SerialClass::print(char c) {
-    fputc(c, stdout); fflush(stdout);
+    if (!s_log_enabled) return;
+    fputc(c, stdout);
 }
 
 void SerialClass::println(const char* s) { print(s); print("\r\n"); }

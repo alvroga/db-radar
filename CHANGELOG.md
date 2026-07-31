@@ -11,6 +11,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+**`Serial` no longer flushes on every call, and logging can be switched off** — ⏳ *awaiting hardware
+verification*
+
+Backlog §3.5 was filed as *reliability*: `fflush(stdout)` was believed to stall unboundedly on the
+USB CDC path when no host is draining, blocking whichever task logged. **Checking the IDF 5.5 source
+before implementing — the standing rule that has now caught four items — showed the premise is
+false.** `cdcacm_write` → `esp_usb_console_write_buf` → `esp_usb_console_flush_internal` →
+`cdc_acm_fifo_fill`, which rolls back and returns 0 when the host isn't draining. It silently drops
+bytes; it never waits. The only `portMAX_DELAY` wait in that driver is on the read side, and its
+`s_blocking` is false by default. **There is no stall on this console, in or out.**
+
+The fix is still right, for a smaller reason. stdout is line buffered (IDF returns `S_IFCHR` from
+`_fstat_r_console`), so the unconditional `fflush` was not merely redundant — it *defeated* the line
+buffering: `print("x"); print(1); print("\r\n")` became three `cdcacm_write` calls where one would do,
+and that function loops the VFS layer one byte at a time taking a recursive lock per byte.
+
+- All nine unconditional `fflush(stdout)` calls removed. Explicit `Serial.flush()` remains.
+- Added `SerialClass::setLogEnabled(bool)`, checked **before** formatting in every overload (the
+  numeric ones gate before their `snprintf`). Default ON — nothing changes unless asked. Its value is
+  field/battery mode, where no host is attached and every log line is wasted CPU.
+- New `serial on | serial off` command. Input is never gated, so it still works with logging off, and
+  `serial off` prints its confirmation before muting.
+
+**Build impact**: **±0 flash, ±0 RAM** — deleting the nine flushes paid for the gate and command exactly.
+
+### Added
+
+**Panel ISR core probe (`perf`)** — ⏳ *result not yet read off hardware*
+
+Backlog §1.5 hypothesises that the RGB panel's DMA/vsync ISR is installed on Core 1 — the same core
+as `uiTask` — because `esp_intr_alloc()` binds to whichever core calls it and the panel is created
+from the boot path, which sdkconfig pins to Core 1. This is a measurement, not a change:
+`on_vsync_cb` records `xPortGetCoreID()` into a volatile (recorded rather than printed — `printf` is
+not ISR-safe), and `perf` reports `Panel ISR: core N (uiTask on core M) — SHARED / separate`. One
+reading either justifies moving display init to Core 0 or deletes the hypothesis.
+
+**Build impact**: flash +264 B, RAM ±0.
+
 **Waypoint sonar: continuous tempo, and it finally stops when you arrive** — ⏳ *awaiting hardware
 verification*
 
