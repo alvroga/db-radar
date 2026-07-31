@@ -9,10 +9,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+**Waypoint sonar: continuous tempo, and it finally stops when you arrive** — ⏳ *awaiting hardware
+verification*
+
+The hysteresis fix below was verified working — and field testing in the same session showed it had
+fixed the wrong layer. The report: the waypoint sonar "feels very chaotic, a lot of beeping even at a
+further distance, is not as progressive as the beacon", and there was no way to stop it on arrival.
+The ladder was steady and still wrong.
+
+**1. Distance→tempo is now continuous, not four zones** (`navigation.cpp`). The old zones were
+5/10/30/50 m — 5 m, 5 m, 20 m, 20 m wide — so the 10–50 m band where most of an approach happens was
+only two tempi. You walked 40 m, heard one rate, one step, one rate. Now a geometric mapping,
+**2000 ms at 50 m → 250 ms at 2 m**, `interval = 250 · 8^(ln(d/2)/ln 25)`. Equal distance *ratios*
+give equal tempo *ratios*, so halving the distance always doubles the tempo and a constant walking
+pace yields a steady acceleration rather than two plateaus and a lurch. The far end was deliberately
+slowed past the 1500 ms originally proposed — "too much beeping far out" was half the complaint, and
+the old ladder gave 750 ms at 30 m where the curve gives ~1420 ms.
+
+**This replaced the zone hysteresis rather than building on it.** A continuous tempo has no rates to
+flicker between, so the zone enum, the ±3 m hysteresis and the 1000 ms confirmation hold are all
+deleted. The GPS-noise guard that replaces them is a **τ = 1.5 s EMA on the distance** using measured
+`dt` (`α = 1 − e^(−dt/τ)`) rather than a sample count — the render-request rate is ~10 Hz with a fix
+but is not guaranteed to be, and a sample-based EMA would silently change its time constant with it.
+That is the right place for the guard: smooth the noisy input, not the derived output. One discrete
+decision survives — beeping vs silent — so it keeps hysteresis: engage ≤ 50 m, release > 55 m.
+
+**2. Arrival stop.** `Waypoint::found` already existed and was already set by tapping the fixed
+waypoint within 15 m — the exact counterpart of tapping the beacon ball. `updateWaypointFixSonar()`
+simply never read it, so arriving gave no way to silence the beeping short of unfixing the waypoint
+or leaving 50 m zoom, while the beacon has silenced-on-found all along. It reads the flag now. Not
+from the audit; this one surfaced from field use.
+
+**Build impact**: RAM 195,600 (**±0**), flash 1,666,611 → 1,667,743 (**+1,132 B**).
+
 ### Fixed
 
-**Sonar rhythm: the beat grid was walking, and the waypoint tempo had no hysteresis** — ⏳ *awaiting
-hardware verification*
+**Sonar rhythm: the beat grid was walking, and the waypoint tempo had no hysteresis** — ✅ *verified
+on hardware 2026-07-31* (the hysteresis half is now superseded by the continuous tempo above)
 
 Found by a full-subsystem audit (2026-07-31) prompted by the question "did anyone check anything
 other than the render?" — the answer was no; the whole optimization effort had been scoped to frame

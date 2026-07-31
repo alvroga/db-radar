@@ -386,7 +386,7 @@ changed** — and graded.
 
 | Subsystem | Verdict |
 |---|---|
-| **Sonar / buzzer** | ⭐ **Worst offender after the beacon.** Rhythm drifts, tempo flickers, no hysteresis. §8.1 |
+| **Sonar / buzzer** | ✅ Rhythm ✅ verified; tempo now continuous + silences on arrival (⏳ unverified). §8.1 |
 | **Beacon proximity** | ⭐ Rate-starved at 2 Hz. See §7 |
 | Input latency (touch/button) | Adequate for taps, poor for drag. §8.2 |
 | GPS | Healthy; one syscall-per-byte inefficiency. §8.3 |
@@ -486,7 +486,7 @@ shape.
 
 This is the single clearest bug in the audit and it is independent of everything else.
 
-#### 8.1e Waypoint zones are 4 steps of wildly uneven width
+#### 8.1e Waypoint zones are 4 steps of wildly uneven width — ✅ done 2026-07-31, ⏳ unverified
 
 The zones above are 5 m, 5 m, 20 m, 20 m wide. The 10–50 m band — where you spend most of an approach
 — is just two tempi, so for most of the walk the sonar tells you nothing is changing. Then it
@@ -500,6 +500,40 @@ than follow it. Decide which after hearing 8.1d.
 Note the pairing with §7.3c: **the visual channel and the audio channel want the same treatment for
 the same reason.** Continuous for the analogue quantity, discrete-with-hysteresis only where a
 discrete decision is genuinely being made.
+
+**Outcome — it replaced 8.1d, and field testing said why.** 8.1d was verified working (the tempo no
+longer flickered) but the report on the same session was that the waypoint sonar "feels very chaotic,
+a lot of beeping even at a further distance, is not as progressive as the beacon". Both halves of that
+are 8.1e, not 8.1d: the ladder was steady and still wrong.
+
+Implemented in `navigation.cpp` (`waypointSonarInterval`, `updateWaypointFixSonar`):
+
+- **Continuous geometric mapping**, 2000 ms at 50 m → 250 ms at 2 m. The far end was deliberately
+  slowed from the 1500 ms the section originally proposed, because "too much beeping far out" was half
+  the complaint — the old ladder gave 750 ms at 30 m, the curve gives ~1420 ms.
+  `t = ln(d/2) / ln(25)`, `interval = 250 · 8^t`. Equal distance *ratios* map to equal tempo *ratios*,
+  so halving the distance always doubles the tempo wherever you are, and a constant walking pace gives
+  a steadily accelerating beat instead of two plateaus and a lurch.
+- **The zone enum, the ±3 m hysteresis and the 1 s confirmation hold are all deleted.** A continuous
+  tempo has no rates to flicker between.
+- **What replaces them is a τ = 1.5 s EMA on the distance**, using measured `dt` (`α = 1 − e^(−dt/τ)`),
+  not a sample count — the render-request rate is ~10 Hz with a fix but is not guaranteed, and a
+  sample-based EMA would silently change its time constant with it. This is the correct place for the
+  guard: smooth the noisy input, not the derived output. ~2 m of lag at walking pace, comfortably
+  inside the ±2–5 m GPS error it is filtering.
+- **One discrete decision survives, so it keeps its hysteresis**: engage ≤ 50 m, release > 55 m.
+- Calling `setSonarInterval()` every cycle with a drifting value is safe — it only re-bases the beat
+  grid when the sonar was not already active (`buzzer.cpp:155`), so the glide changes the period
+  without resetting §8.1a's phase.
+
+**Also fixed here: the sonar had no arrival stop.** `Waypoint::found` already existed and was already
+set by tapping the fixed waypoint within 15 m (`navigation.cpp`, `handleTapAt`) — the exact
+counterpart of tapping the beacon ball. `updateWaypointFixSonar()` simply never read it, so arriving
+gave no way to silence the beeping short of unfixing the waypoint or leaving 50 m zoom, while the
+beacon has silenced-on-found all along. It reads the flag now. This was not in the audit; it surfaced
+from field use.
+
+**Build impact**: flash +1,132 B, RAM ±0.
 
 #### 8.1f Dead code: blocking `rapidPulse()`
 
@@ -575,11 +609,13 @@ the radar does not feel proportionally faster than the radar does.
 
 ### 8.6 Recommended order
 
-1. **§8.1d** — waypoint sonar hysteresis. Clearest bug in the audit, independent of everything else.
-2. **§8.1a** — phase-lock the sonar grid. XS, directly audible.
-3. **§7.3a–c** — the beacon rate work. Largest single improvement, three related changes in ~two files.
-4. **§8.1e** — continuous waypoint tempo. Do after hearing 1 and 2; it may subsume 1.
-5. **§8.1f** — delete `rapidPulse()`. Trivial hygiene.
+1. ~~**§8.1d** — waypoint sonar hysteresis.~~ ✅ verified, then **superseded by §8.1e**.
+2. ~~**§8.1a** — phase-lock the sonar grid.~~ ✅ verified on hardware.
+3. ~~**§8.1e** — continuous waypoint tempo.~~ ✅ built 2026-07-31, ⏳ unverified. It did subsume 1.
+   Field testing after 1 and 2 confirmed the ladder was *steady and still wrong* — see the outcome
+   note in §8.1e.
+4. **§7.3a–c** — the beacon rate work. Largest single improvement, three related changes in ~two files.
+5. **§8.1f** — delete `rapidPulse()`. Trivial hygiene. ✅ done.
 6. **§8.1b / §8.2 / §8.3** — only if 1–4 leave something still feeling wrong. All three are
    speculative-benefit and should be justified by observation, not by reading this document.
 
@@ -1597,12 +1633,12 @@ of the time is in stage 3.
 | 11 | Waypoint memory (see ROADMAP) | M | Raises the 50-waypoint cap | Low | open |
 | 12 | Serial flush / recompute-per-frame (§3.5–3.6) | S | Low–medium | Low | open |
 | 13 | Doc reconciliation (§4.1) | S | — | — | open |
-| **14** | **Waypoint sonar hysteresis (§8.1d)** | XS | **stops audible tempo flicker** | Very low | ✅ built, ⏳ unverified |
-| **15** | **Phase-lock the sonar grid (§8.1a)** | XS | **removes 8 % beat jitter + 4 % flat tempo** | Very low | ✅ built, ⏳ unverified |
+| **14** | **Waypoint sonar hysteresis (§8.1d)** | XS | **stops audible tempo flicker** | Very low | ✅ verified, then **superseded by 19** |
+| **15** | **Phase-lock the sonar grid (§8.1a)** | XS | **removes 8 % beat jitter + 4 % flat tempo** | Very low | ✅ verified on hardware |
 | **16** | **Beacon: continuous passive scan (§7.3a)** | S | **2 → 5 Hz sample rate** | Low (power) | open ⭐ |
 | **17** | **Beacon: τ-based EMA + time-based zone confirm (§7.3b)** | S | **3.3 → 2.2 s, less jitter** | Low | open ⭐ |
 | **18** | **Beacon: continuous ring width from `rssi_display` (§7.3c)** | S | **4 states → continuous** | Low | open ⭐ |
-| 19 | Continuous waypoint sonar tempo (§8.1e) | S | may subsume step 14 | Low | open |
+| **19** | **Continuous waypoint sonar tempo + arrival stop (§8.1e)** | S | **subsumed step 14**; progressive approach, calmer far out, silences on arrival | Low | ✅ built, ⏳ unverified |
 | 20 | Delete blocking `rapidPulse()` (§8.1f) | XS | — (hygiene) | Very low | ✅ done |
 | 21 | Beacon: confirm active-scan callback deferral (§7.3d) | XS | — (diagnostic) | — | open |
 | 22 | Buzzer tick 20 → 10 ms (§8.1b) | XS | halves residual jitter | Low | open, do step 15 first |

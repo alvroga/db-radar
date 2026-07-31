@@ -15,6 +15,7 @@
 #include "hardware/buzzer.h"
 #include "core/arduino_compat.h"
 #include <cfloat>
+#include <cmath>
 #include "esp_heap_caps.h"
 #include "esp_system.h"
 #include "esp_timer.h"
@@ -757,103 +758,68 @@ static void drawWaypoints(lv_draw_ctx_t* ctx, int screen_size) {
     }
 }
 
-// ── Waypoint sonar zones ────────────────────────────────────────────────────
-// Distance→tempo used to be a bare if/else ladder on the raw Haversine result.
-// That ladder had no hysteresis, and it is evaluated at the 10Hz sensor rate
-// against a GPS position that jitters by ±2-5m even with a good fix — so standing
-// still near a boundary made the tempo flip between two rates at random. A beep
-// interval alternating between 500 and 750ms sounds broken.
+// ── Waypoint sonar tempo ────────────────────────────────────────────────────
+// Distance→tempo is a *continuous* geometric mapping. It used to be a four-zone
+// ladder (5/5/20/20m wide) guarded by ±3m hysteresis and a 1s confirmation hold.
+// That ladder worked — the guards did stop the tempo flipping at a boundary — but
+// it was solving the wrong problem, and field testing said so:
 //
-// This mirrors the structure beacon_proximity already uses for RSSI zones
-// (classifyRSSI + pending-zone confirmation): widen the exit threshold of
-// whichever zone we are currently in, then require the new zone to persist before
-// committing to it. Both guards are needed — hysteresis alone still flips on a
-// single large GPS excursion, and confirmation alone still flips on sustained
-// jitter across the boundary.
-enum class WaypointSonarZone : uint8_t {
-    NONE = 0,   // beyond 50m — silent
-    FAR,        // 30-50m
-    MID,        // 10-30m
-    NEAR,       //  5-10m
-    IMMEDIATE   //   <=5m
-};
+//   * Not progressive. The 10-50m band, where most of an approach actually
+//     happens, was two tempi. You walked 40m and heard one rate, then a step,
+//     then one rate again. Approaching did not *sound* like approaching.
+//   * Too busy far out. 30m already beeped at 750ms.
+//
+// A continuous tempo cannot flicker between rates — there are no rates to flicker
+// between, only a glide — so the zone machinery, hysteresis and confirmation hold
+// are all gone with it. What replaces them as the GPS-noise guard is a
+// time-constant EMA on the *distance*, which is where the noise actually is:
+// smooth the input, not the output.
+//
+// The mapping is geometric in both axes, i.e. equal distance *ratios* produce
+// equal tempo *ratios* (halving the distance always doubles the tempo, wherever
+// you are). Both distance-to-target and tempo are perceived that way, so a
+// constant walking speed yields a steadily accelerating beat rather than one that
+// does nothing for 20m and then lurches.
 
-// Zone boundaries in metres, and the guard constants.
-static constexpr float WP_SONAR_IMMEDIATE_M =  5.0f;
-static constexpr float WP_SONAR_NEAR_M      = 10.0f;
-static constexpr float WP_SONAR_MID_M       = 30.0f;
-static constexpr float WP_SONAR_FAR_M       = 50.0f;
+static constexpr float    WP_SONAR_MIN_M     =  2.0f;   // at/inside this, tempo floor
+static constexpr float    WP_SONAR_MAX_M     = 50.0f;   // engage at/inside this (== 50m zoom radius)
+static constexpr float    WP_SONAR_RELEASE_M = 55.0f;   // disengage beyond this
+static constexpr uint32_t WP_SONAR_SLOW_MS   = 2000;    // interval at WP_SONAR_MAX_M
+static constexpr uint32_t WP_SONAR_FAST_MS   =  250;    // interval at WP_SONAR_MIN_M
 
-// 3m ≈ the upper end of good-fix GPS jitter. Large enough to absorb it, small
-// enough that the boundaries still land near their nominal distances.
-static constexpr float    WP_SONAR_HYSTERESIS_M  = 3.0f;
-// Hold the pending zone this long before committing. 1000ms matches the effective
-// confirmation window the beacon path had at its old sample rate.
-static constexpr uint32_t WP_SONAR_CONFIRM_MS    = 1000;
+// Distance EMA time constant. 1.5s is a compromise: long enough to bury ±2-5m of
+// good-fix GPS jitter, short enough that the ~2m of lag it adds at walking pace
+// is well inside the GPS error it is filtering.
+static constexpr float    WP_SONAR_TAU_S     = 1.5f;
 
 /**
- * @brief Classify distance into a sonar zone, with the current zone's exit
- *        threshold widened by WP_SONAR_HYSTERESIS_M.
+ * @brief Sonar interval for a smoothed distance, in ms. Never returns 0 —
+ *        the engage/disengage decision is the caller's, not this function's.
  *
- * Direction of the widening is inverted relative to the beacon's RSSI version:
- * here a *smaller* value means closer, so leaving a zone outward means exceeding
- * a raised threshold, and entering it from outside means beating a lowered one.
+ * Yields 2000ms at 50m, ~1420 at 30m, ~1080 at 20m, ~707 at 10m, ~445 at 5m,
+ * 250 at 2m and closer.
  */
-static WaypointSonarZone classifyWaypointDistance(float d, WaypointSonarZone current) {
-    float t_immediate = WP_SONAR_IMMEDIATE_M;
-    float t_near      = WP_SONAR_NEAR_M;
-    float t_mid       = WP_SONAR_MID_M;
-    float t_far       = WP_SONAR_FAR_M;
+static uint32_t waypointSonarInterval(float d) {
+    if (d <= WP_SONAR_MIN_M) return WP_SONAR_FAST_MS;
+    if (d >= WP_SONAR_MAX_M) return WP_SONAR_SLOW_MS;
 
-    switch (current) {
-        case WaypointSonarZone::IMMEDIATE:
-            t_immediate += WP_SONAR_HYSTERESIS_M;   // must pass 8m to leave IMMEDIATE
-            break;
-        case WaypointSonarZone::NEAR:
-            t_immediate -= WP_SONAR_HYSTERESIS_M;   // must reach 2m to enter IMMEDIATE
-            t_near      += WP_SONAR_HYSTERESIS_M;   // must pass 13m to leave NEAR
-            break;
-        case WaypointSonarZone::MID:
-            t_near      -= WP_SONAR_HYSTERESIS_M;   // must reach 7m to enter NEAR
-            t_mid       += WP_SONAR_HYSTERESIS_M;   // must pass 33m to leave MID
-            break;
-        case WaypointSonarZone::FAR:
-            t_mid       -= WP_SONAR_HYSTERESIS_M;   // must reach 27m to enter MID
-            t_far       += WP_SONAR_HYSTERESIS_M;   // must pass 53m to leave FAR
-            break;
-        case WaypointSonarZone::NONE:
-            t_far       -= WP_SONAR_HYSTERESIS_M;   // must reach 47m to enter FAR
-            break;
-    }
-
-    if (d <= t_immediate) return WaypointSonarZone::IMMEDIATE;
-    if (d <= t_near)      return WaypointSonarZone::NEAR;
-    if (d <= t_mid)       return WaypointSonarZone::MID;
-    if (d <= t_far)       return WaypointSonarZone::FAR;
-    return WaypointSonarZone::NONE;
+    // t = fraction of the way along the log-distance span, 0 at MIN_M, 1 at MAX_M.
+    const float t = logf(d / WP_SONAR_MIN_M) / logf(WP_SONAR_MAX_M / WP_SONAR_MIN_M);
+    const float ratio = (float)WP_SONAR_SLOW_MS / (float)WP_SONAR_FAST_MS;
+    return (uint32_t)((float)WP_SONAR_FAST_MS * powf(ratio, t) + 0.5f);
 }
 
-/** @brief Sonar interval for a confirmed zone. 0 = silent. */
-static uint32_t waypointSonarInterval(WaypointSonarZone zone) {
-    switch (zone) {
-        case WaypointSonarZone::IMMEDIATE: return 250;
-        case WaypointSonarZone::NEAR:      return 500;
-        case WaypointSonarZone::MID:       return 750;
-        case WaypointSonarZone::FAR:       return 1500;
-        default:                           return 0;
-    }
-}
+// Smoothed distance + the engage latch. Reset by resetWaypointSonarTempo()
+// whenever the sonar is disengaged, so re-engaging never inherits a stale
+// distance from a previous fix and glissandos in from the wrong tempo.
+static float    s_wp_dist_ema_m    = -1.0f;   // < 0 = not yet initialised
+static uint32_t s_wp_dist_last_ms  = 0;
+static bool     s_wp_engaged       = false;
 
-// Confirmed zone state. Reset by resetWaypointSonarZone() whenever the sonar is
-// disengaged, so re-engaging never inherits a stale zone from a previous fix.
-static WaypointSonarZone s_wp_zone         = WaypointSonarZone::NONE;
-static WaypointSonarZone s_wp_pending_zone = WaypointSonarZone::NONE;
-static uint32_t          s_wp_pending_since_ms = 0;
-
-static void resetWaypointSonarZone() {
-    s_wp_zone             = WaypointSonarZone::NONE;
-    s_wp_pending_zone     = WaypointSonarZone::NONE;
-    s_wp_pending_since_ms = 0;
+static void resetWaypointSonarTempo() {
+    s_wp_dist_ema_m   = -1.0f;
+    s_wp_dist_last_ms = 0;
+    s_wp_engaged      = false;
 }
 
 /**
@@ -868,7 +834,7 @@ static void updateWaypointFixSonar() {
 
     if (ui.fixed_waypoint_index < 0 || ui.fixed_waypoint_index >= ui.waypoint_count) {
         beacon_proximity::suppressSonar(false);
-        resetWaypointSonarZone();
+        resetWaypointSonarTempo();
         return;
     }
 
@@ -876,21 +842,33 @@ static void updateWaypointFixSonar() {
     if (ui.current_zoom != ui_manager::ZoomLevel::ZOOM_50M) {
         beacon_proximity::suppressSonar(false);
         buzzer::stopSonar();
-        resetWaypointSonarZone();
+        resetWaypointSonarTempo();
         return;
     }
 
     const auto& settings = settings_manager::getSettings();
     if (!settings.button_sound_enabled) {
         beacon_proximity::suppressSonar(false);
-        resetWaypointSonarZone();
+        resetWaypointSonarTempo();
         return;
     }
 
     const ui_manager::Waypoint& wp = ui.waypoints[ui.fixed_waypoint_index];
     if (!wp.valid || ui.center_lat == 0.0 || ui.center_lon == 0.0) {
         beacon_proximity::suppressSonar(false);
-        resetWaypointSonarZone();
+        resetWaypointSonarTempo();
+        return;
+    }
+
+    // Arrival stop — the waypoint counterpart of the beacon's "found" silence.
+    // Tapping the fixed waypoint within 15m already sets wp.found (handleTapAt),
+    // exactly as tapping the beacon ball sets beacon_proximity's g_found. The
+    // sonar simply never read the flag, so arriving gave you no way to shut it
+    // up short of unfixing the waypoint or leaving 50m zoom. It reads it now.
+    if (wp.found) {
+        beacon_proximity::suppressSonar(false);
+        buzzer::stopSonar();
+        resetWaypointSonarTempo();
         return;
     }
 
@@ -903,35 +881,43 @@ static void updateWaypointFixSonar() {
                cos(lat1) * cos(lat2) * sin(dLon / 2.0) * sin(dLon / 2.0);
     float distance_m = (float)(EARTH_RADIUS_M * 2.0 * atan2(sqrt(a), sqrt(1.0 - a)));
 
-    // Classify with hysteresis, then require the new zone to hold for
-    // WP_SONAR_CONFIRM_MS before the tempo actually changes. Without this the
-    // tempo tracked GPS noise directly — see the WaypointSonarZone comment above.
+    // Smooth the distance before it drives anything. dt is measured rather than
+    // assumed: this runs at the render-request rate, which is ~10Hz with a GPS fix
+    // but is not guaranteed to be — so a sample-count-based EMA would silently
+    // change its time constant whenever the render rate moved.
     const uint32_t now = millis();
-    const WaypointSonarZone candidate = classifyWaypointDistance(distance_m, s_wp_zone);
-
-    if (candidate == s_wp_zone) {
-        // Still in the confirmed zone — drop any pending change
-        s_wp_pending_zone     = s_wp_zone;
-        s_wp_pending_since_ms = 0;
-    } else if (candidate == s_wp_pending_zone) {
-        // Same candidate as last time — commit once it has held long enough
-        if (s_wp_pending_since_ms != 0 &&
-            (now - s_wp_pending_since_ms) >= WP_SONAR_CONFIRM_MS) {
-            s_wp_zone             = candidate;
-            s_wp_pending_since_ms = 0;
-        }
+    if (s_wp_dist_ema_m < 0.0f) {
+        s_wp_dist_ema_m = distance_m;   // first sample: adopt, don't ramp in from 0
     } else {
-        // New candidate — start its hold timer
-        s_wp_pending_zone     = candidate;
-        s_wp_pending_since_ms = now;
+        const float dt_s  = (float)(now - s_wp_dist_last_ms) / 1000.0f;
+        const float alpha = 1.0f - expf(-dt_s / WP_SONAR_TAU_S);
+        s_wp_dist_ema_m += alpha * (distance_m - s_wp_dist_ema_m);
+    }
+    s_wp_dist_last_ms = now;
+
+    // Beeping-vs-silent is now the only discrete decision left in this path, so it
+    // is the only one that still needs hysteresis: engage at 50m, release at 55m.
+    // Without the gap, standing at the edge of range would stutter on and off.
+    if (s_wp_engaged) {
+        if (s_wp_dist_ema_m > WP_SONAR_RELEASE_M) s_wp_engaged = false;
+    } else {
+        if (s_wp_dist_ema_m <= WP_SONAR_MAX_M) s_wp_engaged = true;
     }
 
-    // Suppress beacon sonar so waypoint fix has priority
+    if (!s_wp_engaged) {
+        // Out of range — hand the buzzer back, the beacon may want it.
+        beacon_proximity::suppressSonar(false);
+        buzzer::stopSonar();
+        return;
+    }
+
+    // Suppress beacon sonar so waypoint fix has priority.
     beacon_proximity::suppressSonar(true);
 
-    const uint32_t interval_ms = waypointSonarInterval(s_wp_zone);
-    if (interval_ms > 0) buzzer::setSonarInterval(interval_ms, 30);
-    else                  buzzer::stopSonar();
+    // Safe to call every cycle with a drifting value: setSonarInterval() only
+    // re-bases the beat grid when the sonar was not already active, so a gliding
+    // tempo updates the period without resetting the phase.
+    buzzer::setSonarInterval(waypointSonarInterval(s_wp_dist_ema_m), 30);
 }
 
 void drawBeaconFoundIndicator(lv_obj_t* canvas, bool daylight) {

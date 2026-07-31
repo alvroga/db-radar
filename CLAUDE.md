@@ -832,15 +832,23 @@ it with `esp_timer_get_time()` first. See "The residual trap" in the backlog.
 other subsystem went unexamined until a 2026-07-31 audit. Two now carry the highest-value open work,
 and **neither is a CPU problem**:
 - **§7 — beacon proximity** is rate-starved at 2 Hz against a 5 Hz source.
-- **§8 — sonar/buzzer** has a walking beat grid (`= now + interval` instead of `+=`, ~8% jitter and a
-  ~4% flat tempo) and **no hysteresis at all** on the waypoint distance→tempo mapping, so the beat
-  flickers when GPS jitters across a boundary.
+- ~~**§8 — sonar/buzzer**~~ ✅ **fixed.** The walking beat grid (`= now + interval` instead of `+=`,
+  ~8% jitter and a ~4% flat tempo) is fixed and verified. The waypoint distance→tempo mapping is now
+  **continuous** — geometric, 2000 ms at 50 m → 250 ms at 2 m — with a τ = 1.5 s EMA on the *distance*
+  as the GPS-noise guard, replacing the four-zone ladder and its hysteresis outright. The waypoint
+  sonar also honours `Waypoint::found` now, so tapping the waypoint within 15 m silences it exactly
+  as tapping the beacon ball does.
 
 §8 also grades the rest: input latency adequate for taps and coarse for drags; GPS healthy bar a
 syscall-per-byte UART drain; **compass and battery healthy, no action.** The compass is the example to
 follow — when its rate went 5→10 Hz someone correctly re-derived the heading EMA (1.5° → 0.5°). The
 recurring defect everywhere else is *a rate or quantization constant nobody re-derived after the
 pipeline around it changed*.
+
+**A pattern worth generalising, from the sonar fix**: prefer a *continuous* mapping for a continuous
+physical quantity, and put the noise filter on the **input** (a τ-based EMA on distance/RSSI) rather
+than hysteresis on the **output**. Hysteresis is only correct where a genuinely discrete decision is
+being made — beeping vs silent, in range vs out. The beacon ring (§7.3c) wants the same treatment.
 
 ---
 

@@ -16,31 +16,32 @@ flash 1,666,611 (79.5%).
 
 ---
 
-## 0. VERIFY FIRST — already built, not yet tested on hardware
+## 0. ✅ DONE — verified on hardware 2026-07-31
 
-Commit `4452718` contains two audible sonar fixes that nobody has heard yet. **Do this before
-starting anything new**, and revert rather than build on top if either is wrong.
+Commit `4452718`'s two audible sonar fixes were tested and **both pass**. The beat is steady; the
+waypoint tempo holds its rate. That commit is good.
 
-- [ ] **Sonar beat steadiness** (indoor, beacon sonar alone is enough). Pick any zone and listen to
-      the metronome. It should be *steady*. Before the fix the beat wandered and ran ~4% slow.
-- [ ] **Waypoint tempo stability** (outdoor, needs GPS). Stand still ~10 m or ~30 m from a fixed
-      waypoint at 50 m zoom. The tempo should hold one rate, and only change when you genuinely cross
-      a boundary by >3 m for a full second. Before the fix it flipped between two rates at random.
-
-If both pass, that commit is good and the work below can proceed.
+Field testing also produced two findings the audit had missed, both handled in item 1 below: the
+waypoint tempo was *steady and still wrong* (not progressive, too busy far out), and there was **no
+way to stop the beeping on arrival**.
 
 ---
 
-## 1. §8.1e — continuous waypoint sonar tempo *(S)*
+## 1. ✅ DONE (⏳ unverified) — §8.1e continuous waypoint sonar tempo + arrival stop
 
-May **subsume** the hysteresis fix in §0 rather than build on it — decide after hearing §0.
+Built 2026-07-31. It **did subsume** the §0 hysteresis fix — the zone enum, ±3 m hysteresis and 1 s
+confirmation hold are deleted. Flash +1,132 B, RAM ±0.
 
-Current zones are 5/5/20/20 m wide (`navigation.cpp`, `waypointSonarInterval`), so the 10–50 m band
-where most of an approach happens is only two tempi. Replace the discrete mapping with a continuous
-one (geometric, e.g. 1500 ms at 50 m → 250 ms at 2 m). A continuously drifting tempo doesn't flicker,
-it glides — so hysteresis may become unnecessary.
+- Continuous geometric tempo, **2000 ms at 50 m → 250 ms at 2 m** (far end slowed past the originally
+  proposed 1500 ms, because "too much beeping far out" was half the complaint).
+- GPS-noise guard moved to the **input**: τ = 1.5 s EMA on the distance, measured `dt`. Hysteresis
+  survives only on the one genuinely discrete decision — engage ≤ 50 m, release > 55 m.
+- **Arrival stop**: `updateWaypointFixSonar()` now honours `Waypoint::found`. The flag and its 15 m
+  tap-to-set already existed; the sonar just never read it.
 
-**Why here**: it's the audio half of the same idea as item 3 below, and it's cheap.
+**→ TO TEST (outdoor, needs GPS):** walk a fixed waypoint in from ~50 m at 50 m zoom. The tempo should
+*glide* continuously faster with no steps, be noticeably calmer than before beyond ~25 m, and go
+silent the moment you tap the waypoint within 15 m. Check it re-engages if you unfix/refix.
 
 ---
 
