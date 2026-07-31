@@ -517,7 +517,9 @@ After 8.1a, 20 ms is the remaining jitter floor. Options, in increasing cost:
 
 ### ❌ Option 2 is void — `I2C_PROCESS_MS` cannot be lowered
 
-Field result: **button unresponsive, buzzer silent.** Reverted immediately.
+Field result: **button unresponsive, buzzer silent.** Reverted immediately; revert **confirmed on
+hardware** — radar, beacon discovery and sound all back to normal at `I2C_PROCESS_MS = 20`. So the
+constant is the confirmed cause, not a coincidence.
 
 The cost analysis above ("cheap, slightly wasteful") was wrong because it only counted **this task's
 own CPU**, which is indeed trivial — a non-blocking queue drain and a few timestamp compares. It never
