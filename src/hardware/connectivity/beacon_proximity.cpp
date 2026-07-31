@@ -56,8 +56,18 @@ static constexpr uint16_t SCAN_WINDOW_MS = 100;  // == interval → 100% duty. C
 //
 // τ = 0.5 s replaces α = 0.4 @ 2 Hz (which was a ~2.5 s time constant), so the
 // response is ~5× faster *and* smoother, because it is averaging more samples.
-static constexpr float EMA_TAU_S         = 0.5f;   // fast EMA — drives zone, trend, labels
-static constexpr float DISPLAY_TAU_S     = 1.0f;   // slow EMA — drives the ring width (analog meter feel)
+// The split is decision vs presentation, and they want opposite things:
+//   * rssi_ema     — fast. Feeds zone classification and trend, which are then
+//                    guarded by hysteresis/confirmation of their own, so latency
+//                    hurts and noise does not.
+//   * rssi_display — slow. Feeds the ring width and the sonar *tempo*, which are
+//                    shown/heard raw. Here noise is the whole problem: RSSI wobbles
+//                    ±3-5 dB standing still, and at τ=1.0s that reached the tempo
+//                    as roughly ±25% period jitter — audibly an unsteady beat.
+//                    Rhythm error is far more perceptible than visual lag, so this
+//                    is deliberately slower than feels necessary for the ring.
+static constexpr float EMA_TAU_S         = 0.5f;
+static constexpr float DISPLAY_TAU_S     = 2.0f;
 
 // Zone thresholds (RSSI-based, not distance-based)
 static constexpr int8_t ZONE_CLOSE_THRESHOLD    = -65;  // RSSI >= -65 = CLOSE
@@ -277,6 +287,7 @@ static void calculateTrend() {
 
     if (n < 3) {
         g_state.trend = MovementTrend::UNKNOWN;
+        g_state.trend_slope_dbm_s = 0.0f;
         return;
     }
 
@@ -301,10 +312,12 @@ static void calculateTrend() {
 
     if (denominator < 0.001f) {
         g_state.trend = MovementTrend::STABLE;
+        g_state.trend_slope_dbm_s = 0.0f;
         return;
     }
 
     const float slope = numerator / denominator;   // dBm per second
+    g_state.trend_slope_dbm_s = slope;
 
     // Positive slope = RSSI increasing = getting closer
     if (slope > TREND_APPROACHING_THRESHOLD) {
@@ -567,6 +580,7 @@ void resetState() {
 
     // Reset trend state
     g_state.trend = MovementTrend::UNKNOWN;
+    g_state.trend_slope_dbm_s = 0.0f;
     g_trend_index = 0;
     g_trend_count = 0;
     for (int i = 0; i < TREND_HISTORY_SIZE; i++) {
@@ -605,6 +619,7 @@ void update() {
             g_state.pending_zone = ProximityZone::OUT_OF_RANGE;
             g_state.pending_since_ms = 0;
             g_state.trend = MovementTrend::UNKNOWN;
+            g_state.trend_slope_dbm_s = 0.0f;
             g_trend_count = 0;
             g_state.rssi_ema = -127.0f;
             g_state.rssi_display = -127.0f;
@@ -710,7 +725,13 @@ void updateSonar() {
     constexpr float SONAR_MS_FAR    = 1500.0f;
     constexpr float SONAR_MS_NEAR   = 150.0f;
 
-    float t = (g_state.rssi_ema - SONAR_RSSI_FAR) / (SONAR_RSSI_NEAR - SONAR_RSSI_FAR);
+    // Driven by rssi_display (τ=2.0s), NOT rssi_ema. A first cut used rssi_ema
+    // and it beat audibly unsteady: at τ=0.5s the ±3-5 dB of standing-still RSSI
+    // noise passed straight through, and a 4 dB swing over this 40 dB span is a
+    // ~25% change in period. A continuous tempo only reads as a glide if the
+    // value driving it is itself smooth — otherwise "continuous" just means
+    // "jittering constantly" instead of "stepping occasionally", which is worse.
+    float t = (g_state.rssi_display - SONAR_RSSI_FAR) / (SONAR_RSSI_NEAR - SONAR_RSSI_FAR);
     if (t < 0.0f) t = 0.0f;
     if (t > 1.0f) t = 1.0f;
     const uint32_t interval_ms =
@@ -728,12 +749,29 @@ void updateSonar() {
     // pitch to modulate — but beep *duration* is already a parameter of
     // setSonarInterval(), so this costs nothing: a 12 ms tick and a 60 ms tone are
     // unmistakably different on a piezo.
-    uint16_t beep_ms = 30;   // STABLE / UNKNOWN — neutral
-    switch (g_state.trend) {
-        case MovementTrend::APPROACHING: beep_ms = 60; break;  // warmer — a fuller tone
-        case MovementTrend::DEPARTING:   beep_ms = 12; break;  // colder — a clipped tick
-        default: break;
-    }
+    // Continuous in the regression slope, NOT switched off the three-state trend
+    // enum. The first cut switched on MovementTrend and it was the single worst
+    // thing about the result: standing still, the slope hovers around zero and
+    // the classifier flips APPROACHING/STABLE/DEPARTING at random, so the beep
+    // length jumped 60→30→12 ms from one beat to the next. That is heard as the
+    // rhythm breaking up rather than as any kind of information — the same defect
+    // as a four-step tempo, in the other parameter, and self-inflicted after
+    // fixing it everywhere else today.
+    //
+    // Interpolating the length instead means slope noise around zero produces a
+    // beep length that hovers near neutral, which is inaudible, while a sustained
+    // approach lengthens it steadily. ±2 dBm/s saturates — comfortably beyond the
+    // ±1 dBm/s the trend classifier treats as significant.
+    constexpr float BEEP_SLOPE_FULL = 2.0f;   // dBm/s at which the effect saturates
+    constexpr float BEEP_MS_NEUTRAL = 30.0f;
+    constexpr float BEEP_MS_SPAN    = 30.0f;  // → 60ms closing, 0ms(→clamped 12) departing
+
+    float s = g_state.trend_slope_dbm_s / BEEP_SLOPE_FULL;
+    if (s < -1.0f) s = -1.0f;
+    if (s >  1.0f) s =  1.0f;
+    float beep_f = BEEP_MS_NEUTRAL + s * BEEP_MS_SPAN;
+    if (beep_f < 12.0f) beep_f = 12.0f;       // floor: shorter is inaudible on this piezo
+    const uint16_t beep_ms = (uint16_t)(beep_f + 0.5f);
 
     buzzer::setSonarInterval(interval_ms, beep_ms);
 }

@@ -63,7 +63,11 @@ struct BeaconState {
     uint32_t pending_since_ms = 0;   // When the pending zone was first seen (0 = none)
 
     // Trend detection
-    MovementTrend trend = MovementTrend::UNKNOWN;   // Current movement trend
+    MovementTrend trend = MovementTrend::UNKNOWN;   // Current movement trend (diagnostic)
+    float trend_slope_dbm_s = 0.0f;  // Raw regression slope. Drives the sonar beep
+                                     // length continuously — switching on the enum
+                                     // above made the beep flicker between three
+                                     // lengths whenever the slope hovered near zero.
 
     // Timing
     uint32_t last_seen_ms = 0;       // Millis of last detection
