@@ -473,6 +473,12 @@ bool isEnabled() {
     return g_state.scanning_enabled;
 }
 
+bool isInRange() {
+    return g_state.scanning_enabled
+        && !g_found
+        && g_state.zone != ProximityZone::OUT_OF_RANGE;
+}
+
 void resetState() {
     // Reset RSSI tracking
     g_state.rssi_raw = -127;
@@ -610,23 +616,54 @@ void updateSonar() {
         return;
     }
 
-    // Use confirmed zone for interval — zone has ±3 dBm hysteresis + 2 consecutive
-    // readings required, so tempo stays metronomic within a zone and only steps
-    // when you've genuinely crossed a boundary. Musical BPM progression:
-    //   VERY_FAR: 1500ms = 40 BPM  (andante)   — first detection, slow pulse
-    //   FAR:       750ms = 80 BPM  (moderato)   — getting warmer
-    //   MEDIUM:    500ms = 120 BPM (allegro)    — close
-    //   CLOSE:     250ms = 240 BPM (prestissimo) — on top of it
-    uint32_t interval_ms = 0;
-    switch (g_state.zone) {
-        case ProximityZone::CLOSE:    interval_ms = 250;  break;
-        case ProximityZone::MEDIUM:   interval_ms = 500;  break;
-        case ProximityZone::FAR:      interval_ms = 750;  break;
-        case ProximityZone::VERY_FAR: interval_ms = 1500; break;
-        default: buzzer::stopSonar(); return;
+    // ── Tempo: continuous in RSSI, not four zone steps ───────────────────────
+    //
+    // This used to be a switch on the confirmed zone — 1500/750/500/250 ms — which
+    // is the same defect the waypoint sonar had, and it drew the same field report:
+    // *"the rate at which the beeping changes is very difficult to gauge where to
+    // go"*. With four steps, most of a search happens inside one zone, where moving
+    // produces **no audible change at all**. That is fatal here specifically,
+    // because a human hunting a beacon is not reading absolute loudness — they are
+    // listening for *change* in response to their own movement, and a step function
+    // gives them none until they happen to cross a boundary.
+    //
+    // Linear in dBm is the right curve. RSSI ≈ C − 20·log₁₀(d), so equal steps in
+    // dBm are equal *ratios* of distance — which is exactly the geometric mapping
+    // the waypoint sonar uses over metres, arrived at from the other direction.
+    //
+    // The zone is still what decides *whether* to beep (that decision is genuinely
+    // discrete, and keeps its hysteresis); it no longer decides how fast.
+    constexpr float SONAR_RSSI_FAR  = -90.0f;   // slowest tempo at/below
+    constexpr float SONAR_RSSI_NEAR = -50.0f;   // fastest tempo at/above
+    constexpr float SONAR_MS_FAR    = 1500.0f;
+    constexpr float SONAR_MS_NEAR   = 150.0f;
+
+    float t = (g_state.rssi_ema - SONAR_RSSI_FAR) / (SONAR_RSSI_NEAR - SONAR_RSSI_FAR);
+    if (t < 0.0f) t = 0.0f;
+    if (t > 1.0f) t = 1.0f;
+    const uint32_t interval_ms =
+        (uint32_t)(SONAR_MS_FAR * powf(SONAR_MS_NEAR / SONAR_MS_FAR, t) + 0.5f);
+
+    // ── Timbre: beep length encodes the trend ────────────────────────────────
+    //
+    // "Warmer / colder" is far more actionable than absolute level when hunting,
+    // because absolute RSSI depends on the environment, the tag's orientation and
+    // your own body, none of which the user knows — but the *sign of the change*
+    // in response to a step is meaningful regardless. The trend was already being
+    // computed and read by nothing at all.
+    //
+    // The buzzer is a bare on/off line through the IO expander, so there is no
+    // pitch to modulate — but beep *duration* is already a parameter of
+    // setSonarInterval(), so this costs nothing: a 12 ms tick and a 60 ms tone are
+    // unmistakably different on a piezo.
+    uint16_t beep_ms = 30;   // STABLE / UNKNOWN — neutral
+    switch (g_state.trend) {
+        case MovementTrend::APPROACHING: beep_ms = 60; break;  // warmer — a fuller tone
+        case MovementTrend::DEPARTING:   beep_ms = 12; break;  // colder — a clipped tick
+        default: break;
     }
 
-    buzzer::setSonarInterval(interval_ms, 30);
+    buzzer::setSonarInterval(interval_ms, beep_ms);
 }
 
 BeaconState getState() {

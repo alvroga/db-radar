@@ -99,6 +99,25 @@ Built 2026-07-31, all of §7.3a–d. RAM +368 B, flash +840 B. **Item 4 is now u
 
 **Still worth doing**: set the tag to 100 ms advertising before item 4, for ~10 Hz.
 
+### 3b. Findability follow-up (built same day, ⏳ unverified)
+
+Field report after 3: beacon appeared silent (a fixed waypoint was muting it), and the beeping was
+*"very difficult to gauge where to go"*.
+
+- **Beacon now has absolute priority** — `isInRange()` releases any fixed waypoint outright.
+- **Beacon sonar tempo is continuous**, linear in dBm: 1500 ms @ −90 → 150 ms @ −50. It still had the
+  exact four-step defect that item 1 removed from the waypoint sonar.
+- **Beep duration encodes trend**: 60 ms approaching / 30 neutral / 12 ms departing. `trend` had been
+  computed since the v2 redesign and read by nothing.
+
+**→ TO TEST:** fix a waypoint, then walk into beacon range — the fix should release itself and the
+beacon take over. Then hunt: the tempo should change *continuously* as you move, and the beep should
+audibly lengthen when you're closing.
+
+**If it's still hard to gauge**, the next lever is the tag at 100 ms (doubles the sample rate, halves
+trend latency) — then `TREND_WINDOW_MS` can drop from 4000 to ~2500 without losing slope confidence,
+which is what makes "warmer/colder" respond within a step or two rather than after several.
+
 ---
 
 ## 4. Beacon direction finding — "which way do I walk?" *(M)* — **UNBLOCKED**

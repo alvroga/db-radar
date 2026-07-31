@@ -99,6 +99,17 @@ void setEnabled(bool enabled);
 bool isEnabled();
 
 /**
+ * @brief True when the beacon is actively detected and still being hunted.
+ *
+ * Scanning, not yet marked found, and in a confirmed zone other than
+ * OUT_OF_RANGE. This is the **priority signal**: the beacon is a thing you are
+ * trying to locate, whereas a fixed waypoint is an area you are walking into, so
+ * whenever this is true the beacon owns the sonar and any fixed waypoint is
+ * released. See updateWaypointFixSonar() in navigation.cpp.
+ */
+bool isInRange();
+
+/**
  * @brief Update beacon proximity state
  * Call this from the Network Task loop
  * Handles scanning, RSSI averaging, and distance calculation

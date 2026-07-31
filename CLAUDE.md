@@ -695,11 +695,26 @@ BLE-based item finder that activates at 50m zoom. Scans for a configured beacon 
 - **RSSI Processing**: EMA (α=0.4) + zone hysteresis (±3 dBm) + trend detection over 10 samples
 - **BLE Stack**: NimBLE (`h2zero/NimBLE-Arduino@^1.4.0`) — ~25KB SRAM (was ~65KB with Bluedroid)
 
-**Zone Thresholds**:
-- OUT_OF_RANGE: < -85 dBm (silent)
-- FAR: -85 to -75 dBm (1800ms beep)
-- MEDIUM: -75 to -65 dBm (900ms beep)
-- CLOSE: ≥ -65 dBm (500ms → 200ms beep)
+**Zone Thresholds** — the zone decides *whether* to beep and whether to show the solid CLOSE fill.
+It no longer decides the tempo:
+- OUT_OF_RANGE: < -90 dBm (silent, no ring)
+- VERY_FAR / FAR / MEDIUM: -90 / -85 / -75 dBm
+- CLOSE: ≥ -65 dBm (solid fill + ball + star)
+
+**Sonar tempo is continuous and linear in dBm** — 1500 ms at -90 dBm → 150 ms at -50 dBm. Four
+discrete rates made a search unnavigable: most of it happens inside one zone, where moving produced no
+audible change, and someone hunting listens for *change in response to their own movement*, not
+absolute level. Linear in dBm is exact, not approximate — RSSI ≈ C − 20·log₁₀(d), so equal dBm steps
+are equal distance *ratios*.
+
+**Beep duration encodes trend** (60 ms approaching / 30 neutral / 12 departing). The buzzer has no
+pitch, but duration was already a free parameter, and "warmer/colder" beats absolute level when the
+environment, tag orientation and your own body all shift the absolute.
+
+**Beacon has absolute priority over the waypoint sonar.** When `beacon_proximity::isInRange()` is
+true, `updateWaypointFixSonar()` **releases the fixed waypoint** outright — a beacon is a thing to
+find, a fixed waypoint is an area you walk into. Merely yielding the buzzer wasn't enough: a fix keeps
+every other waypoint hidden and would re-take the sonar as soon as the beacon dipped out of range.
 
 **Settings**: Target MAC, measured power (dBm @ 1m), path loss exponent — all NVS-persistent (`bcn_*` keys)
 

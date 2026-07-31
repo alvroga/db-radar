@@ -11,6 +11,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+**Beacon takes absolute priority, and its sonar became continuous + trend-aware** — ⏳ *awaiting
+hardware verification*
+
+Field report after the §7 rate work: the beacon appeared *silent*, and once that was explained, the
+beeping was *"very difficult to gauge where to go"*. Two separate causes.
+
+**1. A fixed waypoint could mute the beacon entirely.** `updateWaypointFixSonar()` called
+`suppressSonar(true)` unconditionally as soon as a waypoint was fixed at 50 m zoom, and *then*
+computed the tempo — so with the waypoint beyond 50 m the tempo was 0 → `stopSonar()`, leaving the
+beacon permanently muted by something that made no sound itself. The continuous-tempo rewrite already
+fixed that path, but the priority was still backwards.
+
+**The beacon now wins outright.** A beacon is a thing you are trying to *find*; a fixed waypoint is an
+area you are walking into, and its sonar is a secondary convenience. When `beacon_proximity::isInRange()`
+becomes true the waypoint fix is **released**, not merely out-prioritised — leaving it fixed would keep
+every other waypoint hidden from the radar and re-take the sonar the moment the beacon dipped out of
+range. Safe against flicker: `isInRange()` reads the *confirmed* zone, which needs 1000 ms of
+hysteresis-gated agreement to enter.
+
+**2. The beacon sonar still had the four-step defect just removed from the waypoint sonar.** Tempo was
+a `switch` on `state.zone` — 1500/750/500/250 ms — so most of a search happens *inside* one zone, where
+moving produces no audible change at all. That is fatal for a beacon specifically: someone hunting is
+not judging absolute loudness, they are listening for *change in response to their own movement*, and
+a step function gives them none until they cross a boundary.
+
+Tempo is now continuous and **linear in dBm** — 1500 ms at −90 dBm to 150 ms at −50 dBm,
+`interval = 1500 · 0.1^((rssi+90)/40)`. Linear in dBm is the correct curve rather than an
+approximation: RSSI ≈ C − 20·log₁₀(d), so equal dBm steps are equal *ratios* of distance — the same
+geometric mapping the waypoint sonar uses over metres, reached from the other direction. The zone
+still decides *whether* to beep; it no longer decides how fast.
+
+**Trend is finally used for something.** It had been computed since the v2 redesign and read by
+nothing. "Warmer/colder" is far more actionable than absolute level when hunting, because absolute
+RSSI depends on the environment, the tag's orientation and your own body — but the *sign of the
+change* is meaningful regardless. The buzzer is a bare on/off line with no pitch to modulate, but beep
+*duration* is already a parameter, so this cost nothing: **60 ms** tone when APPROACHING, **30 ms**
+neutral, **12 ms** clipped tick when DEPARTING.
+
+**Build impact**: RAM ±0, flash 1,668,847 → 1,669,051 (**+204 B**).
+
 **Beacon proximity: 2 Hz → ~5 Hz, and everything derived from that rate re-derived with it** — ⏳
 *awaiting hardware verification*
 

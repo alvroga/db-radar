@@ -72,23 +72,76 @@ discrete decision is made.**
 
 ## Audio: Sonar Beeping
 
-The buzzer pulses at variable intervals based on EMA RSSI, giving an audio sonar effect:
+### Sonar tempo — continuous in RSSI
 
-| EMA RSSI | Beep Interval | Sensation |
-|----------|--------------|-----------|
-| < -85 dBm | Silent | Out of range |
-| -85 to -75 dBm | 1800ms | Slow — far away |
-| -75 to -65 dBm | 900ms | Medium |
-| -65 to -55 dBm | 500ms | Fast |
-| ≥ -55 dBm | 200ms | Rapid — very close (<1m) |
+**Rewritten 2026-07-31.** The tempo was four discrete rates selected by `state.zone`
+(1500/750/500/250 ms). Field report: *"the rate at which the beeping changes is very difficult to
+gauge where to go."* With four steps, most of a search happens **inside** one zone, where moving
+produces no audible change at all — and that is fatal here specifically, because someone hunting a
+beacon is not judging absolute loudness, they are listening for *change in response to their own
+movement*. A step function gives them none until they happen to cross a boundary.
 
-Beeping can be independently enabled/disabled in Settings (Settings > Sound > Beacon Sound toggle) without disabling the visual arc gauge.
+Tempo is now continuous and **linear in dBm**:
+
+```
+t        = clamp((rssi_ema + 90) / 40, 0, 1)
+interval = 1500 × (150/1500) ^ t     ms
+```
+
+| `rssi_ema` | Interval |
+|---|---|
+| ≤ -90 dBm | 1500 ms |
+| -80 dBm | ~843 ms |
+| -70 dBm | ~474 ms |
+| -65 dBm | ~356 ms |
+| -60 dBm | ~267 ms |
+| ≥ -50 dBm | 150 ms |
+
+Linear in dBm is the correct curve, not an approximation: RSSI ≈ C − 20·log₁₀(d), so equal steps in
+dBm are equal *ratios* of distance. That is the same geometric mapping the waypoint sonar uses over
+metres, reached from the other direction.
+
+### Timbre — beep length encodes the trend
+
+"Warmer / colder" is far more actionable than absolute level when hunting, because absolute RSSI
+depends on the environment, the tag's orientation and your own body — none of which the user knows —
+whereas the *sign of the change* in response to a step is meaningful regardless. The trend had been
+computed since the v2 redesign and read by **nothing**.
+
+The buzzer is a bare on/off line through the IO expander, so there is no pitch to modulate. But beep
+duration is already a parameter of `setSonarInterval()`, so this costs nothing:
+
+| Trend | Beep duration | Sounds like |
+|---|---|---|
+| APPROACHING | 60 ms | a fuller tone — *warmer* |
+| STABLE / UNKNOWN | 30 ms | neutral |
+| DEPARTING | 12 ms | a clipped tick — *colder* |
+
+Beeping can be independently enabled/disabled in Settings (Settings > Sound > Beacon Sound toggle)
+without disabling the visual ring.
+
+### Priority over the waypoint sonar
+
+**The beacon always wins.** A beacon is a thing you are trying to *find*; a fixed waypoint is an area
+you are walking into, and its sonar is a secondary convenience. So when `beacon_proximity::isInRange()`
+becomes true, `updateWaypointFixSonar()` **releases the waypoint fix outright** rather than merely
+yielding the buzzer — leaving it fixed would keep every other waypoint hidden from the radar and
+would re-take the sonar the moment the beacon dipped out of range.
+
+This is safe against flicker because `isInRange()` reads the *confirmed* zone, which requires 1000 ms
+of hysteresis-gated agreement to enter, and OUT_OF_RANGE is below -90 dBm.
+
+> **Historic bug, fixed 2026-07-31**: `updateWaypointFixSonar()` used to call `suppressSonar(true)`
+> unconditionally as soon as a waypoint was fixed at 50 m zoom, and *then* compute the tempo. With the
+> waypoint beyond 50 m the tempo was 0 → `stopSonar()`. So a fixed-but-distant waypoint permanently
+> muted the beacon while making no sound itself — the beacon appeared completely dead.
 
 ### Code Reference
 
-- Sonar update: `src/hardware/connectivity/beacon_proximity.cpp` — `updateSonar()` (~line 398-416)
+- Sonar update: `src/hardware/connectivity/beacon_proximity.cpp` — `updateSonar()`
+- Priority / auto-unfix: `src/ui/navigation.cpp` — `updateWaypointFixSonar()`
 - Buzzer API: `include/hardware/buzzer.h` — `setSonarInterval()`, `stopSonar()`
-- Buzzer state machine: `src/hardware/buzzer.cpp` (~line 164-217)
+- Buzzer state machine: `src/hardware/buzzer.cpp`
 
 ## RSSI Processing
 
@@ -124,13 +177,17 @@ RSSI.
 
 Zones prevent rapid oscillation at zone boundaries:
 
-| Zone | RSSI Threshold | Beep Rate |
-|------|---------------|-----------|
-| OUT_OF_RANGE | < -90 dBm | Silent |
-| VERY_FAR | -90 to -85 dBm | 1500ms |
-| FAR | -85 to -75 dBm | 750ms |
-| MEDIUM | -75 to -65 dBm | 500ms |
-| CLOSE | ≥ -65 dBm | 250ms |
+| Zone | RSSI Threshold | Role |
+|------|---------------|------|
+| OUT_OF_RANGE | < -90 dBm | Silent, no ring |
+| VERY_FAR | -90 to -85 dBm | — |
+| FAR | -85 to -75 dBm | — |
+| MEDIUM | -75 to -65 dBm | — |
+| CLOSE | ≥ -65 dBm | Solid fill + ball + star |
+
+> The zone no longer selects the beep rate — see *Sonar tempo* below. It decides only *whether* to
+> beep at all and *whether* to switch to the solid CLOSE visual, both of which are genuinely discrete
+> decisions and therefore keep their hysteresis.
 
 - **Hysteresis**: ±3 dBm band — must exceed threshold by 3 dBm to change zones
 - **Confirmation**: the new zone must hold for **1000 ms**. This is a *duration*, not a sample count.

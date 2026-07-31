@@ -853,6 +853,28 @@ static void updateWaypointFixSonar() {
         return;
     }
 
+    // ── Beacon has absolute priority ─────────────────────────────────────────
+    //
+    // A beacon is a thing you are trying to *find*; a fixed waypoint is an area
+    // you are walking into, and its sonar is a secondary convenience. So the
+    // moment the beacon is genuinely detected, the waypoint fix is **released**
+    // outright rather than merely yielding the buzzer — leaving it fixed would
+    // keep hiding every other waypoint from the radar and re-take the sonar as
+    // soon as the beacon dipped out of range.
+    //
+    // Safe against flicker: isInRange() reads the *confirmed* zone, which needs
+    // 1000 ms of hysteresis-gated agreement to enter, and OUT_OF_RANGE is below
+    // -90 dBm — so this cannot fire on a single stray advertisement.
+    if (beacon_proximity::isInRange()) {
+        Serial.printf("[NAV] Fixed waypoint released — beacon detected (%s), beacon has priority\n",
+                      beacon_proximity::zoneToString(beacon_proximity::getCurrentZone()));
+        ui.fixed_waypoint_index = -1;
+        beacon_proximity::suppressSonar(false);
+        buzzer::stopSonar();   // beacon's own updateSonar() re-arms it on the next Network Task loop
+        resetWaypointSonarTempo();
+        return;
+    }
+
     // Proximity sonar only active at 50m zoom (same as beacon proximity)
     if (ui.current_zoom != ui_manager::ZoomLevel::ZOOM_50M) {
         beacon_proximity::suppressSonar(false);
