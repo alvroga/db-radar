@@ -11,6 +11,62 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+**Beacon proximity: 2 Hz → ~5 Hz, and everything derived from that rate re-derived with it** — ⏳
+*awaiting hardware verification*
+
+Backlog §7 in full (7.3a–d). The BLE feed was capped at exactly **2.0 Hz** against a tag advertising
+at 5 Hz, so about 60% of every advertisement was thrown away. Three independent causes, all removed:
+
+1. **Duplicate filtering** — NimBLE reports a given advertiser to `onResult` once *per scan* while
+   `filter_duplicates` is set.
+2. **`g_pScan->stop()` on the first hit** — ended the scan the instant the beacon was seen,
+   guaranteeing exactly one sample per cycle.
+3. **A 500 ms scan/idle poll loop** in `update()`.
+
+Now a **single continuous passive scan** (`start(0, …)` → `BLE_HS_FOREVER`), duplicates off,
+`setMaxResults(0)`, 100 ms window == interval. The poll loop, `SCAN_INTERVAL_MS`,
+`SCAN_DURATION_SEC`, `g_scan_in_progress` and the results-sweep block are all deleted.
+
+**Passive is load-bearing, not just a power choice.** With active scanning and a legacy `ADV_IND`
+advertiser, NimBLE *withholds* `onResult` until the scan response arrives, and failing that until the
+scan completes. This had been filed as §7.3d "suspected, confirm with runtime logging" — reading
+`NimBLEScan.cpp` confirms it outright, so the item closed without instrumenting anything.
+
+**The more important half: every constant derived from the old rate was re-derived.** Left alone,
+each would have silently changed meaning by 2.5–5× the moment the feed sped up — which is exactly the
+defect (*a rate constant nobody re-derived after the pipeline around it changed*) that the audit was
+named after.
+
+- Both EMAs are **τ-based from measured elapsed time** (`α = 1 − e^(−dt/τ)`, τ = 0.5 s fast / 1.0 s
+  display) rather than fixed per-sample α. Measured, because BLE advertising is lossy and a dropped
+  advertisement must widen that sample's weight rather than skew the time constant.
+- Zone confirmation is a **duration** (`ZONE_CONFIRM_MS = 1000`) rather than "2 consecutive samples",
+  which meant 1.0 s only because samples arrived at 2 Hz.
+- Trend slope is regressed against **real time in dBm/s** over a 4 s window rather than against sample
+  index in dBm/cycle. Thresholds ±1 dBm/s, taken from the physics: `8.686·v/d` at 1.4 m/s and n = 2
+  gives 0.6 dBm/s at 20 m, 1.2 at 10 m, 2.4 at 5 m. (Diagnostic only — nothing acts on trend.)
+- `BEACON_LOST_TIMEOUT_MS` 15 s → 5 s, which at the new rate is already 25–50 missed advertisements.
+
+**The ring is continuous now (§7.3c).** Width interpolates from `rssi_display` (−90 dBm → 6 px,
+−65 dBm → 34 px) instead of snapping between four zone-selected widths. `rssi_display` — the slow EMA
+that exists specifically to drive it — had been computed every sample and **read by nothing at all**.
+The two decisions *around* the ring stay discrete and keep their hysteresis: whether to draw one, and
+whether to switch to the solid CLOSE fill.
+
+**Two footguns found and fixed while doing this**:
+`setAdvertisedDeviceCallbacks(cb, wantDuplicates)` calls `setDuplicateFilter(!wantDuplicates)`
+internally, so `debugScanAll()`'s restore path would have silently put the feed back to 2 Hz for the
+rest of the session after any `beacon scan`; and with duplicates off `onResult` fires for every
+advertisement from every device in range, where the old body built two heap `String`s per callback
+before rejecting — it now compares a `NimBLEAddress` parsed once.
+
+`beacon status` / `beacon trend` report the **measured** mean inter-arrival in ms and Hz — the direct
+verification that this worked. **Still to check on hardware: radio power draw**, since 100% scan duty
+is the one genuinely new cost. `SCAN_WINDOW_MS` is the single knob if it's objectionable.
+
+**Build impact**: RAM 195,600 → 195,968 (**+368 B**, almost all the 48-entry timestamped trend ring),
+flash 1,668,007 → 1,668,847 (**+840 B**).
+
 **`Serial` no longer flushes on every call, and logging can be switched off** — ⏳ *awaiting hardware
 verification*
 

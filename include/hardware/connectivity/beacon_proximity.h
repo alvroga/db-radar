@@ -46,15 +46,21 @@ struct BeaconState {
     bool scanning_enabled = false;   // Currently scanning for beacon
     bool found = false;              // Beacon detected in last scan
 
-    // RSSI tracking
+    // RSSI tracking. Both EMAs are τ-based (time constants, not per-sample α), so
+    // they keep their meaning regardless of how fast advertisements arrive.
     int8_t rssi_raw = -127;          // Last raw RSSI reading
-    float rssi_ema = -127.0f;        // EMA-smoothed RSSI (α=0.4) — used for zone/trend/labels
-    float rssi_display = -127.0f;    // Slow EMA for gauge arc (α=0.25) — analog meter feel
+    float rssi_ema = -127.0f;        // Fast EMA (τ=0.5s) — drives zone/trend/labels
+    float rssi_display = -127.0f;    // Slow EMA (τ=1.0s) — drives the ring width, analog meter feel
+
+    // Measured mean inter-arrival between accepted samples, ms. 0 = no data yet.
+    // This is the read-out for the continuous-scan work: ~500 before it, ~200
+    // after (or ~100 with the tag reconfigured).
+    float sample_interval_ms = 0.0f;
 
     // Zone management
     ProximityZone zone = ProximityZone::OUT_OF_RANGE;           // Current confirmed zone
     ProximityZone pending_zone = ProximityZone::OUT_OF_RANGE;   // Zone being validated
-    int pending_zone_count = 0;                                  // Consecutive samples in pending zone
+    uint32_t pending_since_ms = 0;   // When the pending zone was first seen (0 = none)
 
     // Trend detection
     MovementTrend trend = MovementTrend::UNKNOWN;   // Current movement trend

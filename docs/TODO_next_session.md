@@ -73,41 +73,40 @@ grid-as-rects (paint measured 1.01× on a 1.5× clock — not compute-bound) · 
 
 ---
 
-## 3. §7 — beacon BLE rate work ⭐ *the big one* *(S, ~2 files)*
+## 3. ✅ DONE (⏳ unverified) — §7 beacon BLE rate work
 
-**The largest felt improvement remaining, and the hard prerequisite for item 4.** Not a CPU problem —
-240 MHz bought it nothing.
+Built 2026-07-31, all of §7.3a–d. RAM +368 B, flash +840 B. **Item 4 is now unblocked.**
 
-Today the feed is capped at **2.0 Hz** by three things in `beacon_proximity.cpp`: NimBLE's default
-controller-side duplicate filtering, `g_pScan->stop()` on first hit (`:93`), and
-`SCAN_INTERVAL_MS = 500` (`:18`). The tag advertises at **200 ms** and can be set to **100 ms**.
+- **§7.3a** — one continuous passive scan, duplicates off, `setMaxResults(0)`, 100 ms window ==
+  interval. Poll loop, `stop()`-on-hit, `SCAN_INTERVAL_MS`, `SCAN_DURATION_SEC`, `g_scan_in_progress`
+  and the results sweep all deleted. **Expected 2 Hz → ~5 Hz.**
+- **§7.3b** — both EMAs τ-based off measured `dt` (0.5 s / 1.0 s); zone confirmation is a duration
+  (1000 ms); `BEACON_LOST_TIMEOUT_MS` 15 s → 5 s. **Trend was re-derived too** — it regressed against
+  sample index in dBm/cycle, which at 5 Hz would have become ±10 dBm/s. Now real time, ±1 dBm/s.
+- **§7.3c** — ring width continuous in `rssi_display` (−90 dBm → 6 px, −65 → 34 px). The two discrete
+  decisions around it (draw at all / solid CLOSE fill) keep their hysteresis.
+- **§7.3d** — **confirmed from the NimBLE source, no code needed.** Active scan on a legacy `ADV_IND`
+  advertiser genuinely does withhold `onResult` until the scan response. Passive fixes it.
 
-- [ ] **§7.3a Continuous passive scan** — `setActiveScan(false)`, `setDuplicateFilter(false)`,
-      `setMaxResults(0)`, `start(0, ...)`. Delete the `stop()`, `SCAN_INTERVAL_MS`,
-      `SCAN_DURATION_SEC`, `g_scan_in_progress`, and the results-sweep block (`:419-467`). Optionally
-      set window == interval for 100% duty. **→ 2 Hz becomes 5 Hz (10 Hz if the tag is reconfigured).**
-      *Cost: radio power. Zoom-gated to 50 m, so bounded — but observe battery drain.*
-- [ ] **§7.3b Re-tune in time, not samples** — `α = 1 - expf(-dt_s / TAU_S)` using **measured**
-      elapsed ms, because BLE advertising is lossy. Recommended τ = 0.5 s (~2× faster *and* quieter
-      than today). Make `ZONE_CHANGE_SAMPLES` time-based too, or 1.0 s of confirmation silently
-      becomes 0.4 s. Drop `BEACON_LOST_TIMEOUT_MS` from 15 s to ~5 s.
-- [ ] **§7.3c Continuous ring width** — `rssi_display` is computed every sample (`:113`) and **read by
-      nothing**; the ring is 4 discrete states off `state.zone` (`navigation.cpp:488-494`). Drive width
-      continuously from `rssi_display`, keep the sonar tempo on the hysteresis-gated zone. *Likely the
-      largest felt change of the three.* Re-check the paint stage after (single `lv_draw_arc`, should
-      not move the 9.3 ms).
-- [ ] **§7.3d** *(XS, diagnostic)* — log `getAdvType()` and `millis() - scan_start_ms` in `onResult`
-      to confirm or kill the suspected active-scan callback deferral. 7.3a fixes it either way; this is
-      for the record.
+**→ TO TEST:**
+- [ ] `beacon status` — the new **Sample rate** line should read ~5 Hz / ~200 ms (was ~2 Hz / ~500 ms).
+      This is the single number that says whether 7.3a worked.
+- [ ] Ring should now *grow smoothly* as you approach, not jump between four thicknesses.
+- [ ] **Battery drain.** 100% scan duty is the one genuinely new cost, zoom-gated to 50 m.
+      If it's bad, `SCAN_WINDOW_MS` is the single knob (80 ms → 80% duty).
+- [ ] Run `beacon scan` once, then re-check `beacon status` sample rate — verifies the
+      `debugScanAll()` restore path doesn't silently re-enable duplicate filtering.
 
-**Also set the tag to 100 ms** before item 4.
+**Still worth doing**: set the tag to 100 ms advertising before item 4, for ~10 Hz.
 
 ---
 
-## 4. Beacon direction finding — "which way do I walk?" *(M)*
+## 4. Beacon direction finding — "which way do I walk?" *(M)* — **UNBLOCKED**
 
-**Blocked on item 3.** At 2 Hz a rotation yields 1.7 samples per 30° bin (noise); at 10 Hz it yields
-8.3, which gives 7–14 dB of SNR. Full design in
+~~Blocked on item 3~~ — item 3 is built. At 2 Hz a rotation yielded 1.7 samples per 30° bin (noise);
+at ~5 Hz it yields ~4, and at 10 Hz (tag reconfigured to 100 ms) 8.3, which gives 7–14 dB of SNR.
+**Confirm the measured rate from `beacon status` before starting** — the whole feasibility argument
+rests on it. Full design in
 [`beacon_direction_finding.md`](beacon_direction_finding.md).
 
 True BT 5.1 AoA is **impossible** here (single antenna, no CTE IQ). Body-shadow DF works: the body

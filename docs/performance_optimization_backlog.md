@@ -342,7 +342,32 @@ largest *felt* improvement of the three despite being the smallest change.
 
 Either wire it up or delete it — it should not stay as a computed-but-unread field.
 
-#### 7.3d Suspected: active scan is deferring the callback by a full second — **unconfirmed**
+#### 7.3d Suspected: active scan is deferring the callback by a full second — ✅ **CONFIRMED from source, 2026-07-31**
+
+**No runtime logging was needed — the library source settles it.** `NimBLEScan.cpp`
+(`esp-nimble-cpp` 1.4.x, in `.pio/libdeps/`) fires `onResult` immediately only under
+
+```cpp
+if (pScan->m_scan_params.passive || !isLegacyAdv ||
+    (advertisedDevice->getAdvType() != BLE_HCI_ADV_TYPE_ADV_IND &&
+     advertisedDevice->getAdvType() != BLE_HCI_ADV_TYPE_ADV_SCAN_IND))
+```
+
+so for a legacy `ADV_IND` advertiser under **active** scan the callback is withheld until the scan
+response arrives, and failing that until `BLE_GAP_EVENT_DISC_COMPLETE` — the full scan duration.
+Setting `passive` short-circuits the test on its first term, which is what 7.3a does. The remaining
+tag-dependent unknown (is it actually `ADV_IND`?) no longer matters, because passive is now
+unconditional. Item closed without instrumenting anything.
+
+The reading also confirmed the other two caps precisely, in the same function:
+`if (m_scan_params.filter_duplicates && advertisedDevice->m_callbackSent) return 0;` is the
+one-report-per-scan filter, and `if (m_maxResults == 0 && m_callbackSent) erase(...)` is why
+`setMaxResults(0)` is safe with duplicates off — each device is freed after its callback, so the
+results vector cannot grow without bound during a forever-scan.
+
+**Original text, for the record:**
+
+`setActiveScan(true)` (`:283`) sets `passive = 0`. `NimBLEScan.cpp:143` then fires `onResult`
 
 `setActiveScan(true)` (`:283`) sets `passive = 0`. `NimBLEScan.cpp:143` then fires `onResult`
 immediately only if `passive || !isLegacyAdv || advType ∉ {ADV_IND, ADV_SCAN_IND}`. For a legacy
@@ -359,13 +384,57 @@ anything: log `advertisedDevice->getAdvType()` and `millis() - scan_start_ms` in
 type is `ADV_IND` and the delta is ~1000 ms, it's confirmed. 7.3a's switch to passive scanning fixes
 it either way and also halves radio traffic, so the test is for the record, not for the decision.
 
-### 7.4 Expected result
+### 7.4 Expected result — ✅ all of §7.3 implemented 2026-07-31, ⏳ unverified
 
 | | today | after 7.3a + 7.3b (option C) + 7.3c |
 |---|---|---|
 | sample rate | 2.0 Hz | 5 Hz (10 Hz if the tag is set to 100 ms) |
 | ring response | ~3.3 s, 4 discrete states | continuous, ~1.2 s |
 | zone/tempo response | ~3.3 s | ~2.2 s, and quieter |
+
+**What was built** (`beacon_proximity.cpp`, `beacon_proximity.h`, `navigation.cpp`, `diagnostics.cpp`):
+
+- **7.3a** — one `start(0, ...)` scan running forever, `setDuplicateFilter(false)`,
+  `setActiveScan(false)`, `setMaxResults(0)`, window == interval == 100 ms. Deleted: the `stop()` on
+  first hit, `SCAN_INTERVAL_MS`, `SCAN_DURATION_SEC`, `g_scan_in_progress`, `g_last_scan_ms` and the
+  whole results-sweep block. `update()` no longer polls for scan completion; it recomputes
+  zone/trend/distance on the Network Task's own cadence, which the time-based constants below make
+  legitimate.
+- **7.3b** — both EMAs are τ-based off **measured** elapsed ms (τ = 0.5 s fast, 1.0 s display).
+  `ZONE_CHANGE_SAMPLES` became `ZONE_CONFIRM_MS = 1000`, so 1 s of confirmation stays 1 s instead of
+  silently becoming 0.4 s. `BEACON_LOST_TIMEOUT_MS` 15 s → 5 s.
+- **7.3c** — ring width is continuous in `rssi_display` (−90 dBm → 6 px, −65 dBm → 34 px). The two
+  decisions *around* it stay discrete and stay hysteresis-gated: draw a ring at all, and switch to the
+  solid CLOSE fill.
+- **Trend was re-derived too**, though nothing but diagnostics reads it. It regressed RSSI against
+  *sample index* with thresholds in dBm/**cycle**, which is precisely the defect this audit is named
+  after — at 5 Hz the old ±2 dBm/cycle would have silently become ±10 dBm/s. Now regressed against
+  real time over a 4 s window with thresholds of ±1 dBm/s, chosen from the physics: walking at 1.4 m/s
+  with n = 2 gives 8.686·v/d ≈ 0.6 dBm/s at 20 m, 1.2 at 10 m, 2.4 at 5 m.
+
+**Two footguns found and handled while doing it:**
+
+1. `setAdvertisedDeviceCallbacks(cb, wantDuplicates)` calls `setDuplicateFilter(!wantDuplicates)`
+   *internally*. Any call to it after the explicit `setDuplicateFilter(false)` silently re-enables
+   filtering and puts the feed straight back to 2 Hz. `debugScanAll()` did exactly this on its restore
+   path — a `beacon scan` would have quietly halved the sample rate for the rest of the session.
+   It now restores every parameter, and stops/resumes the continuous scan around its own one-shot.
+2. With duplicate filtering off, `onResult` fires for **every advertisement from every device in
+   range**, not just the target. The old body built two heap `String`s per callback
+   (`getAddress().toString()` then `toLowerCase()`) before comparing. It now compares
+   `NimBLEAddress` directly against a target parsed once at `setEnabled()`.
+
+**New read-out**: `BeaconState::sample_interval_ms` — the measured mean inter-arrival, reported by
+`beacon status` and `beacon trend` as both ms and Hz. This is the direct verification of 7.3a: it
+should read ~200 ms / 5 Hz where it previously read ~500 ms / 2 Hz.
+
+**Build impact**: RAM 195,600 → 195,968 (**+368 B**, almost all the 48-entry timestamped trend ring),
+flash 1,668,007 → 1,668,847 (**+840 B**).
+
+**Still to verify on hardware**: the sample rate itself, the ring's feel, and **radio power draw** —
+100% scan duty is the one genuinely new cost here. It is zoom-gated to 50 m so it is bounded, but if
+drain is objectionable, `SCAN_WINDOW_MS` is the single knob to dial back (80 ms gives 80% duty and
+should still catch a 200 ms advertiser most of the time).
 
 **Caveats, stated up front.** The sample-rate gain is capped by the tag's own advertising interval —
 5× only exists if the tag is reconfigured to 100 ms, and 2.5× is what today's 200 ms setting yields.
@@ -387,7 +456,7 @@ changed** — and graded.
 | Subsystem | Verdict |
 |---|---|
 | **Sonar / buzzer** | ✅ Rhythm ✅ verified; tempo now continuous + silences on arrival (⏳ unverified). §8.1 |
-| **Beacon proximity** | ⭐ Rate-starved at 2 Hz. See §7 |
+| **Beacon proximity** | ✅ §7.3a-d all built (⏳ unverified) — continuous passive scan, τ-based EMAs, continuous ring. See §7 |
 | Input latency (touch/button) | Adequate for taps, poor for drag. §8.2 |
 | GPS | Healthy; one syscall-per-byte inefficiency. §8.3 |
 | Compass | ✅ Healthy — no action. §8.4 |
@@ -1670,12 +1739,12 @@ of the time is in stage 3.
 | 13 | Doc reconciliation (§4.1) | S | — | — | open |
 | **14** | **Waypoint sonar hysteresis (§8.1d)** | XS | **stops audible tempo flicker** | Very low | ✅ verified, then **superseded by 19** |
 | **15** | **Phase-lock the sonar grid (§8.1a)** | XS | **removes 8 % beat jitter + 4 % flat tempo** | Very low | ✅ verified on hardware |
-| **16** | **Beacon: continuous passive scan (§7.3a)** | S | **2 → 5 Hz sample rate** | Low (power) | open ⭐ |
-| **17** | **Beacon: τ-based EMA + time-based zone confirm (§7.3b)** | S | **3.3 → 2.2 s, less jitter** | Low | open ⭐ |
-| **18** | **Beacon: continuous ring width from `rssi_display` (§7.3c)** | S | **4 states → continuous** | Low | open ⭐ |
+| **16** | **Beacon: continuous passive scan (§7.3a)** | S | **2 → 5 Hz sample rate** | Low (power) | ✅ built, ⏳ unverified |
+| **17** | **Beacon: τ-based EMA + time-based zone confirm (§7.3b)** | S | **3.3 → 2.2 s, less jitter** | Low | ✅ built, ⏳ unverified |
+| **18** | **Beacon: continuous ring width from `rssi_display` (§7.3c)** | S | **4 states → continuous** | Low | ✅ built, ⏳ unverified |
 | **19** | **Continuous waypoint sonar tempo + arrival stop (§8.1e)** | S | **subsumed step 14**; progressive approach, calmer far out, silences on arrival | Low | ✅ built, ⏳ unverified |
 | 20 | Delete blocking `rapidPulse()` (§8.1f) | XS | — (hygiene) | Very low | ✅ done |
-| 21 | Beacon: confirm active-scan callback deferral (§7.3d) | XS | — (diagnostic) | — | open |
+| 21 | Beacon: confirm active-scan callback deferral (§7.3d) | XS | — (diagnostic) | — | ✅ **confirmed from source**, no code needed |
 | 22 | Buzzer tick 20 → 10 ms (§8.1b) | XS | halves residual jitter | Low | open, do step 15 first |
 | 23 | Decouple touch polling from the render (§8.2) | M | drag/scroll feel | Medium | open, justify first |
 | 24 | GPS bulk UART read (§8.3) | S | Core 0 CPU only | Low | open |

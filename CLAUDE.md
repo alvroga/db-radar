@@ -705,18 +705,32 @@ BLE-based item finder that activates at 50m zoom. Scans for a configured beacon 
 
 **Serial Commands**: `beacon status`, `beacon scan`, `beacon test`, `beacon zone`, `beacon trend`
 
-**⚠️ Known limitation — the BLE feed is rate-starved at 2 Hz** (audit 2026-07-31). Three things cap
-it at one RSSI sample per 500 ms: NimBLE's default controller-side duplicate filtering, the
-`g_pScan->stop()` on first hit, and `SCAN_INTERVAL_MS = 500`. The tag advertises at 200 ms, so most
-packets are discarded. The EMA and zone constants were tuned against that starved feed, giving ~3.3 s
-of end-to-end latency. **This is not a CPU problem — 240 MHz bought it nothing.** Fix is a continuous
-passive scan plus τ-based (time-derived, not sample-derived) smoothing. See
-[`docs/performance_optimization_backlog.md`](docs/performance_optimization_backlog.md) §7.
+**✅ The 2 Hz rate starvation is fixed** (§7.3a–d, built 2026-07-31, ⏳ unverified). The feed was capped
+at one RSSI sample per 500 ms by three independent things — NimBLE's duplicate filtering, a
+`g_pScan->stop()` on first hit, and a 500 ms poll loop — while the tag advertised at 200 ms. It is now
+**one continuous passive scan** running forever, duplicates off, results not stored: expected ~5 Hz,
+or ~10 Hz if the tag is reconfigured to 100 ms. **This was never a CPU problem — 240 MHz bought it
+nothing.**
 
-**Direction finding** ("which way do I walk?") is possible via body-shadow DF using the compass, but
-is **blocked on that rate work** — at 2 Hz a rotation yields 1.7 samples per 30° bin, which is noise.
-True BT 5.1 AoA is impossible on this hardware (single antenna, no CTE IQ). Design:
-[`docs/beacon_direction_finding.md`](docs/beacon_direction_finding.md).
+Everything derived from that feed was re-derived with it, which is the actual lesson: both EMAs are
+now **τ-based off measured elapsed time** (0.5 s / 1.0 s) rather than fixed per-sample α, zone
+confirmation is a **duration** (1000 ms) rather than a sample count, and the trend slope is regressed
+against **real time** in dBm/s rather than per-cycle. Left alone, every one of those would have
+silently changed meaning by 2.5–5× the moment the rate moved.
+
+**Passive scanning is load-bearing, not just a power choice.** With active scanning and a legacy
+`ADV_IND` advertiser, NimBLE withholds the `onResult` callback until the scan response arrives
+(`NimBLEScan.cpp`). Passive short-circuits that and delivers on the advertisement itself.
+
+⚠️ **`setAdvertisedDeviceCallbacks(cb, wantDuplicates)` calls `setDuplicateFilter(!wantDuplicates)`
+internally** — calling it after the explicit `setDuplicateFilter(false)` silently puts the feed back
+to 2 Hz. `debugScanAll()` did exactly this and is now fixed. See
+[`docs/beacon_proximity.md`](docs/beacon_proximity.md).
+
+**Direction finding** ("which way do I walk?") was **blocked on that rate work and is now unblocked** —
+at 2 Hz a rotation yielded 1.7 samples per 30° bin (noise); at 5–10 Hz it yields 4–8, which is usable.
+Body-shadow DF using the compass; true BT 5.1 AoA is impossible on this hardware (single antenna, no
+CTE IQ). Design: [`docs/beacon_direction_finding.md`](docs/beacon_direction_finding.md).
 
 **Code References**:
 - Arc drawing: `src/ui/navigation.cpp:390-420` - `drawBeaconProximityGauge()`
@@ -829,9 +843,10 @@ what makes the rotation feel right.
 it with `esp_timer_get_time()` first. See "The residual trap" in the backlog.
 
 **⚠️ The backlog is no longer render-only.** It was scoped to a single number — frame time — and every
-other subsystem went unexamined until a 2026-07-31 audit. Two now carry the highest-value open work,
-and **neither is a CPU problem**:
-- **§7 — beacon proximity** is rate-starved at 2 Hz against a 5 Hz source.
+other subsystem went unexamined until a 2026-07-31 audit. Both items it turned up have since been
+built, and **neither was a CPU problem**:
+- ~~**§7 — beacon proximity** is rate-starved at 2 Hz against a 5 Hz source.~~ ✅ fixed — see the
+  Beacon Proximity section above.
 - ~~**§8 — sonar/buzzer**~~ ✅ **fixed.** The walking beat grid (`= now + interval` instead of `+=`,
   ~8% jitter and a ~4% flat tempo) is fixed and verified. The waypoint distance→tempo mapping is now
   **continuous** — geometric, 2000 ms at 50 m → 250 ms at 2 m — with a τ = 1.5 s EMA on the *distance*

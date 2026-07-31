@@ -484,15 +484,30 @@ static void drawBeaconProximityGauge(lv_draw_ctx_t* ctx, int screen_size) {
             return;
         }
 
-        // VERY_FAR / FAR / MEDIUM: ring flush with screen edge, grows inward by zone
-        // radius = 239 - width/2 keeps outer edge at 239px regardless of ring thickness
-        int32_t ring_width = 0;
-        switch (state.zone) {
-            case beacon_proximity::ProximityZone::VERY_FAR: ring_width = 8;  break;
-            case beacon_proximity::ProximityZone::FAR:      ring_width = 16; break;
-            case beacon_proximity::ProximityZone::MEDIUM:   ring_width = 28; break;
-            default: return;  // OUT_OF_RANGE — no ring
-        }
+        // VERY_FAR / FAR / MEDIUM: ring flush with screen edge, grows inward as the
+        // signal strengthens. radius = 239 - width/2 keeps the outer edge at 239px
+        // regardless of thickness.
+        //
+        // §7.3c: width is **continuous** in rssi_display, not four discrete steps.
+        // rssi_display is the slow (τ=1.0s) EMA and had been computed every sample
+        // and read by nothing at all — the ring was quantised to the zone, so it
+        // sat still through most of an approach and then jumped. Same principle as
+        // the waypoint sonar tempo: continuous for the analogue quantity, and
+        // hysteresis kept only where a genuinely discrete decision is made — which
+        // here is the two decisions *around* the ring, both still zone-gated:
+        // whether to draw one at all (OUT_OF_RANGE), and whether to switch to the
+        // solid CLOSE fill handled above.
+        if (state.zone == beacon_proximity::ProximityZone::OUT_OF_RANGE) return;
+
+        constexpr float RING_RSSI_MIN = -90.0f;  // ring at its thinnest at/below this
+        constexpr float RING_RSSI_MAX = -65.0f;  // ring at its thickest at/above this (CLOSE boundary)
+        constexpr float RING_W_MIN    = 6.0f;
+        constexpr float RING_W_MAX    = 34.0f;
+
+        float t = (state.rssi_display - RING_RSSI_MIN) / (RING_RSSI_MAX - RING_RSSI_MIN);
+        if (t < 0.0f) t = 0.0f;
+        if (t > 1.0f) t = 1.0f;
+        const int32_t ring_width = (int32_t)(RING_W_MIN + t * (RING_W_MAX - RING_W_MIN) + 0.5f);
 
         lv_draw_arc_dsc_t arc_dsc;
         lv_draw_arc_dsc_init(&arc_dsc);

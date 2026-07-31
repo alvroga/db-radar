@@ -1448,12 +1448,13 @@ void handleBeaconCommand(const char* args) {
         beacon_proximity::BeaconState state = beacon_proximity::getState();
         Serial.println("=== BEACON ZONE STATUS ===");
         Serial.printf("Current Zone: %s\n", beacon_proximity::zoneToString(state.zone));
-        Serial.printf("Pending Zone: %s (count=%d/3)\n",
+        Serial.printf("Pending Zone: %s (held %lu ms of 1000)\n",
                       beacon_proximity::zoneToString(state.pending_zone),
-                      state.pending_zone_count);
+                      (unsigned long)(state.pending_since_ms ? millis() - state.pending_since_ms : 0));
         Serial.printf("EMA RSSI: %.1f dBm\n", state.rssi_ema);
         Serial.printf("Raw RSSI: %d dBm\n", state.rssi_raw);
         Serial.println("Thresholds: CLOSE >= -65, FAR >= -85 (±3dB hysteresis)");
+        Serial.println("Confirmation is a duration (1000ms), not a sample count");
         Serial.println("==========================");
 
     } else if (strncmp(args, "trend", 5) == 0) {
@@ -1462,10 +1463,13 @@ void handleBeaconCommand(const char* args) {
         Serial.println("=== BEACON TREND STATUS ===");
         Serial.printf("Current Trend: %s\n", beacon_proximity::trendToString(state.trend));
         Serial.printf("EMA RSSI: %.1f dBm\n", state.rssi_ema);
-        Serial.println("Thresholds:");
-        Serial.println("  APPROACHING: slope > +2 dBm/cycle");
-        Serial.println("  DEPARTING:   slope < -2 dBm/cycle");
-        Serial.println("  STABLE:      |slope| <= 2 dBm/cycle");
+        Serial.printf("Sample rate: %.2f Hz (mean gap %.0f ms)\n",
+                      state.sample_interval_ms > 0.0f ? 1000.0f / state.sample_interval_ms : 0.0f,
+                      state.sample_interval_ms);
+        Serial.println("Thresholds (regressed against real time, 4s window):");
+        Serial.println("  APPROACHING: slope > +1 dBm/s");
+        Serial.println("  DEPARTING:   slope < -1 dBm/s");
+        Serial.println("  STABLE:      |slope| <= 1 dBm/s");
         Serial.println("===========================");
 
     } else if (strncmp(args, "reset", 5) == 0) {

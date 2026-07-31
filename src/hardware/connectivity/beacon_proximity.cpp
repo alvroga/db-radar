@@ -13,14 +13,51 @@ namespace beacon_proximity {
 // Configuration Constants - v2 "Hot/Cold" Detector
 // ============================================================================
 
-// Timing
-static constexpr uint32_t SCAN_DURATION_SEC = 1;      // 1s scan (was 2s — shorter = faster zone updates)
-static constexpr uint32_t SCAN_INTERVAL_MS = 500;     // Scan every 500ms — faster RSSI updates when beacon in range
+// ── Scanning (§7.3a — continuous passive scan) ───────────────────────────────
+//
+// This module used to sample at a hard 2.0 Hz against a tag advertising at 5 Hz,
+// so ~60% of every advertisement was thrown away. Three things capped it, and all
+// three are gone:
+//
+//   1. **Controller-side duplicate filtering.** NimBLE reports a given advertiser
+//      to onResult *once per scan* while `filter_duplicates` is set. Every
+//      subsequent advertisement in the same scan was dropped in
+//      `NimBLEScan.cpp` (`if (filter_duplicates && m_callbackSent) return 0;`).
+//   2. **`g_pScan->stop()` on the first hit**, which ended the scan the moment the
+//      beacon was seen — guaranteeing exactly one sample per scan cycle.
+//   3. **A 500 ms scan/idle poll loop** in update().
+//
+// Now: one scan, started once, running forever (`start(0, ...)` → BLE_HS_FOREVER),
+// duplicate filtering off, results not stored, and **passive**.
+//
+// Passive is not just a power choice — it fixes a real callback deferral. With
+// active scanning and a legacy `ADV_IND` advertiser, NimBLE withholds onResult
+// until the *scan response* arrives (`NimBLEScan.cpp`, the `m_scan_params.passive
+// || !isLegacyAdv || advType != ADV_IND` branch). Passive short-circuits that test
+// and delivers on the advertisement itself. This was filed as §7.3d "suspected,
+// confirm with runtime logging"; reading the library source confirms it outright,
+// so no logging was needed.
+//
+// Expected: **2 Hz → ~5 Hz**, or ~10 Hz if the tag's advertising interval is
+// reconfigured from 200 ms to 100 ms.
+static constexpr uint16_t SCAN_ITVL_MS   = 100;  // controller scan interval (ms — this wrapper takes ms, not 0.625ms units)
+static constexpr uint16_t SCAN_WINDOW_MS = 100;  // == interval → 100% duty. Costs radio power; zoom-gated to 50m, so bounded.
 
-// EMA smoothing
-static constexpr float EMA_ALPHA = 0.4f;              // Moderate smoothing (~5 sample response)
-static constexpr float DISPLAY_EMA_ALPHA = 0.25f;    // Slow EMA for gauge arc (~8 scans to 90% settle)
-static constexpr int TREND_HISTORY_SIZE = 10;         // Samples for trend calculation
+// ── EMA smoothing (§7.3b — time-based, not sample-based) ─────────────────────
+//
+// These were α constants tuned against the starved 2 Hz feed. Left alone, raising
+// the sample rate would have silently made both EMAs 2.5-5× *faster* and noisier —
+// the exact "rate constant nobody re-derived" defect this whole audit was about.
+//
+// So they are now time constants, with α derived per sample from the **measured**
+// elapsed time: α = 1 − e^(−dt/τ). Measured rather than assumed because BLE
+// advertising is lossy — samples do not arrive on a schedule, and a dropped one
+// must widen that sample's α, not skew the average.
+//
+// τ = 0.5 s replaces α = 0.4 @ 2 Hz (which was a ~2.5 s time constant), so the
+// response is ~5× faster *and* smoother, because it is averaging more samples.
+static constexpr float EMA_TAU_S         = 0.5f;   // fast EMA — drives zone, trend, labels
+static constexpr float DISPLAY_TAU_S     = 1.0f;   // slow EMA — drives the ring width (analog meter feel)
 
 // Zone thresholds (RSSI-based, not distance-based)
 static constexpr int8_t ZONE_CLOSE_THRESHOLD    = -65;  // RSSI >= -65 = CLOSE
@@ -28,14 +65,30 @@ static constexpr int8_t ZONE_MEDIUM_THRESHOLD   = -75;  // RSSI >= -75 = MEDIUM
 static constexpr int8_t ZONE_FAR_THRESHOLD      = -85;  // RSSI >= -85 = FAR
 static constexpr int8_t ZONE_VERY_FAR_THRESHOLD = -90;  // RSSI >= -90 = VERY_FAR
 static constexpr int8_t HYSTERESIS_DB = 3;              // ±3 dB band
-static constexpr int ZONE_CHANGE_SAMPLES = 2;         // 2 consecutive readings to confirm zone change
 
-// Trend detection
-static constexpr float TREND_APPROACHING_THRESHOLD = 2.0f;   // dBm/cycle positive
-static constexpr float TREND_DEPARTING_THRESHOLD = -2.0f;    // dBm/cycle negative
+// Zone confirmation is a *duration*, not a sample count, for the same reason the
+// EMAs are. "2 consecutive samples" meant 1.0 s at 2 Hz; at 5 Hz it would have
+// quietly become 0.4 s, and at 10 Hz 0.2 s — i.e. no confirmation at all.
+static constexpr uint32_t ZONE_CONFIRM_MS = 1000;
 
-// Lost beacon timeout
-static constexpr uint32_t BEACON_LOST_TIMEOUT_MS = 15000;  // 15 seconds
+// ── Trend detection ──────────────────────────────────────────────────────────
+// Diagnostic only (printed by `beacon status` / `beacon trend`; nothing acts on
+// it). Slope is now regressed against real time in **dBm/second** rather than
+// per-sample, so the thresholds keep their meaning at any rate.
+//
+// Scale check: walking at 1.4 m/s toward a beacon with path-loss n=2 gives
+// dRSSI/dt = 8.686·v/d — about 0.6 dBm/s at 20 m, 1.2 at 10 m, 2.4 at 5 m. So
+// 1.0 dBm/s marks "genuinely closing" from ~15 m in. (The old 2.0 dBm/*cycle* at
+// 2 Hz was 4.0 dBm/s, which essentially never fired outside 3 m.)
+static constexpr float    TREND_APPROACHING_THRESHOLD =  1.0f;  // dBm/s positive
+static constexpr float    TREND_DEPARTING_THRESHOLD   = -1.0f;  // dBm/s negative
+static constexpr uint32_t TREND_WINDOW_MS   = 4000;  // regression window
+static constexpr int      TREND_HISTORY_SIZE = 48;   // ≥ TREND_WINDOW_MS at 10Hz + margin
+
+// Lost beacon timeout. 15 s made sense when a sample was a 500 ms scan cycle that
+// could legitimately miss several times; at 5-10 Hz, 5 s is already 25-50 missed
+// advertisements, which is unambiguous.
+static constexpr uint32_t BEACON_LOST_TIMEOUT_MS = 5000;
 
 // ============================================================================
 // Module State
@@ -45,18 +98,28 @@ static BeaconState g_state;
 static bool g_initialized = false;
 static bool g_sonar_suppressed = false;  // True when waypoint fix has sonar priority
 static bool g_found = false;             // True when user has tapped the ball (in-session only)
-static uint32_t g_last_scan_ms = 0;
 static NimBLEScan* g_pScan = nullptr;
-static bool g_scan_in_progress = false;
+static bool g_scan_running = false;      // Continuous scan started (§7.3a)
 
-// Target beacon (lowercase for comparison)
+// Target beacon (lowercase for comparison / display)
 static char g_target_mac_lower[18] = "";
+// Same address parsed once. With duplicate filtering off, onResult now fires for
+// every advertisement from every device in range, so the old
+// `getAddress().toString()` + String compare — which heap-allocated twice per
+// callback — is no longer an acceptable way to reject non-target traffic.
+static NimBLEAddress g_target_addr{};
+static bool g_target_addr_valid = false;
 
 // Spinlock protecting g_state fields written by NimBLE callback and read by Network Task
 static portMUX_TYPE g_state_mux = portMUX_INITIALIZER_UNLOCKED;
 
-// Trend history circular buffer
-static float g_trend_history[TREND_HISTORY_SIZE];
+// Timestamp of the previous accepted sample, for the τ-based EMA. 0 = none yet.
+static uint32_t g_last_sample_ms = 0;
+
+// Trend history circular buffer — timestamped, so the regression is against real
+// time rather than sample index.
+struct TrendSample { uint32_t t_ms; float ema; };
+static TrendSample g_trend_history[TREND_HISTORY_SIZE];
 static int g_trend_index = 0;
 static int g_trend_count = 0;  // How many samples in history
 
@@ -65,9 +128,9 @@ static int g_trend_count = 0;  // How many samples in history
 // Forward Declarations
 // ============================================================================
 
-static void updateRSSI_EMA(int8_t raw);
+static void updateRSSI_EMA(int8_t raw, uint32_t now);
 static void calculateTrend();
-static void updateZone(float ema, bool& zone_changed_out, ProximityZone& changed_to_out);
+static void updateZone(float ema, uint32_t now, bool& zone_changed_out, ProximityZone& changed_to_out);
 static ProximityZone classifyRSSI(float rssi, ProximityZone current_zone);
 
 // ============================================================================
@@ -76,22 +139,25 @@ static ProximityZone classifyRSSI(float rssi, ProximityZone current_zone);
 
 class BeaconScanCallback : public NimBLEAdvertisedDeviceCallbacks {
     void onResult(NimBLEAdvertisedDevice* advertisedDevice) override {
-        String mac = advertisedDevice->getAddress().toString().c_str();
-        mac = mac.toLowerCase();
+        // Hot path. With duplicate filtering disabled this runs for every
+        // advertisement from every device in range, which in a busy RF
+        // environment is far more often than the ~5 Hz we care about — so reject
+        // by address comparison, before touching the heap.
+        if (!g_target_addr_valid) return;
+        if (!(advertisedDevice->getAddress() == g_target_addr)) return;
 
-        if (mac == g_target_mac_lower) {
-            int rssi = advertisedDevice->getRSSI();
+        const int rssi = advertisedDevice->getRSSI();
+        const uint32_t now = millis();
 
-            portENTER_CRITICAL(&g_state_mux);
-            g_state.rssi_raw = (int8_t)rssi;
-            g_state.found = true;
-            g_state.last_seen_ms = millis();
-            updateRSSI_EMA((int8_t)rssi);
-            portEXIT_CRITICAL(&g_state_mux);
+        portENTER_CRITICAL(&g_state_mux);
+        g_state.rssi_raw = (int8_t)rssi;
+        g_state.found = true;
+        g_state.last_seen_ms = now;
+        updateRSSI_EMA((int8_t)rssi, now);
+        portEXIT_CRITICAL(&g_state_mux);
 
-            // Stop scanning early (outside spinlock — BLE API call)
-            g_pScan->stop();
-        }
+        // No stop() here. Stopping on the first hit was one of the three things
+        // capping the feed at one sample per scan cycle — see §7.3a above.
     }
 };
 
@@ -101,21 +167,36 @@ static BeaconScanCallback g_scanCallback;
 // EMA Smoothing
 // ============================================================================
 
-static void updateRSSI_EMA(int8_t raw) {
-    if (g_state.rssi_ema <= -127.0f) {
-        // First reading - initialize both EMAs
+// Called with g_state_mux held.
+static void updateRSSI_EMA(int8_t raw, uint32_t now) {
+    if (g_state.rssi_ema <= -127.0f || g_last_sample_ms == 0) {
+        // First reading — adopt it rather than ramping in from -127
         g_state.rssi_ema = (float)raw;
         g_state.rssi_display = (float)raw;
     } else {
-        // EMA formula: ema = α*raw + (1-α)*ema
-        g_state.rssi_ema = EMA_ALPHA * (float)raw + (1.0f - EMA_ALPHA) * g_state.rssi_ema;
-        // Display EMA: second-stage slow smoothing on rssi_ema for the gauge arc
-        g_state.rssi_display = DISPLAY_EMA_ALPHA * g_state.rssi_ema
-                             + (1.0f - DISPLAY_EMA_ALPHA) * g_state.rssi_display;
-    }
+        const float gap_ms = (float)(now - g_last_sample_ms);
 
-    // Add to trend history
-    g_trend_history[g_trend_index] = g_state.rssi_ema;
+        // α from the *measured* gap, so a dropped advertisement widens that
+        // sample's weight instead of skewing the effective time constant.
+        const float dt_s = gap_ms / 1000.0f;
+        const float a_fast = 1.0f - expf(-dt_s / EMA_TAU_S);
+        const float a_slow = 1.0f - expf(-dt_s / DISPLAY_TAU_S);
+
+        g_state.rssi_ema += a_fast * ((float)raw - g_state.rssi_ema);
+        // Display EMA: second-stage slow smoothing on rssi_ema for the gauge ring
+        g_state.rssi_display += a_slow * (g_state.rssi_ema - g_state.rssi_display);
+
+        // Measured mean inter-arrival — the direct read-out of whether §7.3a
+        // worked. Reported by `beacon status`. Smoothed heavily (α=0.1) because
+        // BLE inter-arrival is spiky by nature.
+        if (g_state.sample_interval_ms <= 0.0f) g_state.sample_interval_ms = gap_ms;
+        else g_state.sample_interval_ms += 0.1f * (gap_ms - g_state.sample_interval_ms);
+    }
+    g_last_sample_ms = now;
+
+    // Add to trend history (timestamped)
+    g_trend_history[g_trend_index].t_ms = now;
+    g_trend_history[g_trend_index].ema  = g_state.rssi_ema;
     g_trend_index = (g_trend_index + 1) % TREND_HISTORY_SIZE;
     if (g_trend_count < TREND_HISTORY_SIZE) {
         g_trend_count++;
@@ -126,32 +207,49 @@ static void updateRSSI_EMA(int8_t raw) {
 // Trend Detection (Linear Regression)
 // ============================================================================
 
+// Regresses RSSI against **seconds**, over the samples inside TREND_WINDOW_MS.
+// The old version regressed against sample *index*, which silently redefined the
+// dBm/cycle thresholds every time the sample rate moved.
+//
+// Takes a snapshot of the history under the spinlock and computes outside it —
+// a 48-point two-pass regression is far too long to hold a critical section for.
 static void calculateTrend() {
-    if (g_trend_count < 3) {
+    TrendSample snap[TREND_HISTORY_SIZE];
+    int n = 0;
+
+    portENTER_CRITICAL(&g_state_mux);
+    const int count = g_trend_count;
+    const int index = g_trend_index;
+    const uint32_t now = millis();
+    for (int i = 0; i < count; i++) {
+        const int idx = (index - count + i + TREND_HISTORY_SIZE) % TREND_HISTORY_SIZE;
+        // Keep only what falls inside the regression window
+        if ((uint32_t)(now - g_trend_history[idx].t_ms) <= TREND_WINDOW_MS) {
+            snap[n++] = g_trend_history[idx];
+        }
+    }
+    portEXIT_CRITICAL(&g_state_mux);
+
+    if (n < 3) {
         g_state.trend = MovementTrend::UNKNOWN;
         return;
     }
 
-    // Calculate linear regression slope
-    // Using least squares: slope = Σ((x-x̄)(y-ȳ)) / Σ((x-x̄)²)
+    // Least squares: slope = Σ((x-x̄)(y-ȳ)) / Σ((x-x̄)²), x in seconds relative to
+    // the oldest retained sample (keeps the magnitudes small and well-conditioned).
+    const uint32_t t0 = snap[0].t_ms;
     float sum_x = 0, sum_y = 0;
-    int n = g_trend_count;
-
-    // Calculate means
     for (int i = 0; i < n; i++) {
-        int idx = (g_trend_index - n + i + TREND_HISTORY_SIZE) % TREND_HISTORY_SIZE;
-        sum_x += i;
-        sum_y += g_trend_history[idx];
+        sum_x += (float)(snap[i].t_ms - t0) / 1000.0f;
+        sum_y += snap[i].ema;
     }
-    float mean_x = sum_x / n;
-    float mean_y = sum_y / n;
+    const float mean_x = sum_x / n;
+    const float mean_y = sum_y / n;
 
-    // Calculate slope
     float numerator = 0, denominator = 0;
     for (int i = 0; i < n; i++) {
-        int idx = (g_trend_index - n + i + TREND_HISTORY_SIZE) % TREND_HISTORY_SIZE;
-        float x_diff = i - mean_x;
-        float y_diff = g_trend_history[idx] - mean_y;
+        const float x_diff = (float)(snap[i].t_ms - t0) / 1000.0f - mean_x;
+        const float y_diff = snap[i].ema - mean_y;
         numerator += x_diff * y_diff;
         denominator += x_diff * x_diff;
     }
@@ -161,10 +259,9 @@ static void calculateTrend() {
         return;
     }
 
-    float slope = numerator / denominator;
+    const float slope = numerator / denominator;   // dBm per second
 
-    // Classify trend
-    // Note: Positive slope = RSSI increasing = getting closer
+    // Positive slope = RSSI increasing = getting closer
     if (slope > TREND_APPROACHING_THRESHOLD) {
         g_state.trend = MovementTrend::APPROACHING;
     } else if (slope < TREND_DEPARTING_THRESHOLD) {
@@ -214,31 +311,30 @@ static ProximityZone classifyRSSI(float rssi, ProximityZone current_zone) {
     return ProximityZone::OUT_OF_RANGE;
 }
 
-static void updateZone(float ema, bool& zone_changed_out, ProximityZone& changed_to_out) {
+// Confirmation is a duration, not a sample count — see ZONE_CONFIRM_MS.
+static void updateZone(float ema, uint32_t now, bool& zone_changed_out, ProximityZone& changed_to_out) {
     // Classify what zone the current EMA would put us in
     ProximityZone new_zone = classifyRSSI(ema, g_state.zone);
     zone_changed_out = false;
 
     if (new_zone == g_state.zone) {
-        // Same zone - reset pending
+        // Same zone — drop any pending change
         g_state.pending_zone = g_state.zone;
-        g_state.pending_zone_count = 0;
+        g_state.pending_since_ms = 0;
     } else if (new_zone == g_state.pending_zone) {
-        // Consecutive reading in pending zone
-        g_state.pending_zone_count++;
-
-        // Require ZONE_CHANGE_SAMPLES consecutive readings to confirm zone change
-        if (g_state.pending_zone_count >= ZONE_CHANGE_SAMPLES) {
+        // Same candidate as last time — commit once it has held long enough
+        if (g_state.pending_since_ms != 0 &&
+            (uint32_t)(now - g_state.pending_since_ms) >= ZONE_CONFIRM_MS) {
             g_state.zone = new_zone;
-            g_state.pending_zone_count = 0;
+            g_state.pending_since_ms = 0;
             zone_changed_out = true;
             changed_to_out = new_zone;
             // Note: Serial.printf intentionally NOT called here — caller logs outside spinlock
         }
     } else {
-        // New pending zone
+        // New candidate — start its hold timer
         g_state.pending_zone = new_zone;
-        g_state.pending_zone_count = 1;
+        g_state.pending_since_ms = now;
     }
 }
 
@@ -279,10 +375,16 @@ void init() {
         return;
     }
 
-    g_pScan->setAdvertisedDeviceCallbacks(&g_scanCallback, false);
-    g_pScan->setActiveScan(true);
-    g_pScan->setInterval(100);
-    g_pScan->setWindow(80);
+    // ⚠️ Order matters: setAdvertisedDeviceCallbacks(cb, wantDuplicates) internally
+    // calls setDuplicateFilter(!wantDuplicates), so it would silently re-enable
+    // filtering if it ran after the explicit call below. Both are written out for
+    // clarity rather than relying on that side effect.
+    g_pScan->setAdvertisedDeviceCallbacks(&g_scanCallback, true /*wantDuplicates*/);
+    g_pScan->setDuplicateFilter(false);   // every advertisement, not one per scan
+    g_pScan->setActiveScan(false);        // passive — also avoids scan-response callback deferral
+    g_pScan->setMaxResults(0);            // don't accumulate a results vector; callback only
+    g_pScan->setInterval(SCAN_ITVL_MS);
+    g_pScan->setWindow(SCAN_WINDOW_MS);
 
     g_initialized = true;
 
@@ -333,17 +435,35 @@ void setEnabled(bool enabled) {
         for (int i = 0; g_target_mac_lower[i]; i++) {
             g_target_mac_lower[i] = tolower((unsigned char)g_target_mac_lower[i]);
         }
+        // Parse once, so the hot callback never has to build a String
+        g_target_addr = NimBLEAddress(std::string(g_target_mac_lower));
+        g_target_addr_valid = true;
 
         // Reset all state
         resetState();
 
         g_state.scanning_enabled = true;
+
+        // Start the single continuous scan (§7.3a). duration 0 → BLE_HS_FOREVER.
+        if (g_pScan && !g_scan_running) {
+            if (g_pScan->start(0, nullptr, false)) {
+                g_scan_running = true;
+            } else {
+                Serial.println("[BEACON] WARNING: continuous scan failed to start");
+            }
+        }
+
         Serial.printf("[BEACON] Proximity scanning ENABLED for %s\n", settings.beacon_macs[0]);
-        Serial.println("[BEACON] 5s cycle: 2s scan → 3s beep presentation");
+        Serial.printf("[BEACON] Continuous passive scan: %ums window / %ums interval, no duplicate filter\n",
+                      (unsigned)SCAN_WINDOW_MS, (unsigned)SCAN_ITVL_MS);
 
     } else if (!enabled && g_state.scanning_enabled) {
         g_state.scanning_enabled = false;
         g_state.found = false;
+        if (g_pScan && g_scan_running) {
+            g_pScan->stop();
+            g_scan_running = false;
+        }
         buzzer::stopSonar();  // Stop immediately — don't wait for Network Task's updateSonar()
         Serial.println("[BEACON] Proximity scanning DISABLED");
     }
@@ -360,23 +480,26 @@ void resetState() {
     g_state.rssi_display = -127.0f;
     g_state.found = false;
 
+    g_state.sample_interval_ms = 0.0f;
+
     // Reset zone state
     g_state.zone = ProximityZone::OUT_OF_RANGE;
     g_state.pending_zone = ProximityZone::OUT_OF_RANGE;
-    g_state.pending_zone_count = 0;
+    g_state.pending_since_ms = 0;
 
     // Reset trend state
     g_state.trend = MovementTrend::UNKNOWN;
     g_trend_index = 0;
     g_trend_count = 0;
     for (int i = 0; i < TREND_HISTORY_SIZE; i++) {
-        g_trend_history[i] = -127.0f;
+        g_trend_history[i].t_ms = 0;
+        g_trend_history[i].ema  = -127.0f;
     }
 
     // Reset timing
     g_state.last_seen_ms = 0;
     g_state.cycle_start_ms = 0;
-    g_last_scan_ms = 0;
+    g_last_sample_ms = 0;
 
     // Reset sonar state
     buzzer::stopSonar();
@@ -394,7 +517,7 @@ void update() {
 
     uint32_t now = millis();
 
-    // Check if beacon was lost (no reading for 15s)
+    // Check if beacon was lost
     bool beacon_lost = false;
     portENTER_CRITICAL(&g_state_mux);
     if (g_state.last_seen_ms > 0 && (now - g_state.last_seen_ms) > BEACON_LOST_TIMEOUT_MS) {
@@ -402,12 +525,14 @@ void update() {
             beacon_lost = true;
             g_state.zone = ProximityZone::OUT_OF_RANGE;
             g_state.pending_zone = ProximityZone::OUT_OF_RANGE;
-            g_state.pending_zone_count = 0;
+            g_state.pending_since_ms = 0;
             g_state.trend = MovementTrend::UNKNOWN;
             g_trend_count = 0;
             g_state.rssi_ema = -127.0f;
             g_state.rssi_display = -127.0f;
             g_state.rssi_raw = -127;
+            g_state.sample_interval_ms = 0.0f;
+            g_last_sample_ms = 0;
         }
     }
     portEXIT_CRITICAL(&g_state_mux);
@@ -415,66 +540,38 @@ void update() {
         Serial.println("[BEACON] Beacon lost - resetting to OUT_OF_RANGE");
     }
 
-    // Check if previous scan completed
-    if (g_scan_in_progress && !g_pScan->isScanning()) {
-        g_scan_in_progress = false;
+    // The scan runs continuously now, so there is no scan-completion event to hang
+    // derived state off. Zone/trend/distance are instead recomputed on this task's
+    // own cadence (Network Task loop), reading whatever the EMA has accumulated.
+    // That decouples them from sample arrival, which is exactly what the
+    // time-based confirmation and τ-based EMA were changed to allow.
+    //
+    // The results-sweep block that used to live here is gone with the polling:
+    // it existed to catch a beacon the callback had missed within a finite scan,
+    // and setMaxResults(0) means there is no results vector to sweep anyway.
+    calculateTrend();   // snapshots under the lock internally
 
-        // Process scan results (handles case where beacon wasn't caught by callback)
-        if (g_pScan) {
-            NimBLEScanResults results = g_pScan->getResults();
-            int count = results.getCount();
-
-            for (int i = 0; i < count; i++) {
-                NimBLEAdvertisedDevice device = results.getDevice(i);
-                String mac = device.getAddress().toString().c_str();
-                mac = mac.toLowerCase();
-
-                if (mac == g_target_mac_lower) {
-                    int rssi = device.getRSSI();
-                    portENTER_CRITICAL(&g_state_mux);
-                    g_state.rssi_raw = (int8_t)rssi;
-                    g_state.found = true;
-                    g_state.last_seen_ms = millis();
-                    updateRSSI_EMA((int8_t)rssi);
-                    portEXIT_CRITICAL(&g_state_mux);
-                    break;
-                }
-            }
-        }
-
-        // After getting new RSSI, update zone and trend.
-        // Hold spinlock to keep g_state consistent — NimBLE may deliver a late onResult()
-        // callback after isScanning() returns false. Serial.printf is intentionally outside
-        // the critical section (Serial uses interrupts).
-        bool zone_changed = false;
-        ProximityZone zone_changed_to = ProximityZone::OUT_OF_RANGE;
-        portENTER_CRITICAL(&g_state_mux);
-        if (g_state.rssi_ema > -127.0f) {
-            updateZone(g_state.rssi_ema, zone_changed, zone_changed_to);
-            calculateTrend();
-            const auto& settings = settings_manager::getSettings();
-            g_state.distance_m = rssiToDistance(
-                (int8_t)g_state.rssi_ema,
-                settings.beacon_measured_power,
-                settings.beacon_path_loss_n
-            );
-        }
-        portEXIT_CRITICAL(&g_state_mux);
-        if (zone_changed) {
-            Serial.printf("[BEACON] Zone changed: %s\n", zoneToString(zone_changed_to));
-        }
-
+    bool zone_changed = false;
+    ProximityZone zone_changed_to = ProximityZone::OUT_OF_RANGE;
+    const auto& settings = settings_manager::getSettings();
+    portENTER_CRITICAL(&g_state_mux);
+    if (g_state.rssi_ema > -127.0f) {
+        updateZone(g_state.rssi_ema, now, zone_changed, zone_changed_to);
+        g_state.distance_m = rssiToDistance(
+            (int8_t)g_state.rssi_ema,
+            settings.beacon_measured_power,
+            settings.beacon_path_loss_n
+        );
+    }
+    portEXIT_CRITICAL(&g_state_mux);
+    if (zone_changed) {
+        Serial.printf("[BEACON] Zone changed: %s\n", zoneToString(zone_changed_to));
     }
 
-    // Time for a new scan?
-    if (!g_scan_in_progress && (now - g_last_scan_ms >= SCAN_INTERVAL_MS)) {
-        g_last_scan_ms = now;
-        g_scan_in_progress = true;
-        g_state.found = false;
-
-        if (g_pScan) {
-            g_pScan->clearResults();
-            g_pScan->start(SCAN_DURATION_SEC, nullptr, false);  // Non-blocking
+    // Restart the scan if it stopped for any reason (host reset, error).
+    if (g_pScan && g_scan_running && !g_pScan->isScanning()) {
+        if (g_pScan->start(0, nullptr, false)) {
+            Serial.println("[BEACON] Continuous scan restarted");
         }
     }
 }
@@ -609,8 +706,18 @@ void debugScanAll() {
         return;
     }
 
+    // This is a one-shot *active* scan that stores results — the opposite of the
+    // continuous passive scan the module normally runs. Stop that first, and be
+    // careful to restore every parameter afterwards (see the restore block below).
+    const bool was_running = g_scan_running;
+    if (was_running) {
+        g_pScan->stop();
+        g_scan_running = false;
+    }
+
     g_pScan->setAdvertisedDeviceCallbacks(nullptr, false);
     g_pScan->setActiveScan(true);
+    g_pScan->setMaxResults(0xFF);   // this scan *wants* the results vector
     g_pScan->clearResults();
 
     NimBLEScanResults foundDevices = g_pScan->start(3, false);  // Blocking scan
@@ -649,8 +756,24 @@ void debugScanAll() {
         Serial.println(">>> TARGET NOT FOUND in scan results");
     }
 
-    g_pScan->setAdvertisedDeviceCallbacks(&g_scanCallback, false);
+    // Restore the continuous-scan configuration in full. ⚠️ Every line here
+    // matters: setAdvertisedDeviceCallbacks(cb, false) calls
+    // setDuplicateFilter(true) internally, so passing `true` — or re-clearing the
+    // filter afterwards — is required, otherwise this debug command would leave
+    // the beacon feed permanently back at one sample per scan.
+    g_pScan->setAdvertisedDeviceCallbacks(&g_scanCallback, true /*wantDuplicates*/);
+    g_pScan->setDuplicateFilter(false);
+    g_pScan->setActiveScan(false);
+    g_pScan->setMaxResults(0);
     g_pScan->clearResults();
+
+    if (was_running) {
+        if (g_pScan->start(0, nullptr, false)) {
+            g_scan_running = true;
+        } else {
+            Serial.println("[BLE] WARNING: failed to resume continuous scan");
+        }
+    }
 
     Serial.println("======================");
 }
@@ -664,18 +787,23 @@ void debugPrintState() {
 
     Serial.println("[RSSI]");
     Serial.printf("  Raw: %d dBm\n", g_state.rssi_raw);
-    Serial.printf("  EMA: %.1f dBm (α=%.2f)\n", g_state.rssi_ema, EMA_ALPHA);
+    Serial.printf("  EMA: %.1f dBm (τ=%.2fs)\n", g_state.rssi_ema, EMA_TAU_S);
+    Serial.printf("  Display EMA: %.1f dBm (τ=%.2fs — drives ring width)\n",
+                  g_state.rssi_display, DISPLAY_TAU_S);
     Serial.printf("  Found: %s\n", g_state.found ? "YES" : "NO");
     Serial.printf("  Last seen: %lu ms ago\n",
                   g_state.last_seen_ms > 0 ? millis() - g_state.last_seen_ms : 0);
+    Serial.printf("  Sample rate: %.2f Hz (mean gap %.0f ms)\n",
+                  g_state.sample_interval_ms > 0.0f ? 1000.0f / g_state.sample_interval_ms : 0.0f,
+                  g_state.sample_interval_ms);
     Serial.println("---");
 
     Serial.println("[ZONE]");
     Serial.printf("  Current: %s\n", zoneToString(g_state.zone));
-    Serial.printf("  Pending: %s (count=%d/%d)\n",
+    Serial.printf("  Pending: %s (held %lu/%lu ms)\n",
                   zoneToString(g_state.pending_zone),
-                  g_state.pending_zone_count,
-                  ZONE_CHANGE_SAMPLES);
+                  (unsigned long)(g_state.pending_since_ms ? millis() - g_state.pending_since_ms : 0),
+                  (unsigned long)ZONE_CONFIRM_MS);
     Serial.printf("  Thresholds: CLOSE>=%d, FAR>=%d, Hysteresis=±%d dB\n",
                   ZONE_CLOSE_THRESHOLD, ZONE_FAR_THRESHOLD, HYSTERESIS_DB);
     Serial.println("---");
@@ -689,16 +817,19 @@ void debugPrintState() {
         int start = (g_trend_index - show + TREND_HISTORY_SIZE) % TREND_HISTORY_SIZE;
         for (int i = 0; i < show; i++) {
             int idx = (start + i) % TREND_HISTORY_SIZE;
-            Serial.printf("%.1f", g_trend_history[idx]);
+            Serial.printf("%.1f", g_trend_history[idx].ema);
             if (i < show - 1) Serial.print(", ");
         }
         Serial.println("]");
     }
+    Serial.printf("  Thresholds: ±%.1f dBm/s over a %lums window\n",
+                  TREND_APPROACHING_THRESHOLD, (unsigned long)TREND_WINDOW_MS);
     Serial.println("---");
 
     Serial.println("[TIMING]");
-    Serial.printf("  Scan interval: %lums, scan duration: %lus\n",
-                  (unsigned long)SCAN_INTERVAL_MS, (unsigned long)SCAN_DURATION_SEC);
+    Serial.printf("  Continuous passive scan: %ums window / %ums interval, running: %s\n",
+                  (unsigned)SCAN_WINDOW_MS, (unsigned)SCAN_ITVL_MS,
+                  (g_pScan && g_pScan->isScanning()) ? "YES" : "no");
     Serial.printf("  Sonar active: %s\n", buzzer::isSonarActive() ? "YES" : "NO");
     Serial.println("---");
 
