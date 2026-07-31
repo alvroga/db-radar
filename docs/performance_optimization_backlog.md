@@ -1308,10 +1308,35 @@ So the RGB panel's DMA/bounce ISR is very likely installed on **Core 1 — the s
   whole display init there), so the ISR lands on Core 0 alongside the I2C/Network/System tasks.
 - **Verify first**: print `xPortGetCoreID()` from `on_vsync_cb` — it runs in ISR context on the core
   the interrupt was allocated on. That single line confirms or kills this hypothesis.
-  **✅ Instrumented 2026-07-31, ⏳ result not yet read off hardware.** `on_vsync_cb` records
-  `xPortGetCoreID()` into a volatile (recorded, not printed — `printf` is not ISR-safe) and `perf`
-  reports it as `Panel ISR: core N (uiTask on core M) — SHARED / separate`. Read it with `perf` and
-  then either act on the suggested change below or delete this section. Flash +264 B.
+
+### ✅ CONFIRMED on hardware, 2026-07-31
+
+```
+Panel ISR:    core 1  (uiTask on core 1) — SHARED, competing with render
+FRAME TOTAL:  83.2 ms
+```
+
+The hypothesis was right: the panel interrupt is allocated on **Core 1**, the same core as `uiTask`.
+The measurement is valid for the bounce-buffer ISR too, not just vsync — the RGB driver allocates a
+single interrupt for the panel and both events are serviced by it, so the core recorded in
+`on_vsync_cb` is the core the bounce copy runs on.
+
+**What that ISR is actually doing.** The bounce buffer is enabled at
+`BOUNCE_BUFFER_LINES = 10` (`system_config.h:35`), so the driver copies the framebuffer PSRAM→SRAM in
+10-line chunks **at the panel's scan rate, continuously, regardless of our frame rate**:
+460,800 B/frame × 37.7 Hz ≈ **17.4 MB/s**, in interrupt context, on the render core.
+
+**⚠️ Do NOT now attribute the frame time to this.** That is the residual trap this document exists to
+warn about, and it has caught four estimates already. What is measured is *which core*, nothing more.
+The *magnitude* is unmeasured, and the honest way to get it is an A/B: build with
+`BOUNCE_BUFFER_LINES = 0` and compare `perf`. That single experiment also happens to answer §1.4.
+
+**New consideration that did not exist when this item was written**: moving the ISR to Core 0 means
+moving it onto the core now running a **100% duty-cycle continuous BLE scan** (§7.3a), whose host task
+services ~89 advertisement callbacks/sec. Dropping a 17.4 MB/s ISR next to that could disturb beacon
+timing — the thing we just spent a day improving. So §1.5 is simultaneously more attractive (confirmed
+shared) and riskier (Core 0 is busier than it was). Measure the prize before paying for it, and
+re-check `beacon status`'s sample rate afterwards if it is attempted.
 - **Expected gain**: meaningful if confirmed — it removes a continuous ISR load from the render core.
 - **Risk**: low-medium. Core 0 also runs the WiFi/BLE stack; watch for interaction during WiFi mode
   (radar is disabled in WiFi mode anyway, per `navigation.cpp:110`).
@@ -1776,7 +1801,7 @@ of the time is in stage 3.
 | 22 | ~~Buzzer tick 20 → 10 ms (§8.1b)~~ | XS | — | **broke hardware** | ❌ **VOID — tried, button dead + buzzer silent. I2C bus contention, not CPU.** |
 | 23 | Decouple touch polling from the render (§8.2) | M | drag/scroll feel | Medium | open, justify first |
 | 24 | GPS bulk UART read (§8.3) | S | Core 0 CPU only | Low | open |
-| **25** | **Panel ISR core check (§1.5)** | XS | — (diagnostic) | — | ✅ instrumented, ⏳ read `perf` |
+| **25** | **Panel ISR core check (§1.5)** | XS | — (diagnostic) | — | ✅ **CONFIRMED: ISR on core 1, shared with uiTask** |
 | **26** | **`Serial` fflush gating (§3.5)** | S | ~~reliability~~ **small efficiency** — premise was wrong, see §3.5 | Low | ✅ built, ⏳ unverified |
 | 27 | Bounce-buffer A/B — remove for 18.75 KB SRAM (§1.4) | S | SRAM; ms unknown | Medium | open, measure first |
 

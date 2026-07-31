@@ -2,6 +2,33 @@
 
 ## Common Issues and Solutions
 
+### **Boot hangs immediately after `[I2C] Initialized: SDA=15, SCL=7...`**
+
+**Symptoms**: Boot log stops dead on that line. Nothing follows — no
+`[DEVICE] Initializing IO Expander (EXIO)...`. Pressing reset does not help. Reflashing does not help.
+
+**Cause**: a **stuck I2C bus**. The statement immediately after that print is `ping(EXIO_DEVICE)`
+(`i2c_manager.cpp`), the first real transaction on the bus. If the MCU resets while a slave — the
+CST820 touch controller or the PCF85063 RTC — is mid-byte, that slave keeps holding SDA low waiting to
+finish a transfer that will never come. **An MCU reset does not reset the slaves**; they are separate
+chips with their own power, so the bus comes up already jammed.
+
+Most likely after many rapid reset/reflash cycles, which is exactly when you are least inclined to
+suspect the hardware and most inclined to suspect your last commit.
+
+**Fix**: **full power cycle.** Unplug USB *and* disconnect the battery for ~10 s so the slaves lose
+power and release the lines. The reset button is not enough — that is the entire point of the failure
+mode. ✅ Confirmed to resolve it (2026-07-31).
+
+**Diagnostic value**: if a power cycle fixes it, it was the bus, not your code. A code fault would
+reproduce deterministically across power cycles; this does not.
+
+**Not yet implemented — the durable fix**: standard I2C recovery before `i2c_new_master_bus()` — drive
+SDA/SCL as plain GPIOs, pulse SCL up to 9 times with SDA released (clocking the stuck slave through the
+byte it is waiting on so it lets go), issue a manual STOP, then hand the pins to the driver. Note that
+`i2c_manager::resetBus()` already exists (`:203`) but nothing calls it at boot, and the failed EXIO
+ping only prints a warning and continues.
+
 ### **Display Issues**
 
 #### Display Jitter/Flicker
