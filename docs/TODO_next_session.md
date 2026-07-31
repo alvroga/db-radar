@@ -175,8 +175,12 @@ Details in [`../ROADMAP.md`](../ROADMAP.md).
       directly from PSRAM, competing for the bandwidth `rotate` is ~76% bound by. **Two builds + the
       `perf` HUD, be ready to revert** — the risk lands on display stability, which is currently
       flawless. Scale check: 18.75 KB vs item 5's 64 KB.
-- [ ] **§8.1b buzzer tick 20 → 10 ms** — do item 0 first and re-listen; with the grid phase-locked,
-      the residual jitter may not be objectionable.
+- [x] ~~**§8.1b buzzer tick 20 → 10 ms**~~ — ❌ **VOID. Tried 2026-07-31, broke the device** (button
+      unresponsive, buzzer silent), reverted. The change was justified on CPU cost, which is trivial;
+      the binding constraint is **I2C bus contention** with the CST820 touch driver, which bypasses
+      `i2c_mutex`. `I2C_PROCESS_MS = 20` is tuned, not arbitrary. See §8.1b.
+      → Beat steadiness must come from a **tempo deadband + slew limit** and a **median filter on
+      RSSI** instead, neither of which touches the bus.
 - [ ] **§8.3 GPS bulk UART read** — `gps_bh880.cpp:328` does one `uart_read_bytes()` syscall **per
       byte**. Core 0 only, never touches the render. Free CPU on the floor.
 - [ ] **§8.2 decouple touch polling** *(M)* — touch samples at ~11.7 Hz (inside `lv_timer_handler`).

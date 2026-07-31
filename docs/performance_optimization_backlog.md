@@ -510,12 +510,38 @@ After 8.1a, 20 ms is the remaining jitter floor. Options, in increasing cost:
 
 1. **Leave it.** With the grid fixed, ±20 ms of edge placement on a stable grid is much less
    objectionable than a walking tempo. Do 8.1a first and re-listen before spending anything here.
-2. **`I2C_PROCESS_MS` 20 → 10.** Halves jitter; doubles I2C Task wakeups on Core 0. Cheap, slightly
-   wasteful.
+2. ~~**`I2C_PROCESS_MS` 20 → 10.** Halves jitter; doubles I2C Task wakeups on Core 0. Cheap, slightly
+   wasteful.~~ ❌ **TRIED 2026-07-31 — BROKE THE DEVICE. Do not retry.**
 3. **Dedicated FreeRTOS timer / high-priority task** owning only the buzzer edges, at 5 ms. Correct,
    but it needs `i2c_mutex` discipline since the bus is shared with touch and RTC.
 
-Do 1, measure by ear, then decide. Do not jump to 3.
+### ❌ Option 2 is void — `I2C_PROCESS_MS` cannot be lowered
+
+Field result: **button unresponsive, buzzer silent.** Reverted immediately.
+
+The cost analysis above ("cheap, slightly wasteful") was wrong because it only counted **this task's
+own CPU**, which is indeed trivial — a non-blocking queue drain and a few timestamp compares. It never
+counted the **I2C bus**, which is the actual contended resource. The CST820 touch driver calls `Wire`
+directly, bypassing `i2c_mutex` entirely (`docs/compass_i2c_constraint.md` — the same constraint that
+blocks reading the compass from the I2C Task). Doubling this task's rate therefore doubles the
+collision rate against an already-contended bus, and the EXIO writes that drive the buzzer, plus the
+button's own reads, start failing.
+
+**So `I2C_PROCESS_MS = 20` is a tuned value, not an arbitrary one**, and 20 ms is a hard floor on sonar
+timing resolution for as long as the buzzer is driven over the shared bus. Beat steadiness has to be
+bought somewhere else:
+
+- **Smooth the interval rather than the clock** — a deadband (ignore changes under ~4%) plus a slew
+  limit on the tempo. Costs nothing, needs no bus access, and targets the perceived problem
+  ("not metronomic") more directly than edge placement does anyway.
+- **Median-filter the RSSI** before the EMA. An EMA is bad at outliers by construction; a single
+  multipath null drags it for a whole time constant.
+- Option 3 above, which still has to respect the same bus constraint and is therefore not obviously
+  safer — it moves *when* edges are driven, not *how often the bus is touched*.
+
+**Generalisable lesson**: on this board, "the CPU cost is negligible" is not a sufficient argument for
+raising any rate. The shared I2C bus is the scarce resource, and it has an undisciplined participant
+(the touch driver) that no mutex protects.
 
 #### 8.1c Every buzzer edge costs two I2C transactions instead of one
 
@@ -1745,7 +1771,7 @@ of the time is in stage 3.
 | **19** | **Continuous waypoint sonar tempo + arrival stop (§8.1e)** | S | **subsumed step 14**; progressive approach, calmer far out, silences on arrival | Low | ✅ built, ⏳ unverified |
 | 20 | Delete blocking `rapidPulse()` (§8.1f) | XS | — (hygiene) | Very low | ✅ done |
 | 21 | Beacon: confirm active-scan callback deferral (§7.3d) | XS | — (diagnostic) | — | ✅ **confirmed from source**, no code needed |
-| 22 | Buzzer tick 20 → 10 ms (§8.1b) | XS | halves residual jitter | Low | open, do step 15 first |
+| 22 | ~~Buzzer tick 20 → 10 ms (§8.1b)~~ | XS | — | **broke hardware** | ❌ **VOID — tried, button dead + buzzer silent. I2C bus contention, not CPU.** |
 | 23 | Decouple touch polling from the render (§8.2) | M | drag/scroll feel | Medium | open, justify first |
 | 24 | GPS bulk UART read (§8.3) | S | Core 0 CPU only | Low | open |
 | **25** | **Panel ISR core check (§1.5)** | XS | — (diagnostic) | — | ✅ instrumented, ⏳ read `perf` |

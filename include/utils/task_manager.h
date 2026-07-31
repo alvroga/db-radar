@@ -40,18 +40,20 @@ struct TaskConfig {
 
     // Update intervals (in milliseconds)
     static constexpr uint32_t UI_UPDATE_MS = 10;       // 100 FPS max
-    // 100 Hz. This is the buzzer's clock, not just the I2C queue's: buzzer::update()
-    // runs from this task (it needs EXIO over I2C), so every beep edge is quantized
-    // to this period. At 20ms that was ±20ms of jitter on a 150-300ms sonar interval
-    // — 7-13%, well above the ~10ms the ear resolves, and reported from the field as
-    // "not metronomic". It also flattened the 12/30/60ms trend-encoded beep lengths
-    // into near-indistinguishable multiples of 20ms.
+    // 50 Hz. ⚠️ DO NOT LOWER THIS. Tried 10ms on 2026-07-31 to halve sonar beat
+    // quantization (backlog §8.1b) and it broke the device on hardware: button
+    // unresponsive and buzzer silent. The reasoning that it was "almost free" was
+    // wrong — it accounted for this task's own CPU cost but not for **I2C bus
+    // contention**. The CST820 touch driver calls Wire directly, bypassing
+    // i2c_mutex (see docs/compass_i2c_constraint.md), so doubling this task's rate
+    // doubles the collision rate against an already-contended bus, and EXIO writes
+    // for the buzzer plus the button's own reads start failing.
     //
-    // The loop body is a non-blocking queue drain plus a few timestamp comparisons,
-    // so halving the period costs almost nothing on Core 0; buzzer::update() only
-    // touches I2C on an actual edge. FreeRTOS tick is 1000 Hz, so 10ms is 10 ticks —
-    // 5ms is available if this still is not steady enough.
-    static constexpr uint32_t I2C_PROCESS_MS = 10;
+    // 20ms is therefore a tuned value, not an arbitrary one, and it caps the
+    // sonar's timing resolution at 20ms. Improving beat steadiness has to come
+    // from somewhere other than this constant — smooth the interval instead
+    // (deadband + slew limit), or move the buzzer off the shared bus.
+    static constexpr uint32_t I2C_PROCESS_MS = 20;
     static constexpr uint32_t NETWORK_UPDATE_MS = 200; // 5 Hz for sonar rhythm
     // System Task tick. This is the sensor clock: the compass sub-timer (20ms gate)
     // and the GPS gate (GPS_UPDATE_INTERVAL_MS = 100) both fire every tick, so this
