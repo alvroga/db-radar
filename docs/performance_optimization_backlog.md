@@ -158,15 +158,30 @@ has the same defect the render had before C2 (rate-starved, not compute-bound), 
 against a 5 Hz source, and unlike everything below it is a *felt* improvement rather than milliseconds.
 Start there.
 
-Ranked by what is actually worth trying, within the render:
+**Re-ranked 2026-07-31 against a different objective**: the remaining items were originally ordered by
+*milliseconds saved*, but frame time is no longer scarce — 85 ms against a 10 Hz sensor feed. The
+scarce resources are **flash (79.5 % of the OTA slot)** and **SRAM (59.7 %)**, and two of the items
+below *consume* those to buy ms that cannot be spent. Ranked by resource-per-risk instead:
 
-1. **§1.4 `bb_invalidate_cache = 1`** — one flag, low risk, and the only remaining item that reduces
-   PSRAM/cache pressure rather than adding to it. Best value/effort left.
-2. **§1.2 `-O2` + silent assertions** — one line, plausibly 10–25% on the LVGL blend/fill stages.
-   Watch flash: 1.67 MB of a 2 MB OTA slot, so a 5–10% growth still fits with ~270 KB spare.
-3. **§1.5 panel ISR core** — one `xPortGetCoreID()` printf in `on_vsync_cb` confirms or kills the
-   hypothesis before any code moves.
-4. **§3.5/§3.6** — `Serial` fflush gating and per-frame recompute. Small, safe, mostly hygiene.
+1. **§1.5 panel ISR core** — one `xPortGetCoreID()` printf in `on_vsync_cb`. Not a change, a
+   *measurement*: it either confirms the ISR is stealing Core 1 from the UI task, or kills the
+   hypothesis so the item can be deleted. Cheapest way to stop carrying an unknown.
+2. **§3.5 `Serial` fflush gating** — argued on **reliability, not performance**. `SerialClass` ends
+   every call in `fflush(stdout)`, which on the USB CDC path stalls unboundedly when the host isn't
+   draining. That is System Task blocking, not "some ms", and it will bite hardest during beacon DF
+   calibration when logging is heavy.
+3. **§1.4 bounce-buffer A/B** — *not* the flag (void, see below), but removing the bounce buffer
+   entirely to free **18.75 KB SRAM**. Measure both builds; be ready to revert, since the risk lands
+   on display stability.
+4. **§3.6** — per-frame recompute. Small, safe hygiene.
+
+Void or actively counterproductive:
+
+- **§1.4 `bb_invalidate_cache = 1` — ❌ VOID.** The flag has **no implementation** in IDF 5.5, and its
+  premise contradicts the driver's deliberate `Cache_Start_DCache_Preload`. Full write-up in §1.4.
+  It had been ranked #1 here.
+- **§1.2 `-O2` + silent assertions** — spends the **scarcest** resource (flash, 79.5 % of a 2 MB OTA
+  slot) to buy the **least scarce** (ms). Revisit only if a future feature actually needs Core 1 back.
 
 Deprioritized or not worth it:
 
@@ -1078,7 +1093,50 @@ CONFIG_ESP32S3_DATA_CACHE_64KB=y
   take the icache bump only.
 - **Risk**: medium — this is the one Tier 0 item that can fail to boot or OOM later.
 
-### 1.4 The bounce buffer is destroying the data cache every frame ⭐
+### 1.4 The bounce buffer is destroying the data cache every frame — ❌ **VOID (2026-07-31)**
+
+> **This item is wrong twice over. Do not implement it.** It had been ranked #1 of the remaining
+> render work right up until someone read the IDF source.
+>
+> **1. The flag does not exist as a behaviour.** `bb_invalidate_cache` is declared in
+> `esp_lcd_panel_rgb.h:172` and referenced **nowhere** in the implementation — zero hits across all of
+> `framework-espidf/components/` on IDF 5.5.0. It is a dead struct field. Setting it compiles, links,
+> and does nothing.
+>
+> **2. The premise contradicts what the driver actually does.** The claim below is that the bounce
+> memcpy pollutes the dcache with framebuffer lines that are read once and never reused. But the
+> driver *deliberately prefetches* those exact lines:
+>
+> ```c
+> // esp_lcd_panel_rgb.c:841-845
+> // Preload the next bit of buffer to the cache memory, this can improve the performance
+> if (panel->num_fbs > 0 && panel->flags.fb_behind_cache) {
+>     Cache_Start_DCache_Preload(&panel->fbs[panel->bb_fb_index][...], panel->bb_size, 0);
+> ```
+>
+> The framebuffer data is in the cache *on purpose*, so the bounce memcpy hits warm lines. An
+> invalidate-after-read would have been fighting the driver's own optimization, not helping it.
+>
+> **What the dig did turn up** — the bounce buffer costs **18.75 KB of internal SRAM**
+> (`system_config.h:35`: 10 lines × 480 px × 2 B × 2 buffers). Disabling it entirely
+> (`bounce_buffer_size_px = 0`) frees that, and SRAM at 59.7 % is a genuinely scarce resource here
+> where frame time is not. **The safety blocker was checked and is not one**:
+> `on_frame_buf_complete` fires in *both* modes — `esp_lcd_panel_rgb.c:871` handles the non-bounce
+> path at DMA EOF — so the C7 constraint-4 tearing guard survives.
+>
+> The trade is real and unresolved, so treat it as a **measurement, not a change**: removing the
+> bounce buffer deletes a 460 KB/frame memcpy, but makes the panel stream directly from PSRAM,
+> competing for exactly the bandwidth `rotate` is ~76 % bound by — which is the contention the bounce
+> buffer was added to prevent. Two builds and the `perf` HUD settle it.
+>
+> **Scale check before spending time on it**: 18.75 KB versus the ~64 KB the ROADMAP waypoint-memory
+> item frees, and the risk lands on display stability, which is currently flawless.
+>
+> **Third item in this document to evaporate on contact with the source**, after §1.8 (already QIO)
+> and §2.4 (higher PCLK may be net-negative). The pattern is consistent enough to be a rule: *before
+> implementing any Tier 0 config item, grep the IDF for the flag's implementation.*
+
+**Original text, preserved as written:**
 
 `device_manager.cpp:425` enables a 10-line SRAM bounce buffer but leaves
 `flags.bb_invalidate_cache` at 0.
@@ -1524,7 +1582,7 @@ of the time is in stage 3.
 | — | Mutex worst case (§3.3) | — | — | — | ✅ resolved by C2 |
 | 1 | CPU 240 MHz (§1.1) | XS | **101.5 → 85.2 ms** | Low (power) | ✅ done `feb6f59` |
 | — | **Sensor rate 5 → 10 Hz** (compass + GPS) | XS | felt smoothness, not ms | Low | ✅ done `feb6f59` |
-| 2 | `bb_invalidate_cache` (§1.4) | XS | **High** | Low | open |
+| 2 | `bb_invalidate_cache` (§1.4) | XS | ~~High~~ | — | ❌ **void** — flag has no implementation in IDF 5.5 |
 | 3 | Flash mode DIO → QIO (§1.8) | XS | — | — | ❌ void — already QIO |
 | 3b | `-O2` + silent assertions (§1.2) | XS | Medium | Low (flash) | open |
 | 4 | Confirm + move panel ISR to Core 0 (§1.5) | S | Medium | Low | open |
@@ -1550,6 +1608,9 @@ of the time is in stage 3.
 | 22 | Buzzer tick 20 → 10 ms (§8.1b) | XS | halves residual jitter | Low | open, do step 15 first |
 | 23 | Decouple touch polling from the render (§8.2) | M | drag/scroll feel | Medium | open, justify first |
 | 24 | GPS bulk UART read (§8.3) | S | Core 0 CPU only | Low | open |
+| 25 | Panel ISR core check (§1.5) | XS | — (diagnostic) | — | open ⭐ |
+| 26 | `Serial` fflush gating (§3.5) | S | **reliability**, not ms | Low | open ⭐ |
+| 27 | Bounce-buffer A/B — remove for 18.75 KB SRAM (§1.4) | S | SRAM; ms unknown | Medium | open, measure first |
 
 Steps 14–18 are the highest-value open items in this document, and **none of them are render work**.
 Steps 14, 15 and 20 are XS and independent of everything else — see §8.6 for the recommended order.
