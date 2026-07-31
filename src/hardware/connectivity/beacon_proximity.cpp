@@ -116,6 +116,16 @@ static portMUX_TYPE g_state_mux = portMUX_INITIALIZER_UNLOCKED;
 // Timestamp of the previous accepted sample, for the τ-based EMA. 0 = none yet.
 static uint32_t g_last_sample_ms = 0;
 
+// Diagnostics for "the beacon reads -127 and nothing else is observable".
+// g_adv_callbacks counts *every* advertisement delivered to onResult, before the
+// address filter; g_target_callbacks counts only ones that matched. The pair
+// distinguishes a scan that is delivering nothing at all from one that is
+// delivering plenty but never the target — different faults, same symptom.
+static volatile uint32_t g_adv_callbacks    = 0;
+static volatile uint32_t g_target_callbacks = 0;
+static bool     g_raw_logging      = false;
+static uint32_t g_last_raw_log_ms  = 0;
+
 // Trend history circular buffer — timestamped, so the regression is against real
 // time rather than sample index.
 struct TrendSample { uint32_t t_ms; float ema; };
@@ -128,6 +138,17 @@ static int g_trend_count = 0;  // How many samples in history
 // Forward Declarations
 // ============================================================================
 
+/**
+ * @brief Load the configured beacon MAC into the comparison forms used at runtime.
+ *
+ * Called from both init() and setEnabled(). It used to run only in setEnabled(),
+ * which meant that with scanning inactive — i.e. any zoom other than 50 m —
+ * g_target_mac_lower was empty and debugScanAll() compared every device against
+ * "", reporting a confident ">>> TARGET NOT FOUND" that was structurally
+ * incapable of ever finding anything. That is exactly the state you are in when
+ * reaching for `beacon scan` to debug a missing beacon.
+ */
+static void applyTargetFromSettings();
 static void updateRSSI_EMA(int8_t raw, uint32_t now);
 static void calculateTrend();
 static void updateZone(float ema, uint32_t now, bool& zone_changed_out, ProximityZone& changed_to_out);
@@ -139,12 +160,36 @@ static ProximityZone classifyRSSI(float rssi, ProximityZone current_zone);
 
 class BeaconScanCallback : public NimBLEAdvertisedDeviceCallbacks {
     void onResult(NimBLEAdvertisedDevice* advertisedDevice) override {
+        // Diagnostic counter, before any filtering: separates "the scan is not
+        // delivering anything" from "it is delivering, but never our target".
+        // Those two have completely different causes and the distinction is not
+        // otherwise observable from outside.
+        g_adv_callbacks++;
+
+        if (g_raw_logging) {
+            // Throttled — with duplicates off in a busy environment this fires
+            // for every advertisement from every device, which would flood the
+            // console from the NimBLE host task.
+            const uint32_t now_ms = millis();
+            if ((uint32_t)(now_ms - g_last_raw_log_ms) >= 50) {
+                g_last_raw_log_ms = now_ms;
+                Serial.printf("[BLE-RAW] %s rssi=%d advType=%u%s\n",
+                              advertisedDevice->getAddress().toString().c_str(),
+                              advertisedDevice->getRSSI(),
+                              (unsigned)advertisedDevice->getAdvType(),
+                              (g_target_addr_valid &&
+                               advertisedDevice->getAddress() == g_target_addr) ? "  <== TARGET" : "");
+            }
+        }
+
         // Hot path. With duplicate filtering disabled this runs for every
         // advertisement from every device in range, which in a busy RF
         // environment is far more often than the ~5 Hz we care about — so reject
         // by address comparison, before touching the heap.
         if (!g_target_addr_valid) return;
         if (!(advertisedDevice->getAddress() == g_target_addr)) return;
+
+        g_target_callbacks++;
 
         const int rssi = advertisedDevice->getRSSI();
         const uint32_t now = millis();
@@ -342,6 +387,27 @@ static void updateZone(float ema, uint32_t now, bool& zone_changed_out, Proximit
 // Public API Implementation
 // ============================================================================
 
+static void applyTargetFromSettings() {
+    const auto& settings = settings_manager::getSettings();
+    g_target_mac_lower[0] = '\0';
+    g_target_addr_valid = false;
+
+    if (settings.beacon_count == 0 || strlen(settings.beacon_macs[0]) == 0) return;
+
+    strncpy(g_target_mac_lower, settings.beacon_macs[0], sizeof(g_target_mac_lower) - 1);
+    g_target_mac_lower[sizeof(g_target_mac_lower) - 1] = '\0';
+    for (int i = 0; g_target_mac_lower[i]; i++) {
+        g_target_mac_lower[i] = tolower((unsigned char)g_target_mac_lower[i]);
+    }
+
+    // Parse once, so the hot callback never has to build a String.
+    // NimBLEAddress::operator== is a memcmp over the 6 bytes only — it ignores
+    // the address type, so a random-static tag compares fine against an address
+    // parsed with the default BLE_ADDR_PUBLIC.
+    g_target_addr = NimBLEAddress(std::string(g_target_mac_lower));
+    g_target_addr_valid = true;
+}
+
 void init() {
     if (g_initialized) return;
 
@@ -388,6 +454,10 @@ void init() {
 
     g_initialized = true;
 
+    // Load the target now, not only at setEnabled(), so `beacon scan` can
+    // meaningfully report whether the target is visible at any zoom level.
+    applyTargetFromSettings();
+
     // Restore persisted found state
     g_found = settings_manager::getSettings().beacon_found;
     if (g_found) suppressSonar(true);
@@ -429,15 +499,7 @@ void setEnabled(bool enabled) {
             return;
         }
 
-        // Convert first beacon MAC to lowercase for comparison
-        strncpy(g_target_mac_lower, settings.beacon_macs[0], sizeof(g_target_mac_lower) - 1);
-        g_target_mac_lower[sizeof(g_target_mac_lower) - 1] = '\0';
-        for (int i = 0; g_target_mac_lower[i]; i++) {
-            g_target_mac_lower[i] = tolower((unsigned char)g_target_mac_lower[i]);
-        }
-        // Parse once, so the hot callback never has to build a String
-        g_target_addr = NimBLEAddress(std::string(g_target_mac_lower));
-        g_target_addr_valid = true;
+        applyTargetFromSettings();
 
         // Reset all state
         resetState();
@@ -471,6 +533,16 @@ void setEnabled(bool enabled) {
 
 bool isEnabled() {
     return g_state.scanning_enabled;
+}
+
+void setRawLogging(bool enabled) {
+    g_raw_logging = enabled;
+    Serial.printf("[BEACON] Raw advertisement logging %s\n", enabled ? "ON" : "OFF");
+}
+
+void getCallbackCounts(uint32_t& all_out, uint32_t& target_out) {
+    all_out    = g_adv_callbacks;
+    target_out = g_target_callbacks;
 }
 
 bool isInRange() {
@@ -833,6 +905,13 @@ void debugPrintState() {
     Serial.printf("  Sample rate: %.2f Hz (mean gap %.0f ms)\n",
                   g_state.sample_interval_ms > 0.0f ? 1000.0f / g_state.sample_interval_ms : 0.0f,
                   g_state.sample_interval_ms);
+    Serial.printf("  Scan callbacks since boot: %lu total, %lu matched target\n",
+                  (unsigned long)g_adv_callbacks, (unsigned long)g_target_callbacks);
+    if (g_adv_callbacks == 0) {
+        Serial.println("  >>> ZERO advertisements delivered — the scan itself is not working");
+    } else if (g_target_callbacks == 0) {
+        Serial.println("  >>> Scan works, but target MAC never seen — wrong MAC, or tag not advertising");
+    }
     Serial.println("---");
 
     Serial.println("[ZONE]");

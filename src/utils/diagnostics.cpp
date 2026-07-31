@@ -1362,6 +1362,25 @@ void handleBeaconCommand(const char* args) {
         Serial.printf("Trend: %s\n", beacon_proximity::trendToString(state.trend));
         Serial.printf("Distance: %.1f m (legacy)\n", state.distance_m);
         Serial.printf("Last seen: %lu ms ago\n", state.last_seen_ms > 0 ? millis() - state.last_seen_ms : 0);
+        Serial.println("---");
+        Serial.printf("Sample rate: %.2f Hz (mean gap %.0f ms)\n",
+                      state.sample_interval_ms > 0.0f ? 1000.0f / state.sample_interval_ms : 0.0f,
+                      state.sample_interval_ms);
+        {
+            // Separates "the scan delivers nothing" from "it delivers plenty but
+            // never this MAC" — identical symptom (-127 dBm), different faults.
+            uint32_t all_cb = 0, target_cb = 0;
+            beacon_proximity::getCallbackCounts(all_cb, target_cb);
+            Serial.printf("Scan callbacks: %lu total, %lu matched target\n",
+                          (unsigned long)all_cb, (unsigned long)target_cb);
+            if (!state.scanning_enabled) {
+                Serial.println(">>> Scanning is OFF — zoom to 50m first, counters mean nothing yet");
+            } else if (all_cb == 0) {
+                Serial.println(">>> ZERO advertisements delivered — the scan itself is broken");
+            } else if (target_cb == 0) {
+                Serial.println(">>> Scan works; target MAC never seen — wrong MAC, or tag not advertising");
+            }
+        }
         Serial.println("===============================");
 
     } else if (strncmp(args, "enable", 6) == 0) {
@@ -1407,6 +1426,17 @@ void handleBeaconCommand(const char* args) {
         } else {
             const auto& settings = settings_manager::getSettings();
             Serial.printf("[BEACON] Current measured power: %d dBm\n", settings.beacon_measured_power);
+        }
+
+    } else if (strncmp(args, "raw", 3) == 0) {
+        // Diagnostic: log every advertisement the scan callback receives
+        const char* a = args + 3;
+        while (*a == ' ') a++;
+        if (strncmp(a, "off", 3) == 0) {
+            beacon_proximity::setRawLogging(false);
+        } else {
+            beacon_proximity::setRawLogging(true);
+            Serial.println("[BEACON] Watch for [BLE-RAW] lines; 'beacon raw off' to stop");
         }
 
     } else if (strncmp(args, "pathloss", 8) == 0 || strncmp(args, "n", 1) == 0) {

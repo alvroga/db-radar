@@ -110,6 +110,23 @@ bool isEnabled();
 bool isInRange();
 
 /**
+ * @brief Log every advertisement delivered to the scan callback (throttled).
+ * Diagnostic for "the beacon reads -127": shows whether advertisements are
+ * arriving at all, and what addresses they carry.
+ */
+void setRawLogging(bool enabled);
+
+/**
+ * @brief Raw scan-callback counters since boot.
+ * @param all_out    every advertisement delivered, before the address filter
+ * @param target_out only those matching the configured beacon MAC
+ *
+ * The pair separates "the scan is delivering nothing" from "it is delivering
+ * plenty but never the target" — different faults, identical symptom.
+ */
+void getCallbackCounts(uint32_t& all_out, uint32_t& target_out);
+
+/**
  * @brief Update beacon proximity state
  * Call this from the Network Task loop
  * Handles scanning, RSSI averaging, and distance calculation
