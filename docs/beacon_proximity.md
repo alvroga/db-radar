@@ -211,6 +211,22 @@ different again at any other rate.)
 
 Available via serial: `beacon trend`
 
+## ⚠️ The tag MUST advertise in Legacy (BLE 4.0) mode
+
+`CONFIG_BT_NIMBLE_EXT_ADV` is **not set** in `sdkconfig.cc-radar`, so this firmware compiles the
+`ble_gap_disc()` path and can only receive **legacy** advertisements. If the tag's configurator app is
+switched to *Extend Advertisement (BLE 5.0)* or *PHY Coded (BLE 5.0)*, the radar will not see it
+**at all** — and the symptom is indistinguishable from a dead tag: RSSI pinned at -127 dBm,
+OUT_OF_RANGE, silent, with everything else in the system reporting perfectly healthy.
+
+Diagnose it with `beacon status`: **`Scan callbacks: N total, 0 matched target`** with a large N means
+the scan is working fine and the tag is simply invisible to it — check the tag's Adv Mode before
+suspecting anything in this firmware.
+
+Enabling BLE 5.0 extended advertising would mean turning on `CONFIG_BT_NIMBLE_EXT_ADV`, which changes
+the scan to `ble_gap_ext_disc()` and costs SRAM. Not worth it: legacy advertising is what a proximity
+beacon wants anyway, and this project's SRAM budget is tight (see `memory/sram_budget.md`).
+
 ## BLE Scanning — one continuous passive scan
 
 **Rewritten 2026-07-31 (backlog §7.3a).** The feed was capped at a hard **2.0 Hz** against a tag

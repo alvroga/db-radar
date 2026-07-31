@@ -733,6 +733,12 @@ confirmation is a **duration** (1000 ms) rather than a sample count, and the tre
 against **real time** in dBm/s rather than per-cycle. Left alone, every one of those would have
 silently changed meaning by 2.5–5× the moment the rate moved.
 
+**⚠️ The tag must advertise in Legacy (BLE 4.0) mode.** `CONFIG_BT_NIMBLE_EXT_ADV` is not set, so the
+firmware only receives legacy advertisements. A tag switched to *Extend Advertisement* or *PHY Coded*
+(BLE 5.0) is **completely invisible**, and the symptom is indistinguishable from a dead tag: -127 dBm,
+OUT_OF_RANGE, silent. `beacon status` distinguishes them — a large `Scan callbacks: N total` with
+`0 matched target` means the scan is healthy and the tag is the problem.
+
 **Passive scanning is load-bearing, not just a power choice.** With active scanning and a legacy
 `ADV_IND` advertiser, NimBLE withholds the `onResult` callback until the scan response arrives
 (`NimBLEScan.cpp`). Passive short-circuits that and delivers on the advertisement itself.

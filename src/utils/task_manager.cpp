@@ -259,9 +259,11 @@ static void i2cTask(void* parameter) {
             }
         }
 
-        // Drive buzzer state machine: sonar beep timing, pattern steps, auto-off
-        // Must run from I2C Task since buzzer uses EXIO over I2C.
-        // 20ms loop gives precise sonar rhythm (was never called before — root cause of erratic beeping).
+        // Drive buzzer state machine: sonar beep timing, pattern steps, auto-off.
+        // Must run from I2C Task since buzzer uses EXIO over I2C, which is why the
+        // sonar's timing resolution is I2C_PROCESS_MS — see the note on that
+        // constant. (It previously claimed 20ms gave "precise sonar rhythm"; at a
+        // 250ms interval 20ms is 8% error, which is audible.)
         buzzer::update();
 
         // Calculate task statistics

@@ -40,7 +40,18 @@ struct TaskConfig {
 
     // Update intervals (in milliseconds)
     static constexpr uint32_t UI_UPDATE_MS = 10;       // 100 FPS max
-    static constexpr uint32_t I2C_PROCESS_MS = 20;     // 50 Hz I2C processing
+    // 100 Hz. This is the buzzer's clock, not just the I2C queue's: buzzer::update()
+    // runs from this task (it needs EXIO over I2C), so every beep edge is quantized
+    // to this period. At 20ms that was ±20ms of jitter on a 150-300ms sonar interval
+    // — 7-13%, well above the ~10ms the ear resolves, and reported from the field as
+    // "not metronomic". It also flattened the 12/30/60ms trend-encoded beep lengths
+    // into near-indistinguishable multiples of 20ms.
+    //
+    // The loop body is a non-blocking queue drain plus a few timestamp comparisons,
+    // so halving the period costs almost nothing on Core 0; buzzer::update() only
+    // touches I2C on an actual edge. FreeRTOS tick is 1000 Hz, so 10ms is 10 ticks —
+    // 5ms is available if this still is not steady enough.
+    static constexpr uint32_t I2C_PROCESS_MS = 10;
     static constexpr uint32_t NETWORK_UPDATE_MS = 200; // 5 Hz for sonar rhythm
     // System Task tick. This is the sensor clock: the compass sub-timer (20ms gate)
     // and the GPS gate (GPS_UPDATE_INTERVAL_MS = 100) both fire every tick, so this

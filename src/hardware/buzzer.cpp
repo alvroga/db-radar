@@ -25,7 +25,9 @@ static struct {
     uint32_t pattern_next_ms = 0;   // When to transition to next state
     uint16_t main_beep_duration = 0; // Duration for main beep
 
-    // Sonar mode (autonomous rhythmic beeping, driven by buzzer::update() at 10ms)
+    // Sonar mode (autonomous rhythmic beeping). Driven by buzzer::update() from the
+    // I2C Task at TaskConfig::I2C_PROCESS_MS — 10ms as of 2026-07-31, previously 20.
+    // That period is the sonar's timing resolution; keep the two in mind together.
     bool sonar_active = false;
     uint32_t sonar_interval_ms = 0;       // 0 = silent, >0 = ms between beep starts
     uint16_t sonar_beep_duration_ms = 30;  // Duration of each beep
