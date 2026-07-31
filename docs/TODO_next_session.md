@@ -4,8 +4,9 @@
 [`performance_optimization_backlog.md`](performance_optimization_backlog.md) §7 and §8 — this file is
 the short version.
 
-**Last commit**: `4452718` — sonar fixes + full-subsystem audit. Builds clean. RAM 195,600 (59.7%),
-flash 1,666,611 (79.5%).
+**Last commit**: `a60cb40` — §1.5 confirmed on hardware. Builds clean. RAM 195,984 (59.8%),
+flash 1,670,831 (79.7%). On-device state as of this writing: **flashed and verified healthy**
+(radar, beacon discovery, sound, button all confirmed working after the `I2C_PROCESS_MS` revert).
 
 **Standing rules for this project**
 - Don't commit until the change is verified on hardware (docs-only commits excepted).
@@ -48,23 +49,28 @@ silent the moment you tap the waypoint within 15 m. Check it re-engages if you u
 
 ---
 
-## 2. ✅ DONE (⏳ unverified) — §1.5 + §3.5
+## 2. ✅ DONE — §1.5 confirmed, §3.5 built (⏳ `serial on|off` not separately re-tested)
 
 Built 2026-07-31. Combined flash +264 B, RAM ±0.
 
-- **§1.5 panel ISR core** — instrumented. `on_vsync_cb` records `xPortGetCoreID()` into a volatile
-  (recorded, not printed — `printf` is not ISR-safe); `perf` reports
-  `Panel ISR: core N (uiTask on core M) — SHARED / separate`.
-  **→ TO READ:** run `perf` once and report the line. If SHARED, §1.5's suggested fix (create the
-  panel from a Core 0 task) is justified; if separate, delete §1.5.
+- **§1.5 panel ISR core** — ✅ **CONFIRMED on hardware.** `perf` reported
+  `Panel ISR: core 1 (uiTask on core 1) — SHARED, competing with render`. The hypothesis was right —
+  and the reading covers the bounce-buffer copy too, not just vsync, since the RGB driver services
+  both from one interrupt on one core. **Do NOT attribute any of the 83.2ms measured frame time to
+  this** — only the core is measured; the magnitude needs a `BOUNCE_BUFFER_LINES = 0` A/B (see backlog
+  §1.5 for the reasoning and a new complication: moving the ISR to Core 0 now means sharing it with
+  the §7.3a continuous BLE scan's ~89 callbacks/sec).
 - **§3.5 `Serial` fflush gating** — done, but **the item's rationale was wrong** and the backlog now
   says so. There is no unbounded CDC stall to protect against: `cdcacm_write` rolls back and drops
   bytes rather than waiting, and the only `portMAX_DELAY` in that driver is on the read side with
   `s_blocking` false by default. The real (smaller) problem was that the unconditional `fflush`
   *defeated* stdout's line buffering. Nine flushes removed; `SerialClass::setLogEnabled()` gate added,
-  default ON; `serial on|off` command added. **±0 flash** — the removals paid for the additions.
-  **→ TO TEST:** confirm boot logs still appear normally, `serial off` silences them, and `serial on`
-  restores them (input is deliberately never gated, so the command works while muted).
+  default ON; `serial on|off` command added. **±0 flash** — the removals paid for the additions. Boot
+  logs and all serial commands used throughout the rest of this session worked normally, which
+  exercises the gate's default-ON path — but `serial off` → `serial on` specifically has not been
+  tried.
+  **→ still to test:** confirm `serial off` silences output and `serial on` restores it (input is
+  deliberately never gated, so the command works while muted).
 
 **Explicitly do NOT do**: `-O2` (spends flash, the scarcest resource, at 79.5% of a 2 MB OTA slot, to
 buy ms that can't be spent) · cache sizes (costs 48 KB SRAM) · higher PCLK (may be net-negative) ·
@@ -73,59 +79,91 @@ grid-as-rects (paint measured 1.01× on a 1.5× clock — not compute-bound) · 
 
 ---
 
-## 3. ✅ DONE (⏳ unverified) — §7 beacon BLE rate work
+## 3. ✅ DONE AND VERIFIED — §7 beacon BLE rate work
 
 Built 2026-07-31, all of §7.3a–d. RAM +368 B, flash +840 B. **Item 4 is now unblocked.**
 
 - **§7.3a** — one continuous passive scan, duplicates off, `setMaxResults(0)`, 100 ms window ==
   interval. Poll loop, `stop()`-on-hit, `SCAN_INTERVAL_MS`, `SCAN_DURATION_SEC`, `g_scan_in_progress`
-  and the results sweep all deleted. **Expected 2 Hz → ~5 Hz.**
-- **§7.3b** — both EMAs τ-based off measured `dt` (0.5 s / 1.0 s); zone confirmation is a duration
-  (1000 ms); `BEACON_LOST_TIMEOUT_MS` 15 s → 5 s. **Trend was re-derived too** — it regressed against
-  sample index in dBm/cycle, which at 5 Hz would have become ±10 dBm/s. Now real time, ±1 dBm/s.
+  and the results sweep all deleted. **✅ Verified live: `beacon status` measured 4.24–4.37 Hz**
+  (mean gap ~230ms, was ~500ms), `Scan callbacks` climbing at ~89/sec across ~30 nearby devices with
+  the target-MAC count climbing alongside it.
+- **§7.3b** — both EMAs τ-based off measured `dt`; zone confirmation is a duration (1000 ms);
+  `BEACON_LOST_TIMEOUT_MS` 15 s → 5 s. **Trend was re-derived too.**
+  ⚠️ **`DISPLAY_TAU_S` changed again after this** — see item 3c below, it's now 2.0s not 1.0s.
 - **§7.3c** — ring width continuous in `rssi_display` (−90 dBm → 6 px, −65 → 34 px). The two discrete
   decisions around it (draw at all / solid CLOSE fill) keep their hysteresis.
 - **§7.3d** — **confirmed from the NimBLE source, no code needed.** Active scan on a legacy `ADV_IND`
   advertiser genuinely does withhold `onResult` until the scan response. Passive fixes it.
 
-**→ TO TEST:**
-- [ ] `beacon status` — the new **Sample rate** line should read ~5 Hz / ~200 ms (was ~2 Hz / ~500 ms).
-      This is the single number that says whether 7.3a worked.
+**Still open:**
 - [ ] Ring should now *grow smoothly* as you approach, not jump between four thicknesses.
 - [ ] **Battery drain.** 100% scan duty is the one genuinely new cost, zoom-gated to 50 m.
       If it's bad, `SCAN_WINDOW_MS` is the single knob (80 ms → 80% duty).
-- [ ] Run `beacon scan` once, then re-check `beacon status` sample rate — verifies the
-      `debugScanAll()` restore path doesn't silently re-enable duplicate filtering.
+- [x] Run `beacon scan` once, then re-check `beacon status` sample rate — verifies the
+      `debugScanAll()` restore path doesn't silently re-enable duplicate filtering. Done as part of
+      the diagnostic session (`fb9af73`, `0d27d9b`) that chased down a dead-tag false alarm.
 
-**Still worth doing**: set the tag to 100 ms advertising before item 4, for ~10 Hz.
+**⚠️ Tag advertising interval**: was briefly set to 100 ms, then reverted to 200 ms after the tag
+appeared to go silent — that turned out to be the tag genuinely not advertising (see item 3c), not
+the interval change. **Confirm what the tag is currently set to before assuming 200 ms.**
 
-### 3b. Findability follow-up (built same day, ⏳ unverified)
+### 3b. Findability follow-up — ✅ done, superseded by 3c below
 
 Field report after 3: beacon appeared silent (a fixed waypoint was muting it), and the beeping was
 *"very difficult to gauge where to go"*.
 
 - **Beacon now has absolute priority** — `isInRange()` releases any fixed waypoint outright.
-- **Beacon sonar tempo is continuous**, linear in dBm: 1500 ms @ −90 → 150 ms @ −50. It still had the
-  exact four-step defect that item 1 removed from the waypoint sonar.
-- **Beep duration encodes trend**: 60 ms approaching / 30 neutral / 12 ms departing. `trend` had been
-  computed since the v2 redesign and read by nothing.
+  **→ still to test:** fix a waypoint, walk into beacon range, confirm the fix releases and the
+  beacon takes over the buzzer.
+- ~~Beacon sonar tempo is continuous, linear in dBm: 1500 ms @ −90 → 150 ms @ −50~~ and
+  ~~beep duration encodes trend: 60/30/12 ms~~ — **both were choppy in the field, see 3c.**
 
-**→ TO TEST:** fix a waypoint, then walk into beacon range — the fix should release itself and the
-beacon take over. Then hunt: the tempo should change *continuously* as you move, and the beep should
-audibly lengthen when you're closing.
+### 3c. Choppy-sonar fix — ✅ done, ⏳ not separately re-tested by ear
 
-**If it's still hard to gauge**, the next lever is the tag at 100 ms (doubles the sample rate, halves
-trend latency) — then `TREND_WINDOW_MS` can drop from 4000 to ~2500 without losing slope confidence,
-which is what makes "warmer/colder" respond within a step or two rather than after several.
+The mechanics in 3b were both self-inflicted noise sources — the exact "discrete/noisy value driving
+something meant to sound continuous" defect being fixed everywhere else that day.
+
+- Tempo now driven by **`rssi_display`** (not `rssi_ema`) — `rssi_ema`'s ±3-5dB standing-still wobble
+  was a ~25% swing in beat period over the 40dB tempo span.
+- `DISPLAY_TAU_S` raised **1.0 → 2.0s** because of the above.
+- Beep length now **continuously interpolated** from `trend_slope_dbm_s`, saturating at ±2 dBm/s
+  (30ms ± 30ms, floored at 12ms) — the old 3-state enum switch flipped at random near zero slope,
+  making the beep length jump 60→30→12ms beat to beat.
+
+**→ TO TEST:** hunt the beacon and listen specifically for whether the tempo now feels like a smooth
+glide (not a jitter) and the beep-length change feels like a trend signal (not noise).
+
+### 3d. `I2C_PROCESS_MS` 10ms attempt — ❌ VOID, reverted, confirmed fixed
+
+Tried halving the buzzer's 20ms timing floor (§8.1b) to further help 3c. **Broke the device**: button
+unresponsive, buzzer silent. Root cause: I2C bus contention with the CST820 touch driver, which
+bypasses `i2c_mutex`, not I2C Task CPU cost (which is what the change was reasoned about). Reverted to
+20ms; **user-confirmed on hardware**: "regular functioning radar, beacon discovery and sound" restored.
+`I2C_PROCESS_MS = 20` is now a documented hard floor — do not retry raising this rate. See backlog
+§8.1b and `memory/i2c_process_ms_floor.md`.
+
+**Separately surfaced while chasing this**: a stuck-I2C-bus boot hang (freezes right after
+`[I2C] Initialized: SDA=15...`) that only a **full power cycle** clears, not a reset. Confirmed on
+hardware, documented in `docs/troubleshooting.md`. Watch for this after rapid reset/reflash cycles.
+
+**If beacon smoothness still needs work**: the tick-rate lever is now closed. Remaining options are a
+**deadband + slew limit on the tempo** and a **median filter on RSSI before the EMA** — neither
+touches the I2C bus. See the "room for improvement" discussion recorded in conversation on 2026-07-31.
+
+**If it's still hard to gauge** after 3c, the next lever is the tag at 100 ms (doubles the sample
+rate, halves trend latency) — then `TREND_WINDOW_MS` can drop from 4000 to ~2500 without losing slope
+confidence, which is what makes "warmer/colder" respond within a step or two rather than after
+several.
 
 ---
 
 ## 4. Beacon direction finding — "which way do I walk?" *(M)* — **UNBLOCKED**
 
-~~Blocked on item 3~~ — item 3 is built. At 2 Hz a rotation yielded 1.7 samples per 30° bin (noise);
-at ~5 Hz it yields ~4, and at 10 Hz (tag reconfigured to 100 ms) 8.3, which gives 7–14 dB of SNR.
-**Confirm the measured rate from `beacon status` before starting** — the whole feasibility argument
-rests on it. Full design in
+~~Blocked on item 3~~ — item 3 is built and **verified: 4.24–4.37 Hz measured live** (confirms the
+"~5 Hz" case below, not yet the 100 ms/10 Hz case). At 2 Hz a rotation yielded 1.7 samples per 30° bin
+(noise); at the confirmed ~4.3 Hz it yields ~4, and at 10 Hz (tag reconfigured to 100 ms) 8.3, which
+gives 7–14 dB of SNR. Full design in
 [`beacon_direction_finding.md`](beacon_direction_finding.md).
 
 True BT 5.1 AoA is **impossible** here (single antenna, no CTE IQ). Body-shadow DF works: the body
@@ -175,6 +213,9 @@ Details in [`../ROADMAP.md`](../ROADMAP.md).
       directly from PSRAM, competing for the bandwidth `rotate` is ~76% bound by. **Two builds + the
       `perf` HUD, be ready to revert** — the risk lands on display stability, which is currently
       flawless. Scale check: 18.75 KB vs item 5's 64 KB.
+      **Now linked to §1.5** (confirmed 2026-07-31: the panel ISR — which is doing this exact
+      PSRAM→SRAM bounce copy at ~17.4 MB/s — shares Core 1 with `uiTask`). The same
+      `BOUNCE_BUFFER_LINES = 0` build answers both items' unmeasured magnitude in one A/B.
 - [x] ~~**§8.1b buzzer tick 20 → 10 ms**~~ — ❌ **VOID. Tried 2026-07-31, broke the device** (button
       unresponsive, buzzer silent), reverted. The change was justified on CPU cost, which is trivial;
       the binding constraint is **I2C bus contention** with the CST820 touch driver, which bypasses

@@ -6,10 +6,10 @@
 
 ## Overview
 
-The Beacon Proximity system allows the radar to act as a BLE-based item finder. When zoomed to 50m, the device scans for a configured target Bluetooth beacon MAC address and provides two simultaneous feedback channels:
+The Beacon Proximity system allows the radar to act as a BLE-based item finder. When zoomed to 50m, the device runs a single continuous passive BLE scan for a configured target beacon MAC address and provides two simultaneous feedback channels:
 
-1. **Visual**: A cyan arc gauge drawn around the radar circle fills clockwise as signal strength increases (stronger = closer).
-2. **Audio**: A sonar-style beeper increases pulse rate as the user approaches the beacon.
+1. **Visual**: a cyan ring around the radar edge that grows *inward* continuously as signal strength increases, becoming a solid fill at CLOSE range — see *RSSI-to-Ring Mapping* below (the design bullets above it describe an earlier partial-arc version, kept for history).
+2. **Audio**: a sonar-style beeper whose tempo increases continuously as the user approaches, with beep *length* additionally encoding whether RSSI is trending up or down — see *Audio: Sonar Beeping* below.
 
 This turns the radar into a precision finding tool for lost items tagged with BLE beacons (e.g., AirTags, Tile, custom BLE peripherals).
 
@@ -19,7 +19,7 @@ Beacon scanning is **zoom-gated** — it only activates at 50m zoom level and st
 
 ```
 Zoom ≥ 100m → Beacon scanning OFF (idle)
-Zoom = 50m  → Beacon scanning ON (active BLE scan every 2 seconds)
+Zoom = 50m  → Beacon scanning ON (one continuous passive scan — see BLE Scanning below)
 ```
 
 On standby enter, zoom resets to 100m which stops beacon scanning automatically.
@@ -84,11 +84,11 @@ movement*. A step function gives them none until they happen to cross a boundary
 Tempo is now continuous and **linear in dBm**:
 
 ```
-t        = clamp((rssi_ema + 90) / 40, 0, 1)
+t        = clamp((rssi_display + 90) / 40, 0, 1)
 interval = 1500 × (150/1500) ^ t     ms
 ```
 
-| `rssi_ema` | Interval |
+| `rssi_display` | Interval |
 |---|---|
 | ≤ -90 dBm | 1500 ms |
 | -80 dBm | ~843 ms |
@@ -101,6 +101,13 @@ Linear in dBm is the correct curve, not an approximation: RSSI ≈ C − 20·log
 dBm are equal *ratios* of distance. That is the same geometric mapping the waypoint sonar uses over
 metres, reached from the other direction.
 
+> **⚠️ Driven by `rssi_display`, not `rssi_ema`.** A first cut drove it from `rssi_ema` (τ=0.5s) and it
+> beat audibly unsteady — RSSI wobbles ±3-5 dB standing still, and over this 40 dB span that's a ~25%
+> swing in beat period. A continuous tempo only reads as a *glide* if the value driving it is itself
+> smooth; otherwise "continuous" just means "jittering constantly" instead of "stepping occasionally",
+> which is worse than the four-step version it replaced. See *EMA Smoothing* below — this is also why
+> `DISPLAY_TAU_S` was raised from 1.0s to 2.0s.
+
 ### Timbre — beep length encodes the trend
 
 "Warmer / colder" is far more actionable than absolute level when hunting, because absolute RSSI
@@ -109,13 +116,27 @@ whereas the *sign of the change* in response to a step is meaningful regardless.
 computed since the v2 redesign and read by **nothing**.
 
 The buzzer is a bare on/off line through the IO expander, so there is no pitch to modulate. But beep
-duration is already a parameter of `setSonarInterval()`, so this costs nothing:
+duration is already a parameter of `setSonarInterval()`, so this costs nothing — and it is
+**continuous**, interpolated from the raw regression slope (`BeaconState::trend_slope_dbm_s`), not
+switched off the three-state `MovementTrend` enum:
 
-| Trend | Beep duration | Sounds like |
+```
+s        = clamp(trend_slope_dbm_s / 2.0, -1, 1)
+beep_ms  = max(12, 30 + s × 30)     // 30ms neutral, saturates ±30ms, floored at 12ms
+```
+
+| Slope | Beep duration | Sounds like |
 |---|---|---|
-| APPROACHING | 60 ms | a fuller tone — *warmer* |
-| STABLE / UNKNOWN | 30 ms | neutral |
-| DEPARTING | 12 ms | a clipped tick — *colder* |
+| ≥ +2 dBm/s | 60 ms | a fuller tone — *warmer* |
+| 0 dBm/s | 30 ms | neutral |
+| ≤ -2 dBm/s | 12 ms (floor) | a clipped tick — *colder* |
+
+> **⚠️ A first cut switched on the `MovementTrend` enum** (60 / 30 / 12 ms for
+> APPROACHING / STABLE / DEPARTING) and it was the single worst thing about the result: standing
+> still, the slope hovers around zero and the classifier flips between the three states at random, so
+> the beep length jumped 60→30→12 ms from one beat to the next — heard as the rhythm breaking up
+> rather than as information. Interpolating continuously means slope noise near zero produces a beep
+> length that hovers near neutral (inaudible), while a sustained approach lengthens it steadily.
 
 Beeping can be independently enabled/disabled in Settings (Settings > Sound > Beacon Sound toggle)
 without disabling the visual ring.
@@ -167,11 +188,19 @@ on a schedule, and a dropped one must widen that sample's weight rather than ske
 | EMA | τ | Drives |
 |---|---|---|
 | `rssi_ema` | 0.5 s | zone, trend, labels |
-| `rssi_display` | 1.0 s | ring width (second stage, fed from `rssi_ema`) |
+| `rssi_display` | 2.0 s (raised from an initial 1.0 s) | ring width, **sonar tempo** (second stage, fed from `rssi_ema`) |
 
 τ = 0.5 s replaces α = 0.4 at 2 Hz — which was effectively a ~2.5 s time constant — so the response is
 about 5× faster *and* smoother, because it now averages more samples over that time. Nothing uses raw
 RSSI.
+
+**The split is decision vs presentation, not just fast vs slow.** `rssi_ema` feeds zone classification
+and trend, both of which have their own hysteresis/confirmation downstream — so for those, latency
+hurts and noise does not. `rssi_display` feeds the ring width *and*, as of 2026-07-31, the sonar tempo
+— both shown/heard **raw**, so for those noise is the entire problem. `DISPLAY_TAU_S` was raised from
+1.0s to 2.0s specifically because the sonar tempo, driven off the 1.0s value, beat audibly unsteady in
+the field — rhythm error is far more perceptible than visual lag, so this is deliberately slower than
+the ring alone would want.
 
 ### Zone Detection with Hysteresis
 
@@ -308,17 +337,27 @@ All settings are stored in NVS and persist across reboots:
 ```cpp
 namespace beacon_proximity {
     void init();                        // Initialize BLE subsystem
-    void setEnabled(bool enabled);      // Start/stop scanning
+    void deinit();                      // Free ~25KB SRAM for WiFi (cannot coexist)
+    void setEnabled(bool enabled);      // Start/stop the continuous scan
     bool isEnabled();                   // Check if currently active
-    void update();                      // Run BLE scan cycle (Network Task, ~200ms)
-    void updateSonar();                 // Update beep rhythm (Network Task, ~200ms)
-    BeaconState getState();             // Full state snapshot
-    ProximityZone getCurrentZone();     // OUT_OF_RANGE / FAR / MEDIUM / CLOSE
-    MovementTrend getCurrentTrend();    // UNKNOWN / STABLE / APPROACHING / DEPARTING
+    bool isInRange();                   // Scanning + not found + confirmed zone != OUT_OF_RANGE.
+                                         // The priority signal navigation.cpp uses to auto-release
+                                         // a fixed waypoint — see "Priority over the waypoint sonar".
+    void update();                      // Recompute zone/trend/distance (Network Task, ~200ms —
+                                         // NOT the BLE sample rate, see Task Integration)
+    void updateSonar();                 // Update beep tempo + duration (Network Task, ~200ms)
+    BeaconState getState();             // Full state snapshot, incl. rssi_display, sample_interval_ms
+    ProximityZone getCurrentZone();     // OUT_OF_RANGE / VERY_FAR / FAR / MEDIUM / CLOSE
+    MovementTrend getCurrentTrend();    // UNKNOWN / STABLE / APPROACHING / DEPARTING (diagnostic only)
     float getDistance();                // Estimated distance in meters (rough)
     bool isBeaconNearby(float threshold_m);  // Simple proximity check
-    void debugScanAll();                // Print all visible BLE devices
-    void debugPrintState();             // Print internal module state
+    void setFound(bool found);          // Mark found/un-found (NVS-persisted)
+    bool isFound();                     // Check found state
+    void suppressSonar(bool suppress);  // Waypoint-fix sonar priority hook
+    void setRawLogging(bool enabled);   // `beacon raw` — log every advertisement
+    void getCallbackCounts(uint32_t& all_out, uint32_t& target_out);  // scan health diagnostic
+    void debugScanAll();                // Print all visible BLE devices (`beacon scan`)
+    void debugPrintState();             // Print internal module state (`beacon debug`)
     void resetState();                  // Reset EMA and trend history
 }
 ```
@@ -326,49 +365,66 @@ namespace beacon_proximity {
 ## Serial Commands
 
 ```
-beacon [status]              - Show beacon proximity status and current readings
+beacon [status]              - Show status + measured sample rate + scan-callback counters
 beacon enable on|off         - Enable/disable the entire feature
 beacon mac XX:XX:XX:XX:XX:XX - Set target beacon MAC address
 beacon power -XX             - Set measured power in dBm (calibrate at 1 meter)
 beacon n X.X                 - Set path loss exponent (2.0–4.0)
 beacon test                  - Force a scan and report detected signal
-beacon scan                  - List ALL visible BLE devices with RSSI
+beacon scan                  - List ALL visible BLE devices with RSSI, address type, adv type
+beacon raw [off]             - Log every advertisement the scan callback receives (throttled ~20/s)
 beacon debug                 - Print full internal module state
-beacon zone                  - Show current zone, pending zone, hysteresis state
-beacon trend                 - Show trend history and calculated slope
+beacon zone                  - Show current zone, pending zone, hysteresis hold time
+beacon trend                 - Show trend history, regressed slope, and sample rate
 beacon reset                 - Reset all smoothing and trend state
 ```
+
+`beacon status` and `beacon debug` report `Scan callbacks: N total, M matched target` and
+`Sample rate: X.XX Hz` — the direct read-out of whether the continuous scan is actually delivering
+advertisements. See *The tag MUST advertise in Legacy (BLE 4.0) mode* below for how to read them.
 
 ## Task Integration
 
 | Task | Operation | Interval |
 |------|-----------|---------|
-| Network Task (Core 0) | `beacon_proximity::update()` | ~200ms |
-| Network Task (Core 0) | `beacon_proximity::updateSonar()` | ~200ms |
+| Network Task (Core 0) | `beacon_proximity::update()` — recompute zone/trend/distance from whatever the EMA has accumulated | ~200ms (Network Task loop) |
+| Network Task (Core 0) | `beacon_proximity::updateSonar()` | ~200ms (Network Task loop) |
 | Network Task (Core 0) | Zoom gating check | On zoom change |
 | UI Task (Core 1) | `drawBeaconProximityGauge()` | Every radar redraw |
+
+**The 200ms figures above are the Network Task's own loop period — not the BLE sample rate.** Since
+§7.3a, RSSI samples arrive on their own schedule via the NimBLE scan callback (measured ~230ms mean
+gap, i.e. ~4.3 Hz, decoupled from and unrelated to this 200ms figure). `update()` and `updateSonar()`
+just read whatever the EMA has accumulated each time they run; they no longer drive or wait on the
+scan.
 
 Zoom-gating logic lives in `src/utils/task_manager.cpp:79-94`.
 
 ## Troubleshooting
 
-### Arc gauge not appearing
+### Ring not appearing (RSSI reads -127 dBm, zone stuck OUT_OF_RANGE)
 - Verify zoom is set to 50m (beacon scanning only activates at 50m)
-- Check beacon is in range: `beacon test` in serial console
+- Run `beacon status` and check `Scan callbacks: N total, M matched target`:
+  - **N == 0** — the scan itself isn't delivering anything; a firmware/config problem
+  - **N > 0, M == 0** — the scan is healthy, but the target MAC is never seen. Most likely cause in
+    practice: the tag stopped advertising (asleep, connected to its configurator app, or its Adv Mode
+    was changed off Legacy BLE 4.0 — see the warning section above). Confirm with `beacon scan`, which
+    lists every visible device with address type and adv type.
 - Confirm feature is enabled: `beacon enable on`
-- Run `beacon scan` to list all visible BLE devices near you
 
-### Sonar beeping but no arc gauge (or vice versa)
+### Sonar beeping but no ring (or vice versa)
 - Sound can be independently disabled in Settings > Sound > Beacon Sound
-- Arc gauge is always shown when feature is active and beacon detected
+- The ring is always shown when the feature is active and the beacon is detected
 
 ### Distance reads very high or wrong
 - Calibrate measured power: hold beacon exactly 1 meter away, run `beacon status`, note RSSI, then `beacon power -XX`
 - Adjust path loss exponent for your environment: `beacon n 2.0` (open) to `beacon n 4.0` (dense indoor)
 
 ### Beacon detected but zone keeps jumping
-- Run `beacon zone` to watch hysteresis state
-- Reduce EMA alpha or increase hysteresis in `beacon_proximity.cpp` constants if environment is very noisy
+- Run `beacon zone` to watch the pending-zone hold timer
+- Zone confirmation is a 1000ms hold (`ZONE_CONFIRM_MS`), not a sample count — if it still jumps at
+  that setting the environment is unusually noisy; consider raising `HYSTERESIS_DB` or `EMA_TAU_S` in
+  `beacon_proximity.cpp`
 - Common cause: reflections in indoor environments
 
 ### BLE scan interferes with WiFi
@@ -379,18 +435,21 @@ Zoom-gating logic lives in `src/utils/task_manager.cpp:79-94`.
 
 | Metric | Value |
 |--------|-------|
-| Scan CPU impact | Minimal (non-blocking BLE scan) |
-| Arc draw time | < 1ms (single LVGL arc operation) |
-| Memory (beacon_proximity module) | ~2KB RAM (state + trend history) |
-| Flash impact | ~3,500 bytes |
-| BLE scan current | +~20mA during active scan window |
-| Scan duty cycle | 50% (1s scan / 2s interval) |
+| Scan CPU impact | Minimal — event-driven callback, no polling loop |
+| Ring draw time | < 1ms (single LVGL arc operation, per navigation.cpp — re-check after any ring changes since the paint stage is instrumented) |
+| Measured sample rate | ~4.3 Hz at 200ms tag advertising interval (was 2.0 Hz pre-§7.3a) |
+| Memory (beacon_proximity module) | ~2.2KB RAM (state + 48-entry timestamped trend ring, up from ~2KB after §7's rewrite) |
+| **Scan duty cycle** | **100%** (`SCAN_WINDOW_MS == SCAN_ITVL_MS == 100ms`) — up from 50% (1s scan / 2s interval) pre-§7.3a. This is the one genuinely new cost of the continuous-scan rewrite; not yet characterized in mA. If battery drain is objectionable, `SCAN_WINDOW_MS` is the single knob (e.g. 80ms → 80% duty). |
 
 ## Future Enhancements
 
+- **Direction finding is designed, not yet built** — full design in
+  [`docs/beacon_direction_finding.md`](beacon_direction_finding.md). Body-shadow DF using RSSI vs.
+  compass heading; unblocked as of the §7.3a rate work (2 Hz → ~4-5 Hz gives enough samples per 30°
+  bin to be usable). True BT 5.1 AoA is impossible on this hardware (single antenna, no CTE IQ).
 - Multiple beacon tracking (show N nearest beacons simultaneously)
-- UWB integration for centimeter-accurate ranging (requires hardware upgrade)
-- Beacon direction estimation using RSSI differential from multiple scans
+- UWB integration for centimeter-accurate ranging (requires hardware upgrade — separate antenna(s)
+  and a UWB transceiver; all board GPIOs are currently allocated, see `hardware_constraints.md`)
 - Custom beacon name/label display on radar
 - iBeacon / Eddystone UUID-based targeting (not just MAC)
 - RSSI history graph in dev screen

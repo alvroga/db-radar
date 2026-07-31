@@ -1,6 +1,9 @@
 # Beacon Direction Finding — design
 
-**Status**: Proposed, not implemented. **Blocked on** `docs/performance_optimization_backlog.md` §7.3a.
+**Status**: Proposed, not implemented. **Unblocked** as of 2026-07-31 — `docs/performance_optimization_backlog.md`
+§7.3a (continuous passive scan) is built and **verified live at 4.24–4.37 Hz** (was 2.0 Hz), which
+lands in the "marginal; workable outdoors" row of the table in §3 below. Nothing in this document has
+been built yet; it remains a design.
 **Date**: 2026-07-31
 
 The question this answers: *standing still and rotating in place, can the device tell you which way to
@@ -43,19 +46,24 @@ Bin a 360° rotation into 12 sectors of 30° over a 10-second turn:
 
 | BLE sample rate | samples/rotation | per 30° bin | verdict |
 |---|---|---|---|
-| **2.0 Hz** — today (backlog §7.1) | 20 | **1.7** | **unusable** — noise exceeds signal |
-| 5 Hz — §7.3a, tag at 200 ms | 50 | 4.2 | marginal; workable outdoors |
-| 10 Hz — §7.3a, tag at 100 ms | 100 | **8.3** | **works** |
+| 2.0 Hz — pre-§7.3a (backlog §7.1) | 20 | 1.7 | unusable — noise exceeds signal |
+| **~4.3 Hz — confirmed live, §7.3a, tag at 200 ms** | ~43 | **~3.6** | marginal; workable outdoors |
+| 10 Hz — §7.3a, tag reconfigured to 100 ms | 100 | **8.3** | **works** — not yet tried |
 
 At 8 samples per bin, averaging reduces RSSI noise by `√8 ≈ 2.8×` — ~4 dB raw becomes ~1.4 dB per
 bin, against a 10–20 dB body-shadow signal. **7–14 dB of SNR on the directional feature.** A slower
-20-second rotation doubles it again.
+20-second rotation doubles it again. At ~3.6 samples/bin (today's confirmed rate) the noise reduction
+is only `√3.6 ≈ 1.9×` — workable but noticeably weaker; a 20-second rotation (~7 samples/bin) is the
+practical way to make today's rate usable without touching the tag.
 
-At 1.7 samples per bin there is nothing to average and the answer is noise.
+At 1.7 samples per bin there is nothing to average and the answer is noise. That was the situation
+before §7.3a; it no longer is.
 
-> **This feature is not blocked on cleverness, it is blocked on data rate.** Backlog §7.3a
-> (continuous passive scan) is a hard prerequisite. Set the tag to a 100 ms advertising interval
-> before attempting it.
+> **This feature was blocked on data rate, not cleverness — and the blocker is cleared.** Backlog
+> §7.3a (continuous passive scan) is built and confirmed at ~4.3 Hz. It is enough to *attempt* the
+> feature (workable outdoors, per the table above), but reconfiguring the tag to 100 ms remains
+> worthwhile before or during implementation — it roughly doubles per-bin sample count and halves
+> trend latency elsewhere in the system too.
 
 ## 4. Algorithm
 
@@ -156,16 +164,17 @@ baselines carry the geometry instead of RSSI shape.
 
 | # | Item | Where |
 |---|---|---|
-| 1 | **Continuous passive BLE scan** — 2 Hz → 5/10 Hz | backlog §7.3a (**hard blocker**) |
-| 2 | Set the tag's advertising interval to 100 ms | hardware config |
+| 1 | ~~Continuous passive BLE scan — 2 Hz → 5/10 Hz~~ | ✅ **done**, backlog §7.3a, confirmed ~4.3 Hz |
+| 2 | Set the tag's advertising interval to 100 ms | hardware config — **not yet done**, worth doing before/during build |
 | 3 | Publish `latest_heading` global from System Task | `task_manager.cpp` |
 | 4 | Accumulator + confidence in a new DF module | new file |
 | 5 | **Empirical sign/offset calibration** | hardware task, §5 above |
 | 6 | UI mode + bearing arrow | `navigation.cpp`, `ui_manager.cpp` |
 
-**Nothing here should be built before item 1 lands and item 2 is confirmed on the tag.** At 2 Hz the
-result would be indistinguishable from a random number generator, and that is the worst possible
-outcome for a feature whose entire value is being trusted.
+**Item 1 is done; item 2 is optional-but-recommended, not a hard blocker anymore.** At the confirmed
+~4.3 Hz the result is workable-outdoors per §3's table, not random-number-generator noise as it was at
+2 Hz — but it is materially better with 100 ms advertising (per-bin sample count roughly doubles), so
+doing it either before starting or in parallel with items 3–4 is the efficient order.
 
 ---
 

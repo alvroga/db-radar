@@ -701,15 +701,22 @@ It no longer decides the tempo:
 - VERY_FAR / FAR / MEDIUM: -90 / -85 / -75 dBm
 - CLOSE: ≥ -65 dBm (solid fill + ball + star)
 
-**Sonar tempo is continuous and linear in dBm** — 1500 ms at -90 dBm → 150 ms at -50 dBm. Four
-discrete rates made a search unnavigable: most of it happens inside one zone, where moving produced no
+**Sonar tempo is continuous and linear in dBm** — 1500 ms at -90 dBm → 150 ms at -50 dBm, driven by
+`rssi_display` (the slow EMA), **not** `rssi_ema`. A first cut used `rssi_ema` and it beat audibly
+unsteady — RSSI wobbles ±3-5 dB standing still, and over this 40 dB span that's a ~25% swing in beat
+period. A continuous tempo only glides if the value driving it is itself smooth. Four discrete rates
+made a search unnavigable before that: most of it happens inside one zone, where moving produced no
 audible change, and someone hunting listens for *change in response to their own movement*, not
 absolute level. Linear in dBm is exact, not approximate — RSSI ≈ C − 20·log₁₀(d), so equal dBm steps
 are equal distance *ratios*.
 
-**Beep duration encodes trend** (60 ms approaching / 30 neutral / 12 departing). The buzzer has no
-pitch, but duration was already a free parameter, and "warmer/colder" beats absolute level when the
-environment, tag orientation and your own body all shift the absolute.
+**Beep duration encodes trend, continuously** — interpolated from the raw regression slope
+(`trend_slope_dbm_s`), saturating at ±2 dBm/s: 30 ms neutral ± up to 30 ms, floored at 12 ms. A first
+cut switched on the 3-state `MovementTrend` enum instead, and it was the worst part of the result —
+standing still the slope hovers near zero, so the classifier flipped
+APPROACHING/STABLE/DEPARTING at random and the beep length jumped 60→30→12 ms beat to beat. The buzzer
+has no pitch, but duration was already a free parameter, and "warmer/colder" beats absolute level when
+the environment, tag orientation and your own body all shift the absolute.
 
 **Beacon has absolute priority over the waypoint sonar.** When `beacon_proximity::isInRange()` is
 true, `updateWaypointFixSonar()` **releases the fixed waypoint** outright — a beacon is a thing to
@@ -720,18 +727,25 @@ every other waypoint hidden and would re-take the sonar as soon as the beacon di
 
 **Serial Commands**: `beacon status`, `beacon scan`, `beacon test`, `beacon zone`, `beacon trend`
 
-**✅ The 2 Hz rate starvation is fixed** (§7.3a–d, built 2026-07-31, ⏳ unverified). The feed was capped
-at one RSSI sample per 500 ms by three independent things — NimBLE's duplicate filtering, a
+**✅ The 2 Hz rate starvation is fixed and verified on hardware** (§7.3a–d, built 2026-07-31). The feed
+was capped at one RSSI sample per 500 ms by three independent things — NimBLE's duplicate filtering, a
 `g_pScan->stop()` on first hit, and a 500 ms poll loop — while the tag advertised at 200 ms. It is now
-**one continuous passive scan** running forever, duplicates off, results not stored: expected ~5 Hz,
-or ~10 Hz if the tag is reconfigured to 100 ms. **This was never a CPU problem — 240 MHz bought it
-nothing.**
+**one continuous passive scan** running forever, duplicates off, results not stored. Measured live on
+device: **4.24–4.37 Hz** (mean gap ~230 ms), up from 2.0 Hz — ~89 advertisements/sec delivered across
+~30 nearby devices, 69 matching the target MAC in one sample window. **This was never a CPU problem —
+240 MHz bought it nothing.**
 
 Everything derived from that feed was re-derived with it, which is the actual lesson: both EMAs are
-now **τ-based off measured elapsed time** (0.5 s / 1.0 s) rather than fixed per-sample α, zone
-confirmation is a **duration** (1000 ms) rather than a sample count, and the trend slope is regressed
-against **real time** in dBm/s rather than per-cycle. Left alone, every one of those would have
-silently changed meaning by 2.5–5× the moment the rate moved.
+now **τ-based off measured elapsed time** (0.5 s fast / 2.0 s slow) rather than fixed per-sample α,
+zone confirmation is a **duration** (1000 ms) rather than a sample count, and the trend slope is
+regressed against **real time** in dBm/s rather than per-cycle. Left alone, every one of those would
+have silently changed meaning by 2.5–5× the moment the rate moved.
+
+The two τ constants split **decision vs presentation**, not just "fast vs slow": `rssi_ema` (0.5 s)
+feeds zone classification and trend, which have their own hysteresis/confirmation downstream, so
+latency hurts more than noise there. `rssi_display` (2.0 s, raised from an initial 1.0 s after the
+tempo it drives came out choppy) feeds the ring width and sonar tempo, which are shown/heard **raw** —
+there noise is the whole problem, and rhythm error is far more perceptible than visual lag.
 
 **⚠️ The tag must advertise in Legacy (BLE 4.0) mode.** `CONFIG_BT_NIMBLE_EXT_ADV` is not set, so the
 firmware only receives legacy advertisements. A tag switched to *Extend Advertisement* or *PHY Coded*

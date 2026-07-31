@@ -9,10 +9,68 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+**Beacon sonar was choppy — the continuous tempo and trend-beep from the previous entry both had a
+self-inflicted noise problem** — ⏳ *fix built, not separately re-verified by ear*
+
+Field report right after the priority/continuous-tempo work below: "the beeping is choppy." Both
+causes were introduced in that same change, and both are the exact defect being fixed everywhere else
+that day — a discrete or noisy value driving something meant to be heard as continuous.
+
+1. **Tempo was driven by `rssi_ema` (τ=0.5s).** RSSI wobbles ±3-5 dB standing still, and over the
+   40 dB tempo-mapping span a 4 dB swing is a ~25% change in beat period. A continuous tempo only
+   reads as a *glide* if the value driving it is itself smooth — otherwise "continuous" just means
+   "jittering constantly" instead of "stepping occasionally," which is worse than the four-step
+   version it replaced. Tempo now comes from `rssi_display` instead, and `DISPLAY_TAU_S` was raised
+   1.0 → 2.0s. This makes the EMA split explicit as **decision vs presentation**: `rssi_ema` is fast
+   because zone and trend have their own hysteresis/confirmation downstream, so latency hurts there
+   and noise doesn't; `rssi_display` is slow because the ring and the sonar tempo are shown/heard raw,
+   where noise is the entire problem — deliberately slower than the ring alone would want, because
+   rhythm error is far more perceptible than visual lag.
+2. **Beep length switched on the three-state `MovementTrend` enum.** Standing still, the regression
+   slope hovers near zero, so the classifier flipped APPROACHING/STABLE/DEPARTING at random and the
+   beep length jumped 60→30→12ms beat to beat — heard as the rhythm breaking up, not as information.
+   Now interpolated continuously from the raw slope (`BeaconState::trend_slope_dbm_s`), saturating at
+   ±2 dBm/s: 30ms neutral ±30ms, floored at 12ms.
+
+**Build impact**: flash +116 B, RAM ±0.
+
+### Fixed
+
+**`I2C_PROCESS_MS` 20 → 10ms broke the button and buzzer — reverted** — ✅ *verified on hardware:
+radar, beacon discovery and sound all confirmed back to normal at 20ms*
+
+Attempted to halve the sonar's 20ms timing-quantization floor (backlog §8.1b) by doubling the I2C
+Task's rate. On hardware: **button unresponsive, buzzer silent.** Reverted immediately.
+
+The cost analysis behind the change was wrong in a specific and generalisable way — it counted the I2C
+Task's own CPU cost (a non-blocking queue drain plus a few timestamp compares, genuinely trivial) and
+never counted the actual contended resource: the **I2C bus**. The CST820 touch driver calls `Wire`
+directly, bypassing `i2c_mutex` entirely (the same constraint documented in
+`docs/compass_i2c_constraint.md`, which is why the compass can't be read from the I2C Task either).
+Doubling this task's rate doubles the collision rate against an already-contended bus, so the EXIO
+writes driving the buzzer and the button's own reads start failing.
+
+**`I2C_PROCESS_MS = 20` is therefore a tuned floor, not an arbitrary constant**, and 20ms is a hard
+limit on sonar timing resolution (~8% jitter at a 250ms interval) for as long as the buzzer is driven
+over the shared bus. Marked void in the backlog with the reasoning, so it isn't retried. Beat
+steadiness has to come from smoothing the *interval* (deadband + slew limit) or the RSSI *input*
+(median filter before the EMA) instead — neither touches the bus.
+
+**Separately discovered while debugging this**: a stuck I2C bus can hang boot completely, immediately
+after `[I2C] Initialized: SDA=15...` — a slave (touch or RTC) left holding SDA low across an MCU reset
+jams the bus, and only a **full power cycle** (not a reset) releases it, since the MCU reset doesn't
+power-cycle the slaves. Confirmed on hardware and documented in `docs/troubleshooting.md`.
+
+**Build impact**: RAM ±0, flash ±0 (constant reverted to its original value).
+
 ### Changed
 
-**Beacon takes absolute priority, and its sonar became continuous + trend-aware** — ⏳ *awaiting
-hardware verification*
+**Beacon takes absolute priority, and its sonar became continuous + trend-aware** — ⏳ *priority logic
+awaiting hardware verification; the tempo/trend-beep mechanics below were superseded within hours by
+the choppy-sonar fix above (`rssi_display` instead of `rssi_ema`, continuous beep length instead of
+the fixed 60/30/12ms), which is where the current behaviour is described*
 
 Field report after the §7 rate work: the beacon appeared *silent*, and once that was explained, the
 beeping was *"very difficult to gauge where to go"*. Two separate causes.
@@ -51,8 +109,10 @@ neutral, **12 ms** clipped tick when DEPARTING.
 
 **Build impact**: RAM ±0, flash 1,668,847 → 1,669,051 (**+204 B**).
 
-**Beacon proximity: 2 Hz → ~5 Hz, and everything derived from that rate re-derived with it** — ⏳
-*awaiting hardware verification*
+**Beacon proximity: 2 Hz → ~5 Hz, and everything derived from that rate re-derived with it** — ✅
+*verified on hardware 2026-07-31*: `beacon status` measured **4.24–4.37 Hz** live (mean gap ~230ms,
+up from ~500ms), with `Scan callbacks` climbing at ~89/sec across ~30 nearby devices and the target
+MAC count climbing alongside it.
 
 Backlog §7 in full (7.3a–d). The BLE feed was capped at exactly **2.0 Hz** against a tag advertising
 at 5 Hz, so about 60% of every advertisement was thrown away. Three independent causes, all removed:

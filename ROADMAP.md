@@ -69,39 +69,13 @@ For completed features and history, see [CHANGELOG.md](CHANGELOG.md).
 
 ---
 
-### Beacon Responsiveness — the BLE feed is rate-starved at 2 Hz
-**Severity**: High — this is the largest open non-render improvement in the project
-
-**Symptom**: beacon proximity feels sluggish. ~3.3 s from moving to the ring changing, and the ring only has 4 states.
-
-**Root cause**: not CPU — the 240 MHz change bought this nothing. Three things combine into a hard ceiling of **one RSSI sample per 500 ms**: NimBLE's default controller-side duplicate filtering, `g_pScan->stop()` on first hit (`beacon_proximity.cpp:93`), and `SCAN_INTERVAL_MS = 500`. The tag advertises at **200 ms** (configurable to 100 ms), so 60–80% of available packets are discarded. The EMA and zone-confirmation constants were then tuned against that starved feed and encode it implicitly.
-
-**Fix**: continuous passive scan (2 → 5 Hz, or 10 Hz with the tag at 100 ms), τ-based EMA re-derived in *time* rather than samples, and continuous ring width driven from the already-computed-but-unread `rssi_display`.
-
-**Full analysis**: [`docs/performance_optimization_backlog.md`](docs/performance_optimization_backlog.md) §7 — steps 16–18
-
----
-
-### Sonar Rhythm Defects
-**Severity**: High — audible, and rhythm errors are more perceptible than visual ones
-
-Two independent defects found in the 2026-07-31 audit:
-
-1. **The sonar grid re-bases off actual fire time** (`buzzer.cpp:215` uses `= now + interval`, not `+= interval`), giving up to **20 ms jitter per beat (8% at the 250 ms CLOSE interval)** and a systematically **~4% flat tempo**. The ear resolves ~10 ms. One-line fix.
-2. **Waypoint sonar has no hysteresis** (`navigation.cpp:804-808`) — hard boundaries at 5/10/30/50 m evaluated at 10 Hz against ±2–5 m of GPS jitter. Stand still near a boundary and the tempo flips between two rates at random. The beacon path solved this with ±3 dBm hysteresis and confirmation counts; the waypoint path never got either.
-
-Also: waypoint zones are 5/5/20/20 m wide, so the 10–50 m approach band is only two tempi; and `buzzer::rapidPulse()` is dead blocking code (60 ms of `delay()`).
-
-**Full analysis**: [`docs/performance_optimization_backlog.md`](docs/performance_optimization_backlog.md) §8.1 — steps 14, 15, 19, 20
-
----
-
 ### Beacon Direction Finding — "which way do I start walking?"
 **Severity**: Feature — the highest-value thing this hardware could still learn to do
+**Status**: unblocked 2026-07-31, not yet built
 
 **Can we do it?** True Bluetooth 5.1 AoA is **impossible** here — single antenna, no CTE IQ samples. But **body-shadow DF** works: the body attenuates 2.4 GHz by 10–20 dB, so rotating in place produces a directional RSSI signature, and the QMC5883L supplies the heading for every sample. Bearing comes from a first-circular-harmonic fit with a resultant-length confidence gate, not from `argmax`.
 
-**Hard blocker**: at today's 2 Hz BLE rate a 10-second rotation yields **1.7 samples per 30° bin** — pure noise. At 10 Hz it yields 8.3, which gives 7–14 dB of SNR on the feature. **This is blocked on the beacon rate work above, not on algorithm design.**
+**Was blocked, is no longer blocked**: at 2 Hz BLE a 10-second rotation yielded **1.7 samples per 30° bin** — pure noise. The prerequisite rate work (below, in Resolved) is done and **measured live at 4.24–4.37 Hz**, giving ~3.6 samples/bin — workable outdoors, per the sample-rate table in `docs/beacon_direction_finding.md` §3. Reconfiguring the tag to 100 ms would get to 10 Hz / 8.3 samples/bin (not yet done — the tag is currently at 200 ms).
 
 **Expected**: ±30–45° outdoors at 10–40 m — reliable quadrant, i.e. "start walking that way". Unreliable indoors (multipath); the confidence gate must refuse rather than guess.
 
@@ -114,6 +88,33 @@ Also: waypoint zones are 5/5/20/20 m wide, so the 10–50 m approach band is onl
 ---
 
 ## Resolved
+
+### Beacon Responsiveness — the BLE feed was rate-starved at 2 Hz — Resolved (2026-07-31)
+**Was**: beacon proximity felt sluggish. ~3.3 s from moving to the ring changing, and the ring only had 4 states.
+
+**Root cause**: not CPU — the 240 MHz change bought this nothing. Three things combined into a hard ceiling of one RSSI sample per 500 ms: NimBLE's default controller-side duplicate filtering, `g_pScan->stop()` on first hit, and `SCAN_INTERVAL_MS = 500`. The tag advertised at 200 ms, so 60–80% of available packets were discarded.
+
+**Resolution**: one continuous passive scan (duplicates off, results not stored, 100 ms window == interval), τ-based EMAs re-derived in *time* rather than samples, zone confirmation as a duration rather than a sample count, and a continuous ring width driven from the already-computed-but-previously-unread `rssi_display`. **Verified live on hardware: 4.24–4.37 Hz** (mean gap ~230 ms, was ~500 ms), `Scan callbacks` climbing at ~89/sec.
+
+**Follow-up bug found in the field**: the first version of the priority/continuous-tempo work drove the sonar *tempo* from the fast EMA (`rssi_ema`, τ=0.5s) instead of the slow one, and switched beep *length* on a 3-state trend enum instead of interpolating — both reported as "choppy" beeping and both fixed same-day (tempo now from `rssi_display` with τ raised 1.0→2.0s; beep length continuous from the raw regression slope).
+
+**Full analysis**: [`docs/performance_optimization_backlog.md`](docs/performance_optimization_backlog.md) §7 · [`docs/beacon_proximity.md`](docs/beacon_proximity.md)
+
+---
+
+### Sonar Rhythm Defects — Resolved (2026-07-31)
+**Was**: two independent defects found in the 2026-07-31 audit, both audible.
+
+1. **The sonar grid re-based off actual fire time** (`= now + interval` instead of `+= interval`), giving up to 20 ms jitter per beat (8% at the 250 ms CLOSE interval) and a systematic ~4% flat tempo.
+2. **Waypoint sonar had no hysteresis** — hard boundaries at 5/10/30/50 m evaluated at 10 Hz against ±2–5 m of GPS jitter, so standing still near a boundary flipped the tempo between two rates at random.
+
+**Resolution**: the beat-grid fix advances by a fixed step with a catch-up guard. The waypoint sonar was rebuilt entirely as a **continuous geometric mapping** (2000 ms @ 50 m → 250 ms @ 2 m) with a τ=1.5s EMA on distance as the noise guard, which *subsumed* the hysteresis fix rather than sitting alongside it — a continuous tempo has no rates to flicker between. Also added: an **arrival stop** (the sonar now honours `Waypoint::found`, silencing on tap-within-15m exactly like the beacon ball) and **beacon-absolute-priority** (`isInRange()` now releases any fixed waypoint outright rather than merely yielding the buzzer).
+
+**⚠️ One attempted follow-on was tried and reverted**: halving `I2C_PROCESS_MS` (20→10ms) to further reduce the buzzer's timing-quantization floor broke the device on hardware (button unresponsive, buzzer silent) — I2C bus contention with the touch driver, not a CPU cost problem. Reverted and confirmed fixed. `I2C_PROCESS_MS = 20` is now a documented hard floor; see `memory/i2c_process_ms_floor.md`.
+
+**Full analysis**: [`docs/performance_optimization_backlog.md`](docs/performance_optimization_backlog.md) §8.1
+
+---
 
 ### FT-01: Button Double-Tap Unresponsive — Resolved (2026-03-20)
 **Was**: Double-tap to reverse zoom unreliable, felt unresponsive under load.
