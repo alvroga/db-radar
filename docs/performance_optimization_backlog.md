@@ -337,6 +337,16 @@ continuous visual channel from the slow discrete one:
   *must* be confirmed — a beep interval that jitters between 500 and 750 ms sounds broken in a way a
   drifting ring never looks.
 
+> **⚠️ This recommendation was tried and reversed the same day — see §7.5 below.** It was built exactly
+> as written (tempo stayed on `state.zone`), then field-tested against the waypoint sonar's brand-new
+> continuous tempo and reported as *"not as progressive as the beacon... very difficult to gauge where
+> to go"*. The rewrite to a continuous tempo is what actually shipped. The prediction above wasn't
+> wrong about discrete tempo being risky — it was wrong about *which* risk was bigger: four audible
+> steps turned out to matter more than the jitter a naive continuous tempo could introduce, and the
+> jitter itself turned out to be avoidable by driving tempo off `rssi_display` instead of `rssi_ema`.
+> Kept here, unedited, as the design record this document exists to preserve — see §7.5 for what the
+> field actually required and why.
+
 This bypasses the 7.3b zone-confirm term entirely for the visual, which is why it is likely the
 largest *felt* improvement of the three despite being the smallest change.
 
@@ -384,13 +394,13 @@ anything: log `advertisedDevice->getAdvType()` and `millis() - scan_start_ms` in
 type is `ADV_IND` and the delta is ~1000 ms, it's confirmed. 7.3a's switch to passive scanning fixes
 it either way and also halves radio traffic, so the test is for the record, not for the decision.
 
-### 7.4 Expected result — ✅ all of §7.3 implemented 2026-07-31, ⏳ unverified
+### 7.4 Expected result — ✅ all of §7.3 implemented AND verified on hardware, 2026-07-31
 
-| | today | after 7.3a + 7.3b (option C) + 7.3c |
-|---|---|---|
-| sample rate | 2.0 Hz | 5 Hz (10 Hz if the tag is set to 100 ms) |
-| ring response | ~3.3 s, 4 discrete states | continuous, ~1.2 s |
-| zone/tempo response | ~3.3 s | ~2.2 s, and quieter |
+| | before | predicted after 7.3a+b+c | **measured** |
+|---|---|---|---|
+| sample rate | 2.0 Hz | 5 Hz (10 Hz if the tag is set to 100 ms) | **✅ 4.24–4.37 Hz**, live via `beacon status` (tag still at 200 ms — 100 ms not yet tried) |
+| ring response | ~3.3 s, 4 discrete states | continuous, ~1.2 s | not separately timed; qualitatively continuous per `beacon status`'s `rssi_display` field |
+| zone/tempo response | ~3.3 s | ~2.2 s, and quieter | tempo mechanism changed — see §7.5, not this table |
 
 **What was built** (`beacon_proximity.cpp`, `beacon_proximity.h`, `navigation.cpp`, `diagnostics.cpp`):
 
@@ -400,17 +410,21 @@ it either way and also halves radio traffic, so the test is for the record, not 
   whole results-sweep block. `update()` no longer polls for scan completion; it recomputes
   zone/trend/distance on the Network Task's own cadence, which the time-based constants below make
   legitimate.
-- **7.3b** — both EMAs are τ-based off **measured** elapsed ms (τ = 0.5 s fast, 1.0 s display).
-  `ZONE_CHANGE_SAMPLES` became `ZONE_CONFIRM_MS = 1000`, so 1 s of confirmation stays 1 s instead of
-  silently becoming 0.4 s. `BEACON_LOST_TIMEOUT_MS` 15 s → 5 s.
+- **7.3b** — both EMAs are τ-based off **measured** elapsed ms. `EMA_TAU_S = 0.5 s` (fast).
+  `DISPLAY_TAU_S` shipped at 1.0 s here, then was raised to **2.0 s** the same day — see §7.5, it was
+  too fast once tempo started reading from it. `ZONE_CHANGE_SAMPLES` became `ZONE_CONFIRM_MS = 1000`,
+  so 1 s of confirmation stays 1 s instead of silently becoming 0.4 s. `BEACON_LOST_TIMEOUT_MS`
+  15 s → 5 s.
 - **7.3c** — ring width is continuous in `rssi_display` (−90 dBm → 6 px, −65 dBm → 34 px). The two
   decisions *around* it stay discrete and stay hysteresis-gated: draw a ring at all, and switch to the
-  solid CLOSE fill.
-- **Trend was re-derived too**, though nothing but diagnostics reads it. It regressed RSSI against
-  *sample index* with thresholds in dBm/**cycle**, which is precisely the defect this audit is named
-  after — at 5 Hz the old ±2 dBm/cycle would have silently become ±10 dBm/s. Now regressed against
-  real time over a 4 s window with thresholds of ±1 dBm/s, chosen from the physics: walking at 1.4 m/s
-  with n = 2 gives 8.686·v/d ≈ 0.6 dBm/s at 20 m, 1.2 at 10 m, 2.4 at 5 m.
+  solid CLOSE fill. **Sonar tempo did not stay on `state.zone` as designed — see the warning box above
+  and §7.5.**
+- **Trend was re-derived too.** At the time this was written *nothing but diagnostics read it* — that
+  changed hours later, see §7.5, it now drives the sonar beep length. The regression itself: it used
+  to run against *sample index* with thresholds in dBm/**cycle**, which is precisely the defect this
+  audit is named after — at 5 Hz the old ±2 dBm/cycle would have silently become ±10 dBm/s. Now
+  regressed against real time over a 4 s window with thresholds of ±1 dBm/s, chosen from the physics:
+  walking at 1.4 m/s with n = 2 gives 8.686·v/d ≈ 0.6 dBm/s at 20 m, 1.2 at 10 m, 2.4 at 5 m.
 
 **Two footguns found and handled while doing it:**
 
@@ -425,24 +439,90 @@ it either way and also halves radio traffic, so the test is for the record, not 
    `NimBLEAddress` directly against a target parsed once at `setEnabled()`.
 
 **New read-out**: `BeaconState::sample_interval_ms` — the measured mean inter-arrival, reported by
-`beacon status` and `beacon trend` as both ms and Hz. This is the direct verification of 7.3a: it
-should read ~200 ms / 5 Hz where it previously read ~500 ms / 2 Hz.
+`beacon status` and `beacon trend` as both ms and Hz. This is the direct verification of 7.3a.
+**✅ Measured live: 4.24–4.37 Hz (mean gap ~230 ms)**, up from ~2.0 Hz (~500 ms) pre-fix, with `Scan
+callbacks` climbing at ~89/sec across ~30 nearby devices during the same session.
 
 **Build impact**: RAM 195,600 → 195,968 (**+368 B**, almost all the 48-entry timestamped trend ring),
-flash 1,668,007 → 1,668,847 (**+840 B**).
+flash 1,668,007 → 1,668,847 (**+840 B**). (This is the §7.3a–d build only — §7.5 below adds more on
+top of it.)
 
-**Still to verify on hardware**: the sample rate itself, the ring's feel, and **radio power draw** —
-100% scan duty is the one genuinely new cost here. It is zoom-gated to 50 m so it is bounded, but if
-drain is objectionable, `SCAN_WINDOW_MS` is the single knob to dial back (80 ms gives 80% duty and
-should still catch a 200 ms advertiser most of the time).
+**Still to verify on hardware**: the ring's *feel* (qualitative — was not separately timed), and
+**radio power draw** — 100% scan duty is the one genuinely new cost here. It is zoom-gated to 50 m so
+it is bounded, but if drain is objectionable, `SCAN_WINDOW_MS` is the single knob to dial back (80 ms
+gives 80% duty and should still catch a 200 ms advertiser most of the time).
 
-**Caveats, stated up front.** The sample-rate gain is capped by the tag's own advertising interval —
-5× only exists if the tag is reconfigured to 100 ms, and 2.5× is what today's 200 ms setting yields.
-The latency figures are derived from the EMA step response, not measured on hardware; they should be
-confirmed the same way the render numbers were. And 7.3a costs radio power on a battery device.
+**Caveats, stated up front — now partially resolved.** The sample-rate gain is capped by the tag's own
+advertising interval — 5× only exists if the tag is reconfigured to 100 ms, and **the measured 2.2×
+at 200 ms matches what was predicted** (2.5× predicted vs. 2.15× actual — close enough to attribute to
+real-world advertisement loss, not a config error). The latency figures for ring/zone response were
+derived from the EMA step response and were not separately measured. 7.3a's radio-power cost is also
+still unmeasured.
 
 7.3a and 7.3b are one file. 7.3c touches the `DRAW_MAIN` handler, so it needs a re-check of the paint
-stage — though the ring is a single `lv_draw_arc` and should not move the 9.3 ms.
+stage — though the ring is a single `lv_draw_arc` and should not move the 9.3 ms. (Not yet re-checked;
+low priority, the ring draw is unlikely to be the frame's bottleneck regardless.)
+
+### 7.5 What the field actually required beyond §7.3 — priority, continuous tempo, trend-driven beep
+
+**Built the same day, hours after §7.3a–d, in response to two field reports that §7.3's design did not
+anticipate.** Not originally numbered in this document — recorded here after the fact because both
+fixes are substantial and this document is where beacon behaviour is tracked.
+
+**Report 1 — the beacon appeared completely silent.** Root cause was a pre-existing bug, not part of
+§7 at all: `updateWaypointFixSonar()` (`navigation.cpp`) called `beacon_proximity::suppressSonar(true)`
+unconditionally the instant a waypoint was fixed at 50 m zoom, *before* checking whether the waypoint
+was actually in sonar range. A waypoint fixed beyond 50 m therefore produced tempo 0 → `stopSonar()`
+while permanently muting the beacon — the beacon looked dead with no error anywhere.
+
+**Fix — beacon takes absolute priority.** A beacon is a thing you are trying to *find*; a fixed
+waypoint is an area you are walking into, and its sonar is a secondary convenience. New
+`beacon_proximity::isInRange()` (scanning, not found, confirmed zone ≠ OUT_OF_RANGE — so it can't
+flicker, the confirmed zone already needs 1000 ms of hysteresis-gated agreement) now makes
+`updateWaypointFixSonar()` **release the fixed waypoint outright** the moment it goes true, rather
+than merely yielding the buzzer. Yielding wasn't enough on its own: a lingering fix also keeps every
+other waypoint hidden from the radar, and would re-claim the buzzer the instant the beacon dipped back
+out of range.
+
+**Report 2 — "the rate at which the beeping changes is very difficult to gauge where to go."** This is
+where §7.3c's design (tempo stays on `state.zone`, see the warning box in that section) was tried and
+found wanting next to the waypoint sonar's brand-new continuous tempo (§8.1e, built the same day). The
+beacon's four-step tempo (1500/750/500/250 ms) went through the same rewrite the waypoint sonar just
+had: **continuous and linear in dBm**, 1500 ms at −90 dBm → 150 ms at −50 dBm
+(`interval = 1500 · 0.1^((rssi+90)/40)`). The zone keeps deciding *whether* to beep; it no longer
+decides how fast.
+
+**A companion fix went in at the same time: beep *length* now encodes RSSI trend.** `MovementTrend`
+had existed since the v2 redesign and was read by nothing — §7.4 above documented that as still true
+at the time. It no longer is: beep duration (already a free parameter of `setSonarInterval()`, costing
+nothing to add) is now interpolated continuously from the raw regression slope
+(`BeaconState::trend_slope_dbm_s`, exposed for exactly this), saturating at ±2 dBm/s: 30 ms neutral,
+±30 ms, floored at 12 ms.
+
+**Both of those continuous mappings had the exact bug §8.1e's design note warns about, and both were
+caught and fixed the same day (field report: "the beeping is choppy"):**
+
+- **Tempo was first wired to `rssi_ema`** (τ=0.5s, the *fast* EMA). RSSI wobbles ±3–5 dB standing
+  still, and over the 40 dB tempo span that's a ~25% swing in beat period — a continuous tempo only
+  glides if the value driving it is itself smooth. **Moved to `rssi_display`, and `DISPLAY_TAU_S`
+  raised 1.0 → 2.0 s** (correcting the value from §7.3b above) specifically because the ring's
+  1.0 s was too fast once the *sonar* started reading it too. This is the clean statement of the
+  principle: `rssi_ema` is for things with their own hysteresis downstream (zone, trend), where
+  latency costs more than noise; `rssi_display` is for things heard/shown raw, where noise is the
+  entire problem and rhythm error is judged more harshly than visual lag.
+- **Beep length was first switched on the 3-state `MovementTrend` enum**, not interpolated. Standing
+  still, the slope hovers near zero and the classifier flips between the three states at random, so
+  the beep jumped 60→30→12 ms beat to beat — heard as the rhythm breaking up, not as a signal. Fixed
+  by interpolating continuously from the slope itself (final form described above).
+
+**Build impact (§7.5, on top of §7.3a–d's numbers)**: priority fix flash +204 B; choppy-sonar fix flash
++116 B; RAM ±0 for both.
+
+**Verification status**: priority-release and the choppy-fix's *feel* have not been independently
+re-tested by ear/observation since shipping — only the underlying §7.3a sample rate has hard measured
+numbers (above). The device was confirmed generally healthy (radar, beacon discovery, sound, button)
+after a *later*, unrelated regression (§8.1b's `I2C_PROCESS_MS` attempt, see that section) was
+reverted — that confirms nothing was broken, not that these specific behaviours were re-verified.
 
 ---
 
@@ -456,7 +536,7 @@ changed** — and graded.
 | Subsystem | Verdict |
 |---|---|
 | **Sonar / buzzer** | ✅ Rhythm ✅ verified; tempo now continuous + silences on arrival (⏳ unverified). §8.1 |
-| **Beacon proximity** | ✅ §7.3a-d all built (⏳ unverified) — continuous passive scan, τ-based EMAs, continuous ring. See §7 |
+| **Beacon proximity** | ✅ §7.3a-d built and **rate verified live (4.24–4.37 Hz)** — continuous passive scan, τ-based EMAs, continuous ring. Plus §7.5 (priority, continuous tempo, trend-driven beep), fixed same day. See §7 |
 | Input latency (touch/button) | Adequate for taps, poor for drag. §8.2 |
 | GPS | Healthy; one syscall-per-byte inefficiency. §8.3 |
 | Compass | ✅ Healthy — no action. §8.4 |
@@ -704,23 +784,33 @@ expensive as a whole radar frame. LVGL still only flushes when something is inva
 screen costs nothing. This is inherent to the zero-copy path, not a defect, but it is why UI outside
 the radar does not feel proportionally faster than the radar does.
 
-### 8.6 Recommended order
+### 8.6 Recommended order — ✅ all six steps executed 2026-07-31; here's how it actually went
 
 1. ~~**§8.1d** — waypoint sonar hysteresis.~~ ✅ verified, then **superseded by §8.1e**.
 2. ~~**§8.1a** — phase-lock the sonar grid.~~ ✅ verified on hardware.
-3. ~~**§8.1e** — continuous waypoint tempo.~~ ✅ built 2026-07-31, ⏳ unverified. It did subsume 1.
-   Field testing after 1 and 2 confirmed the ladder was *steady and still wrong* — see the outcome
-   note in §8.1e.
-4. **§7.3a–c** — the beacon rate work. Largest single improvement, three related changes in ~two files.
-5. **§8.1f** — delete `rapidPulse()`. Trivial hygiene. ✅ done.
-6. **§8.1b / §8.2 / §8.3** — only if 1–4 leave something still feeling wrong. All three are
-   speculative-benefit and should be justified by observation, not by reading this document.
+3. ~~**§8.1e** — continuous waypoint tempo.~~ ✅ built, ⏳ unverified (needs an outdoor GPS test). It
+   did subsume 1. Field testing after 1 and 2 confirmed the ladder was *steady and still wrong* — see
+   the outcome note in §8.1e.
+4. ~~**§7.3a–c** — the beacon rate work.~~ ✅ built **and rate-verified live (4.24–4.37 Hz)**. Turned
+   out to need a follow-on the plan didn't anticipate: §7.5 (beacon priority + continuous tempo +
+   trend-driven beep), built the same day after field-testing 3 and 4 back to back surfaced that the
+   beacon's tempo needed the same continuous-mapping treatment §8.1e had just given the waypoint
+   sonar — directly contradicting §7.3c's original "keep tempo discrete" design. See §7.5 for the
+   full account, including a self-inflicted "choppy" regression in the first cut of that follow-on.
+5. ~~**§8.1f** — delete `rapidPulse()`.~~ ✅ done.
+6. **§8.1b / §8.2 / §8.3** — of the three, only §8.1b was tried, on the grounds that step 3's field
+   report ("choppy") pointed at it. ❌ **It broke the device on hardware** (button unresponsive, buzzer
+   silent) — reverted same day. Root cause was I2C bus contention with the touch driver, not the CPU
+   cost the change was reasoned about; see §8.1b for the corrected analysis. §8.2 and §8.3 remain
+   untried, and this result is a reason for more caution before trying them, not less.
 
-**None of this is measured on hardware.** Every claim above is derived from reading the code, and the
-render effort's own record (§6, "the two cheapest changes delivered the most, and the largest rewrite
-returned the least") is the standing warning about how badly that can go. The audibility arguments in
-§8.1 are the strongest because they rest on arithmetic over constants in the source; §8.2 is the
-weakest and is flagged as such.
+**This was mostly measured on hardware, unlike when this section was written.** Steps 1, 2, 4 and the
+§8.1b attempt all now have hardware results — three confirmations and one revert. Step 3's *outdoor*
+GPS behaviour and steps 5's, 26's and 28's *feel* remain unverified by ear/observation, only their
+build correctness is confirmed. The render effort's own record (§6, "the two cheapest changes
+delivered the most, and the largest rewrite returned the least") remains the standing warning, and
+§8.1b's revert is this document's newest example of it: the *reasoning* behind a change (CPU cost)
+can be sound in isolation and still miss the resource that actually breaks.
 
 ---
 
@@ -1792,9 +1882,9 @@ of the time is in stage 3.
 | 13 | Doc reconciliation (§4.1) | S | — | — | open |
 | **14** | **Waypoint sonar hysteresis (§8.1d)** | XS | **stops audible tempo flicker** | Very low | ✅ verified, then **superseded by 19** |
 | **15** | **Phase-lock the sonar grid (§8.1a)** | XS | **removes 8 % beat jitter + 4 % flat tempo** | Very low | ✅ verified on hardware |
-| **16** | **Beacon: continuous passive scan (§7.3a)** | S | **2 → 5 Hz sample rate** | Low (power) | ✅ built, ⏳ unverified |
-| **17** | **Beacon: τ-based EMA + time-based zone confirm (§7.3b)** | S | **3.3 → 2.2 s, less jitter** | Low | ✅ built, ⏳ unverified |
-| **18** | **Beacon: continuous ring width from `rssi_display` (§7.3c)** | S | **4 states → continuous** | Low | ✅ built, ⏳ unverified |
+| **16** | **Beacon: continuous passive scan (§7.3a)** | S | **2 → 5 Hz sample rate** | Low (power) | ✅ **verified live: 4.24–4.37 Hz** |
+| **17** | **Beacon: τ-based EMA + time-based zone confirm (§7.3b)** | S | **3.3 → 2.2 s, less jitter** | Low | ✅ built; `DISPLAY_TAU_S` corrected 1.0→2.0s by step 28 |
+| **18** | **Beacon: continuous ring width from `rssi_display` (§7.3c)** | S | **4 states → continuous** | Low | ✅ built, ring ⏳ unverified; **tempo did NOT stay discrete as designed — see step 28** |
 | **19** | **Continuous waypoint sonar tempo + arrival stop (§8.1e)** | S | **subsumed step 14**; progressive approach, calmer far out, silences on arrival | Low | ✅ built, ⏳ unverified |
 | 20 | Delete blocking `rapidPulse()` (§8.1f) | XS | — (hygiene) | Very low | ✅ done |
 | 21 | Beacon: confirm active-scan callback deferral (§7.3d) | XS | — (diagnostic) | — | ✅ **confirmed from source**, no code needed |
@@ -1803,10 +1893,12 @@ of the time is in stage 3.
 | 24 | GPS bulk UART read (§8.3) | S | Core 0 CPU only | Low | open |
 | **25** | **Panel ISR core check (§1.5)** | XS | — (diagnostic) | — | ✅ **CONFIRMED: ISR on core 1, shared with uiTask** |
 | **26** | **`Serial` fflush gating (§3.5)** | S | ~~reliability~~ **small efficiency** — premise was wrong, see §3.5 | Low | ✅ built, ⏳ unverified |
-| 27 | Bounce-buffer A/B — remove for 18.75 KB SRAM (§1.4) | S | SRAM; ms unknown | Medium | open, measure first |
+| 27 | Bounce-buffer A/B — remove for 18.75 KB SRAM (§1.4) | S | SRAM; ms unknown | Medium | open, measure first — now linked to step 25, same A/B answers both |
+| **28** | **Beacon absolute priority + continuous sonar tempo + trend-driven beep (§7.5)** | S | fixes "beeping is choppy" and "silent beacon" field reports | Low | ✅ built same day as 16–18; priority + choppy-fix feel ⏳ not separately re-tested |
 
-Steps 14–18 are the highest-value open items in this document, and **none of them are render work**.
-Steps 14, 15 and 20 are XS and independent of everything else — see §8.6 for the recommended order.
+Steps 14–19 and 28 are **done**, and none of them were render work. Steps 14, 15 and 20 were XS and
+independent of everything else. What's actually still open in this list: 23, 24, 27, and re-listening
+verification of 17/18/19/26/28's *feel* rather than their measured numbers.
 
 **What the completed work changed about this plan.** The original ordering assumed smoothness had to
 be bought with steps 7–10 first, and listed the heading decouple last as the thing that finally cashes
