@@ -309,23 +309,52 @@ void scanBus() {
         xSemaphoreTakeRecursive(g_bus_mutex, portMAX_DELAY);
     }
 
+    // ⚠️ This scan used to report ~61 phantom devices and was believed for months.
+    // Measured 2026-07-31: back-to-back i2c_master_probe() calls return a false
+    // ESP_OK on ALTERNATE calls. The evidence is the address list itself — hits
+    // landed on every second address (0x0A 0x0C 0x0E 0x10 ... 0x7E) with occasional
+    // phase slips, on a healthy, freshly power-cycled device whose UI, touch and
+    // beacon all worked. No physical bus produces that pattern; a strict alternation
+    // is an artifact of the probe loop, not 61 slaves.
+    //
+    // Two guards, because a diagnostic that lies is worse than no diagnostic — this
+    // one actively misled a freeze investigation toward "wedged bus":
+    //   1. a settle delay between probes, so each starts from an idle bus;
+    //   2. double confirmation — a real slave ACKs every time it is asked, a phantom
+    //      only on the alternating beat, so requiring two consecutive ACKs rejects it.
+    // The raw count is printed alongside the confirmed one: if they ever diverge
+    // again, the artifact is back and the scan is not to be trusted.
     Serial.println("==== I2C Bus Scan ====");
     int found = 0;
+    int raw_hits = 0;
     for (uint8_t addr = 1; addr < 0x7F; addr++) {
-        if (i2c_master_probe(g_bus_handle, addr, pdMS_TO_TICKS(5)) == ESP_OK) {
-            found++;
-            const char* name = "Unknown";
-            for (const auto& d : known) {
-                if (d.addr == addr) { name = d.name; break; }
-            }
-            Serial.printf("  0x%02X  -  %s\n", addr, name);
+        if (i2c_master_probe(g_bus_handle, addr, pdMS_TO_TICKS(5)) != ESP_OK) {
+            vTaskDelay(pdMS_TO_TICKS(2));
+            continue;
         }
+        raw_hits++;
+        vTaskDelay(pdMS_TO_TICKS(2));
+        if (i2c_master_probe(g_bus_handle, addr, pdMS_TO_TICKS(5)) != ESP_OK) {
+            vTaskDelay(pdMS_TO_TICKS(2));
+            continue;   // one ACK only — the alternation artifact, not a device
+        }
+        found++;
+        const char* name = "Unknown";
+        for (const auto& d : known) {
+            if (d.addr == addr) { name = d.name; break; }
+        }
+        Serial.printf("  0x%02X  -  %s\n", addr, name);
+        vTaskDelay(pdMS_TO_TICKS(2));
     }
 
     if (found == 0) {
         Serial.println("  No devices found! Check wiring.");
     } else {
         Serial.printf("Found %d device(s)\n", found);
+    }
+    if (raw_hits != found) {
+        Serial.printf("  (%d single-ACK hits rejected as probe artifacts — see comment at scanBus)\n",
+                      raw_hits - found);
     }
     Serial.println("======================");
 

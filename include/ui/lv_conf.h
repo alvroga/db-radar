@@ -18,7 +18,15 @@
 #define LV_TICK_CUSTOM_SYS_TIME_EXPR ((uint32_t)(esp_timer_get_time() / 1000LL))
 
 // Display
-#define LV_DISP_DEF_REFR_PERIOD 10  // 10ms = 100Hz refresh (Waveshare optimization for smooth scrolling)
+// 10ms reads like a 100Hz refresh request on a panel that runs at 10MHz/(528x502) = 37.7Hz. It is
+// not one, and it is NOT what paces rendering — the UI Task's vsync gate is (task_manager.cpp).
+// Verified in LVGL 8.3 source before leaving it alone:
+//   - hal/lv_hal_disp.c:195 — this is the period of disp->refr_timer, which only decides how soon
+//     after an invalidate a refresh may START. With nothing invalidated it does no work, so the
+//     "100Hz" never happens; raising it to 26ms would just add up to 26ms of latency per redraw.
+//   - misc/lv_anim.c:59 — the same macro sets the ANIMATION timer period. Changing it here retimes
+//     every animation in the UI, which is the real reason not to "fix" this value.
+#define LV_DISP_DEF_REFR_PERIOD 10
 #define LV_DPI_DEF 130
 
 // Input devices

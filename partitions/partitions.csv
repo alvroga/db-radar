@@ -1,3 +1,8 @@
+# ⚠️ UNUSED — NOT THE LAYOUT ON THE DEVICE.
+# platformio.ini builds with partitions_ota.csv (2 x 2MB OTA + ~11.7MB FFat). This single-app
+# 3MB/10MB table is the pre-OTA layout, kept only for reference. Nothing reads it; do not consult
+# it when reasoning about flash usage or free space.
+#
 # Name,   Type, SubType, Offset,  Size,   Flags
 # 16MB flash: 3MB app + 10MB FFat with standard offsets
 # Partition table @ 0x8000 (implicit), bootloader before that.

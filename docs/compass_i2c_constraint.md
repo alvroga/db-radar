@@ -1,5 +1,40 @@
 # Compass I2C Read Rate Constraint
 
+> ## ⚠️ Corrected 2026-07-31 — the mechanism below is stale
+>
+> **This document's root cause — "the LVGL CST820 touch driver calls `Wire` directly, bypassing
+> `i2c_mutex`" — does not describe the current firmware.** It was written against the Arduino-core
+> build (its evidence, `[E][Wire.cpp:499] requestFrom()`, is an Arduino `Wire` log line). After the
+> ESP-IDF migration:
+>
+> - There is **no `Wire` usage anywhere** in `src/` or `include/` (only one stale comment in
+>   `include/hardware/display/cst820.h`).
+> - `cst820_read()` reads through `i2c_manager::read()` (`src/hardware/display/cst820.cpp:19`),
+>   exactly like the RTC, EXIO and compass.
+> - Every one of those calls is serialized by `g_bus_mutex`, a recursive mutex with a 200 ms acquire
+>   timeout (`src/hardware/i2c/i2c_manager.cpp`). **There is no unprotected participant on the bus.**
+>
+> **So the stated reason the compass cannot be read from the I2C Task no longer applies.** What is
+> *not* established is that the constraint itself is void: nobody has re-tried moving the compass read
+> to the I2C Task since the migration, so the conclusion is **untested under the current stack**, not
+> disproved. Treat it as an open question, not as a settled prohibition and not as a green light.
+>
+> The same stale mechanism had propagated into `docs/compass.md`, `CHANGELOG.md` and
+> `docs/performance_optimization_backlog.md` §8.1b, where it was being used to explain a *different*
+> failure (the `I2C_PROCESS_MS` 20 → 10 ms revert). All are corrected; see §8.1b for what survives of
+> that explanation, which is the empirical result only.
+>
+> **If anyone picks this up**, the cheap first step is a measurement, not a rewrite: move the compass
+> read to the I2C Task behind a runtime flag, watch `i2c_manager::getStats()` (`total_ops`,
+> `failed_ops`, `consecutive_failures`) and the task-health output, and see whether anything actually
+> degrades. The infrastructure to observe it exists now and did not when this document was written.
+>
+> The original text is preserved unedited below as the historical record.
+
+---
+
+# ⬇ ORIGINAL (Arduino-era) ANALYSIS — HISTORICAL, mechanism superseded
+
 ## The Problem
 
 Increasing compass (QMC5883L) read frequency by moving it from the System Task to the I2C Task immediately causes:
@@ -56,3 +91,8 @@ Moving the compass block verbatim from `systemTask()` to `i2cTask()` — same co
 2. Upload `cc-radar-compass` build (`pio run -e cc-radar-compass -t upload`)
 3. Move compass read from System Task to I2C Task (or increase System Task loop rate)
 4. Reaction time drops from ~5s to ~100ms
+
+> **Note (2026-07-31)**: steps 1–2 are also obsolete for a second, independent reason — the
+> `cc-radar-compass` build environment was removed on 2026-03-14 (the cable-swap approach is not
+> being pursued), and the compass now reads at **10 Hz** from the System Task, not the ~0.2 Hz this
+> document describes.

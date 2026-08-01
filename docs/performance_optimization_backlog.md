@@ -13,7 +13,135 @@ a **full audit of every remaining subsystem** — sonar/buzzer, input latency, G
 **The highest-value open work in this document is now in those two sections, not in §1–§6.** Unlike
 §1–§6 none of it is measured on hardware yet; the confidence of each claim is stated inline.
 
-**Date**: 2026-07-27 (measurements + completions: 2026-07-28; §7 + §8 added 2026-07-31)
+**Date**: 2026-07-27 (measurements + completions: 2026-07-28; §7 + §8 added 2026-07-31; work queue
+merged in from the former `docs/TODO_next_session.md` 2026-07-31)
+
+---
+
+## 🔭 WORK QUEUE — what to actually do next
+
+**This is the only live to-do list for this effort.** `docs/TODO_next_session.md` was a second,
+parallel copy of it and has been deleted — everything it tracked is either here or already in §7/§8.
+Sections below this one are the analysis and the record; this one is the plan.
+
+**Last verified state**: builds clean at **RAM 132,392 B (40.4%), flash 1,608,243 B (76.7%)**;
+on-device, radar + beacon discovery + sound + button all confirmed working after the
+`I2C_PROCESS_MS` revert. Frame ~85 ms against a 10 Hz sensor feed.
+
+### Standing rules
+
+- **Don't commit until the change is verified on hardware** (docs-only commits excepted).
+- **Measure build impact (RAM/flash) on every code change** — stash-build-restore for the baseline.
+- **Never attribute an un-instrumented residual to a hypothesis.** Bracket it with
+  `esp_timer_get_time()` first. See "The residual trap".
+- **Read the IDF/library source before implementing anything that rests on a claim about its
+  behaviour** — `grep -rn "<thing>" ~/.platformio/packages/framework-espidf/components/`. **Four**
+  items in this document were void or misattributed that way.
+- **A verified symptom and an unverified cause are different things** — §8.1b's stale root cause is
+  the standing example. Don't write them in the same voice, and don't build on the second one.
+
+### 0. Do this first: one field session, no code
+
+Five changes are built, healthy in the build, and **unverified on hardware**. They are stacked on
+each other, so anything further built before this session lands on an unverified base.
+
+- [ ] **§8.1e** — walk a fixed waypoint in from ~50 m at 50 m zoom. Tempo should *glide* with no
+      steps, be noticeably calmer beyond ~25 m, and go silent the moment you tap the waypoint within
+      15 m. Check it re-engages if you unfix/refix.
+- [ ] **§7.5 priority release** — fix a waypoint, walk into beacon range, confirm the fix releases
+      and the beacon takes the buzzer.
+- [ ] **§7.5 choppy-sonar fix** — hunt the tag; the tempo should feel like a smooth glide and the
+      beep-length change should read as a trend signal, not as noise.
+- [ ] **§7.3a battery drain** — 100% scan duty is the one genuinely new cost, zoom-gated to 50 m. If
+      it's objectionable, `SCAN_WINDOW_MS` is the single knob (80 ms → 80% duty).
+- [ ] **§8.3 GPS chunked UART read** (added 2026-07-31) — fix acquired, sat count normal, heading
+      tracks. Core 0 only, so a failure here can't be confused with the audio/beacon items above.
+- [ ] **I2C bus watchdog** — nothing to trigger deliberately; watch for `[I2C] ... bus appears
+      wedged, attempting recovery` and whether a freeze now self-clears in ~2-4 s. Retune the
+      10 / 2000 ms / 5 constants **only** from real log data, never by re-deriving the reasoning that
+      picked them.
+
+⚠️ **Confirm what the tag's advertising interval is currently set to** before assuming 200 ms.
+
+### 1. Open bugs
+
+- [ ] ⚠️ **The "recurring freeze = wedged I2C bus" root cause is no longer supported.** Two of its
+      three legs failed inspection on 2026-07-31 (see CHANGELOG → Unreleased → Fixed):
+      the 61-device scan was a **probe-loop artifact** (fixed and verified, 61 → 6), and
+      `[I2C] Bus reset OK` is **unverifiable on ESP32-S3** per the IDF source. What survives — one
+      failed EXIO boot ping, one standby-wake coincidence — is suggestive, not conclusive, and the
+      watchdog built on it did not rescue the evening freeze. The recovery code is cheap and stays;
+      the *diagnosis* needs redoing from fresh evidence. **On the next real freeze** (screen dead,
+      button dead — confirmed by looking at the device, not by serial silence) run `diag i2c` and
+      `task status`: the scan is now trustworthy, and the loop counters identify which task stopped.
+- [ ] **Do not diagnose a freeze from serial silence.** The USB console went dead for ~4 minutes on
+      2026-07-31 while the device kept working perfectly — touch, zoom and beacon all fine. Silence
+      on the host proves nothing about the firmware. Both a subagent and the main agent called it a
+      "boot hang" before the device owner pointed out it was running.
+
+- [ ] **DEV/perf HUD froze at stale values** after a self-recovered I2C freeze, while touch, button,
+      sound and rotation all came back. The recorded hypothesis (dangling `ui.perf_label`) **looks
+      weak**: the label is created once on the radar stage (`ui_manager.cpp:311`) and nothing deletes
+      it — `lv_obj_del` appears only for the standby screen and the WiFi modals. If it recurs, try
+      `dev off` / `dev on` first; that one command discriminates between the pointer theory and a
+      render-path stall. Not root-caused.
+- [ ] **§8.1b `I2C_PROCESS_MS` 10 ms failure is un-diagnosed.** The symptom and the revert are
+      confirmed on hardware; the *cause* written down for it was stale (see §8.1b). Do not retry
+      10 ms on the strength of "the `Wire` bypass is gone".
+
+### 2. Code work, ranked
+
+- [ ] **§1.4 / §1.5 bounce-buffer A/B** *(S, medium risk)* — one `BOUNCE_BUFFER_LINES = 0` build
+      answers both items and frees **18.75 KB SRAM**. The safety blocker isn't one:
+      `on_frame_buf_complete` fires in both modes (`esp_lcd_panel_rgb.c:871`). But the panel would
+      then stream directly from PSRAM, competing with `rotate`. **Two builds + the `perf` HUD, be
+      ready to revert** — risk lands on display stability, which is currently flawless. Give it its
+      own session; do not fold it into the §0 field build, or a regression can't be attributed.
+- [x] **§8.3 GPS bulk UART read** — ✅ **built 2026-07-31, awaiting hardware verification.** Now
+      reads up to 256 bytes per `uart_read_bytes()` call instead of 1; ~100 syscalls per NAV-PVT
+      frame become 1. UBX state machine untouched. +88 B flash, +256 B System Task stack, ±0 static
+      RAM. **Verify**: still acquires a fix, sat count normal, heading tracks. Add to the next field
+      session — it's independent of §0's audio/beacon checks, so a regression is still attributable.
+- [ ] **§3.6 recompute less per frame** — hoist `cos`/`sin`, equirectangular instead of Haversine.
+      Also the prerequisite for raising `MAX_WAYPOINTS` past 50: read `wpt_us` off the `perf` HUD
+      first, since the per-waypoint Haversine is soft-float `double` on a single-precision FPU. The
+      PSRAM move freed the headroom but did **not** raise the cap.
+- [ ] **§8.2 decouple touch polling** *(M)* — ~11.7 Hz, fine for taps, coarse for drags. **Weakest
+      claim in the audit — justify by actual annoyance before paying for it.**
+- [ ] **§8.1c buzzer EXIO read-modify-write** — 2 transactions per edge. Only worth it if the tick
+      rate goes up, which §8.1b currently blocks.
+- [x] **§4.1 / §4.2 hygiene** — ✅ **done 2026-07-31.** Comments and docs only, no behaviour change
+      (+8 B flash, alignment noise). Covered: the 5 Hz→10 Hz GPS comments and `STABLE_SAMPLES`'
+      silently-halved meaning, the void CDC-stall justification, the vsync gate that doesn't gate,
+      `LV_DISP_DEF_REFR_PERIOD` (kept at 10 — LVGL source read first; it also retimes animations),
+      `flash_mode = dio` (correct, annotated so nobody "fixes" it), the orphaned
+      `partitions/partitions.csv`, and four false `CLAUDE.md` claims — Arduino build config, the
+      superseded display section (bounce buffer / `full_refresh` / sw-rotation all inverted), GPS-NMEA
+      heading fusion, and an unmeasured "<2 ms waypoints". Full list in CHANGELOG → Unreleased →
+      Documentation. **Remaining §4.2 dead weight, not done**: `gyro_qmi8658.cpp` (305 unused lines),
+      the four stale `.pio/libdeps/` envs, `lv_conf.h` disabling nothing.
+
+### 3. Explicitly do NOT do
+
+`-O2` (spends flash, the scarcest resource, to buy ms that can't be spent) · cache sizes (costs
+48 KB SRAM) · higher PCLK (may be net-negative, §2.4) · grid-as-rects (§3.1 — paint measured 1.01× on
+a 1.5× clock, so it is not compute-bound) · `bb_invalidate_cache` (**void**, no implementation in
+IDF 5.5) · `I2C_PROCESS_MS` 10 ms (**void**, broke the device).
+
+### 4. Verified healthy — don't re-audit
+
+**Compass** (200 Hz ODR / 512× OSR, read at 10 Hz, EMA correctly re-derived 0.8 → 0.3 when the rate
+changed — the example the others should follow) · **battery** (15-sample averaging, 30 s history) ·
+**button** (~85 ms worst case; a real press is 132–186 ms) · **render** (85.2 ms/frame outruns the
+10 Hz sensor feed; four flags are load-bearing, see CLAUDE.md).
+
+### 5. Out of scope for this queue
+
+**Beacon direction finding** is an *experiment*, not an optimization — feasibility risk on something
+unproven, where everything else here is regression risk on something that works. It is unblocked
+(4.24–4.37 Hz measured live) and tracked under **Planned** in [`../ROADMAP.md`](../ROADMAP.md), with
+the design in [`beacon_direction_finding.md`](beacon_direction_finding.md). Opt into it explicitly;
+don't fold it into a performance pass.
 
 ---
 
@@ -603,11 +731,25 @@ constant is the confirmed cause, not a coincidence.
 
 The cost analysis above ("cheap, slightly wasteful") was wrong because it only counted **this task's
 own CPU**, which is indeed trivial — a non-blocking queue drain and a few timestamp compares. It never
-counted the **I2C bus**, which is the actual contended resource. The CST820 touch driver calls `Wire`
-directly, bypassing `i2c_mutex` entirely (`docs/compass_i2c_constraint.md` — the same constraint that
-blocks reading the compass from the I2C Task). Doubling this task's rate therefore doubles the
-collision rate against an already-contended bus, and the EXIO writes that drive the buzzer, plus the
-button's own reads, start failing.
+counted the **I2C bus**, which is the actual contended resource, and the failure is on the bus side.
+
+> ⚠️ **The mechanism originally written here was stale, and is corrected as of 2026-07-31.** This
+> section used to explain the failure as *"the CST820 touch driver calls `Wire` directly, bypassing
+> `i2c_mutex`"*, citing `docs/compass_i2c_constraint.md`. **That is not true of this codebase.** There
+> is no `Wire` usage anywhere in `src/` or `include/` — `cst820_read()` goes through
+> `i2c_manager::read()` (`src/hardware/display/cst820.cpp:19`) like every other device, serialized by
+> the recursive `g_bus_mutex`. The claim describes the pre-ESP-IDF Arduino build, whose evidence is an
+> `[E][Wire.cpp:499]` log line this firmware cannot emit.
+>
+> **What survives**: the empirical result (10 ms broke the button and buzzer; 20 ms restored them,
+> both confirmed on hardware) and the conclusion that the bus, not the CPU, is what the change
+> overspent. **What does not**: any account of *how*. Plausible remaining candidates — none measured —
+> are total transaction volume against a 400 kHz bus shared with an ~11.7 Hz touch poll, mutex
+> queueing pushing touch or EXIO writes past their 200 ms acquire timeout, or the doubled wakeup rate
+> starving something else on Core 0. **This is a residual wearing a name.** Per this document's own
+> rule, do not act on the stale mechanism, do not treat "the `Wire` bypass is gone, so it's safe now"
+> as a reason to retry 10 ms, and bracket the actual failure with instrumentation before proposing
+> anything against it.
 
 **So `I2C_PROCESS_MS = 20` is a tuned value, not an arbitrary one**, and 20 ms is a hard floor on sonar
 timing resolution for as long as the buzzer is driven over the shared bus. Beat steadiness has to be
@@ -622,8 +764,15 @@ bought somewhere else:
   safer — it moves *when* edges are driven, not *how often the bus is touched*.
 
 **Generalisable lesson**: on this board, "the CPU cost is negligible" is not a sufficient argument for
-raising any rate. The shared I2C bus is the scarce resource, and it has an undisciplined participant
-(the touch driver) that no mutex protects.
+raising any rate that touches I2C. The shared bus is the scarce resource — touch, RTC, EXIO and the
+buzzer all contend for it — and this rate was raised without anyone measuring what that contention
+costs.
+
+**Second lesson, from the correction above**: the *explanation* of a hardware failure decays exactly
+like a performance estimate does. This one was inherited from a doc written for a different I2C stack
+and repeated into three files before anyone checked whether the code still looked like that. A
+verified symptom and an unverified cause are different things and should never be written in the same
+voice.
 
 #### 8.1c Every buzzer edge costs two I2C transactions instead of one
 
@@ -761,8 +910,16 @@ followed by a byte loop over it would cut the syscall count ~100×.
 This is on **Core 0**, so it never touches the render, and the device works. Low priority, but it is
 free CPU sitting on the floor next to the compass and I2C tasks.
 
-Also stale: the comment at `task_manager.cpp:~1205` still says *"Sampling runs at 5Hz
-(GPS_UPDATE_INTERVAL_MS)"*. It is 10 Hz. Folds into §4.1 doc reconciliation.
+**✅ Implemented 2026-07-31** — 256-byte chunked read, refilling while more is queued. The UBX state
+machine is unchanged and still byte-wise; parser state already lived in statics across `read()`
+calls, so a chunk boundary falling mid-message costs nothing. +88 B flash, +256 B System Task stack
+(8 KB available), ±0 static RAM. **Not yet verified on hardware** — in the §0 field batch.
+
+⚠️ **The syscall saving is reasoned, not measured.** Nobody has instrumented `read()` before or
+after, so "~100×" is a call-count ratio, not a time saving — the actual CPU recovered is unknown and
+could be small. Do not quote a millisecond figure for this. (See "The residual trap".)
+
+~~Also stale: the comment at `task_manager.cpp:~1205`...~~ ✅ fixed in the §4.1 hygiene pass.
 
 ### 8.4 Healthy — no action
 
@@ -1498,7 +1655,17 @@ board_build.flash_mode = qio
   immediate and obvious, not subtle.
 - **Also check**: the two files disagreeing is a bug in itself. Pick one place to set flash mode.
 
-### 1.9 LVGL is asked to refresh at 100 Hz on a 37.7 Hz panel
+### 1.9 LVGL is asked to refresh at 100 Hz on a 37.7 Hz panel — ✅ CLOSED, no change 2026-07-31
+
+**It isn't asked to, and the value must stay at 10.** Reading LVGL 8.3 before touching it (per the
+standing rule) found two things the item didn't know:
+- `hal/lv_hal_disp.c:195` — the macro is `disp->refr_timer`'s period, which only decides how soon
+  after an *invalidate* a refresh may start. With nothing invalidated it does no work, so the "100 Hz"
+  never happens; the vsync gate and the invalidate rate pace rendering, not this.
+- `misc/lv_anim.c:59` — **the same macro sets the animation timer's period.** Raising it to 26 ms
+  would retime every animation in the UI while saving nothing.
+
+Closed by commenting, which is what the item's own fallback suggested.
 
 `lv_conf.h`: `#define LV_DISP_DEF_REFR_PERIOD 10`. The panel refreshes at
 `10 MHz / (528 × 502) = 37.7 Hz`. Rendering more often than the panel can show is pure waste; every
@@ -1716,7 +1883,12 @@ The render-coalescing in C2 caps renders at **one per loop iteration** regardles
 which is the "process one render-class update per loop" option this item proposed. Non-render queue
 items (battery, screen loads, beacon dBm) are still processed up to 4 per loop, but they are cheap.
 
-### 3.4 The vsync gate doesn't actually pace anything
+### 3.4 The vsync gate doesn't actually pace anything — ✅ CLOSED (commented) 2026-07-31
+
+Finding confirmed and now documented at the call site (`task_manager.cpp`). **Deliberately left as a
+binary semaphore**: a counting one would pace correctly but would also queue up every missed frame,
+so after an overrun the loop would render a burst of already-stale frames back to back — worse than
+free-running. Revisit only if frame time ever drops below one panel period.
 
 ```c
 xSemaphoreTake(vsync_sem, pdMS_TO_TICKS(30));
@@ -1810,14 +1982,14 @@ This matters more than it looks: several of the findings above are cases where a
 | Doc claim | Reality |
 |---|---|
 | ~~`CLAUDE.md`: "MCU: ESP32-S3 @ 240MHz"~~ | ~~Builds at **160 MHz**~~ — resolved 2026-07-28, now genuinely builds at 240 (§1.1) |
-| `CLAUDE.md`: "framework = arduino", `[env:cc-moat-port]` | `platformio.ini` is `framework = espidf`, `[env:cc-radar]` |
-| `CLAUDE.md`: "ESP-IDF version doesn't support bounce buffer" | Bounce buffer is configured and active (§2.4) |
-| `CLAUDE.md`: "40-line bounce buffer", "BUFFER_LINES 40/50/120/160" | `BUFFER_LINES = 480` |
-| `CLAUDE.md`: "Use full refresh for stability / `full_refresh = 1`" | Code sets `full_refresh = 0` |
-| `CLAUDE.md`: partitions "3MB app + 10MB FFat" | Build uses `partitions_ota.csv` — 2×2 MB OTA + 11.7 MB FFat |
+| ~~`CLAUDE.md`: "framework = arduino", `[env:cc-moat-port]`~~ | ✅ fixed 2026-07-31 |
+| ~~`CLAUDE.md`: "ESP-IDF version doesn't support bounce buffer"~~ | ✅ fixed 2026-07-31 — bounce buffer is configured and active (§2.4) |
+| ~~`CLAUDE.md`: "40-line bounce buffer", "BUFFER_LINES 40/50/120/160"~~ | ✅ fixed 2026-07-31 — 10-line bounce buffer, `BUFFER_LINES = 480` |
+| ~~`CLAUDE.md`: "Use full refresh for stability / `full_refresh = 1`"~~ | ✅ fixed 2026-07-31 — it tracks rotation mode: `1` in TILED (the default), `0` otherwise |
+| ~~`CLAUDE.md`: partitions "3MB app + 10MB FFat"~~ | ✅ fixed 2026-07-31 — `partitions_ota.csv`, 2×2 MB OTA + 11.7 MB FFat |
 | ~~`CLAUDE.md` / memory: compass "~1 Hz"~~ | ~~Read gate is 20 ms, effective ~5 Hz~~ — resolved 2026-07-28: `SYSTEM_UPDATE_MS = 100`, so compass and GPS are both 10 Hz |
-| `CLAUDE.md`: GPS heading fusion, "NMEA RMC sentence fields 7-8" | Compass is the sole heading source; GPS is UBX |
-| Docs: "<2ms for 50 waypoints @ 240MHz" | Waypoint drawing is ~5 ms; the *full frame* is ~149 ms @ 160 MHz |
+| ~~`CLAUDE.md`: GPS heading fusion, "NMEA RMC sentence fields 7-8"~~ | ✅ fixed 2026-07-31 — compass is the sole heading source at 10 Hz; GPS is UBX, position only |
+| ~~Docs: "<2ms for 50 waypoints @ 240MHz"~~ | ✅ fixed 2026-07-31 — the figure was never measured; ~5 ms instrumented, now points at `wpt_us` |
 
 **Partly reconciled 2026-07-28**: `CLAUDE.md` gained a Render Pipeline section covering the current
 architecture (no canvas, tiled transpose, the two load-bearing style constraints) and the 240 MHz
@@ -1830,8 +2002,9 @@ disagrees. The remaining rows are still drift and still worth a pass.
 - Four stale build environments in `.pio/libdeps/` (`cc-moat-port`, `cc-radar-compass`,
   `sd_card_coexistence`, `waveshare-esp32-s3-lcd-2_1`), each with a full LVGL copy. Disk only, but
   they make grep/tooling noisy and can confuse a rebuild.
-- `partitions/partitions.csv` is no longer referenced by `platformio.ini` (which points at
-  `partitions_ota.csv`); it's still shipped and describes a layout the firmware doesn't use.
+- ~~`partitions/partitions.csv` is no longer referenced by `platformio.ini`~~ — ✅ flagged
+  2026-07-31 with an `⚠️ UNUSED` header saying which file the build actually uses. Deletion was the
+  intent but was blocked by a permission prompt; delete it when convenient.
 - `lv_conf.h` disables nothing. LVGL defaults compile in every widget, every theme and every layout
   engine. Flash-size only, but §1.2 will make flash tighter — this is where to claw it back.
 

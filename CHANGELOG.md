@@ -9,7 +9,109 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+**GPS UART drained in chunks instead of one syscall per byte (backlog §8.3)** — ⏳ *not yet verified
+on hardware*
+
+`gps_bh880::read()` looped `uart_read_bytes(GPS_UART, &c, 1, 0)` — **one syscall per byte**, each
+taking the UART driver's ring-buffer lock. At 115200 baud with 10Hz NAV-PVT that is on the order of
+1–3k locked calls/sec on Core 0, for ~1000 bytes of actual data.
+
+**Fix**: read up to 256 bytes at a time into a stack buffer and step through it. 256 covers a whole
+NAV-PVT frame (100 bytes on the wire) plus slack in one call, so the common case is a single syscall
+where it was ~100; the loop refills while more is queued, so a backlog still drains fully in one
+`read()`. **The UBX state machine is untouched** — it is still byte-wise, and a chunk boundary can
+fall anywhere inside a message without affecting parsing, since parser state lives in statics across
+calls already.
+
+This is Core 0 only — it never touches render, audio or BLE. Verification is correspondingly narrow:
+still acquires a fix, satellite count normal, heading still tracks.
+
+**Build impact**: RAM 132,392 B (±0 static; +256 B transient on the System Task's 8KB stack),
+flash 1,608,147 → 1,608,235 B (+88 B).
+
+**Code references**: `src/hardware/sensors/gps_bh880.cpp` (`read()`).
+
+### Documentation
+
+**Hygiene pass — stale comments and config that described a different system (backlog §4.1/§4.2)**
+
+Comments and docs only; **no behaviour change** (flash moved +8 B, alignment noise from the LVGL
+rebuild). Every item was a place where a reader would have been actively misled:
+
+- **`CLAUDE.md` build config** — documented `[env:cc-moat-port]`, `framework = arduino` and
+  Arduino-only build flags. The build is `[env:cc-radar]`, `framework = espidf`. Replaced, with a
+  pointer that `sdkconfig.defaults` also governs behaviour.
+- **`CLAUDE.md` display section** — marked **SUPERSEDED** with a correction box. Three claims were
+  false: "ESP-IDF doesn't support bounce buffer" (a 10-line/18.75KB SRAM bounce buffer is active),
+  "`full_refresh = 0` / partial refresh" (it is `1` in the default TILED mode and must be), and
+  "software rotation" (replaced by the tiled transpose). Also "40-line bounce buffer" → 10-line.
+- **`CLAUDE.md` heading source** — still described GPS/NMEA-RMC heading fusion with a 0.5-knot
+  threshold and 1Hz updates. The compass is the sole heading source at 10Hz; GPS is UBX, not NMEA,
+  and supplies position only.
+- **`CLAUDE.md` waypoint perf** — "<2ms for 50 waypoints" was never measured and the instrumented
+  figure is ~5ms. Replaced with a pointer to `wpt_us` on the `perf` HUD.
+- **`system_config.h`, `task_manager.cpp`** — GPS sampling commented as 5Hz; it is 10Hz. Also
+  `STABLE_SAMPLES = 5`, whose real meaning silently halved (~1s → ~0.5s) when the rate doubled —
+  left at 5 (it only debounces a log line) but now says so, with a note on when a sample count
+  *must* be converted to a duration.
+- **`task_manager.cpp` CDC comment** — justified a log throttle with an unbounded USB CDC stall.
+  There is no such stall (`cdc_acm_fifo_fill` rolls back and returns 0 rather than waiting). The
+  throttle is still right, for the plain reason; the stated mechanism was fiction.
+- **`task_manager.cpp` vsync gate** — documented as pacing the render. It does not, at an ~85ms
+  frame: a binary semaphore given every 26.6ms is already signalled, so the take returns immediately
+  and the loop free-runs. Now says so, plus why a counting semaphore would be worse.
+- **`lv_conf.h` `LV_DISP_DEF_REFR_PERIOD 10`** — reads like a 100Hz request on a 37.7Hz panel. Kept
+  at 10, with the LVGL source verified before leaving it: `lv_hal_disp.c:195` shows it only gates how
+  soon a refresh may *start* after an invalidate, and `lv_anim.c:59` shows the same macro retimes
+  every animation — the real reason not to "fix" it.
+- **`platformio.ini` `flash_mode = dio`** — reads as contradicting `CONFIG_ESPTOOLPY_FLASHMODE_QIO=y`.
+  It doesn't: that only governs the ROM loader's initial load, and the 2nd-stage bootloader upgrades
+  to QIO at runtime. Annotated so it isn't "fixed" into a real bug.
+- **`partitions/partitions.csv`** — orphaned pre-OTA 3MB/10MB table, unreferenced since the build
+  moved to `partitions_ota.csv`. Header now says so. (Deletion was intended but blocked by a
+  permission prompt.)
+
 ### Fixed
+
+**`diag i2c` reported 61 phantom devices — the scan was lying, and it had misled a freeze
+investigation** — ✅ *verified on hardware: 61 → 6*
+
+`scanBus()` probed all 126 addresses with back-to-back `i2c_master_probe()` calls. Those return a
+false `ESP_OK` on **alternate** calls, so the scan reported ~61 devices on a bus that has five.
+
+**The proof is the address list, not a theory.** Hits landed on every second address —
+`0x0A 0x0C 0x0E 0x10 0x12 ... 0x7C 0x7E` — with occasional phase slips, and the *set changed between
+consecutive scans* while the total stayed at 61. Real devices appeared only when the phase happened
+to align (0x51 in one scan, 0x15 in another, neither in both). No physical bus produces a strict
+alternation; that pattern is an artifact of the probe loop. Captured on a healthy, freshly
+power-cycled device whose touch, zoom and beacon all worked normally.
+
+**Fix**: a 2 ms settle delay between probes so each starts from an idle bus, plus **double
+confirmation** — a real slave ACKs every time it is asked, a phantom only on the alternating beat, so
+requiring two consecutive ACKs rejects it. The raw hit count is printed alongside the confirmed one,
+so if the artifact ever returns the scan says so instead of lying again.
+
+**Measured on hardware**: `Found 61 device(s)` → `Found 6 device(s)` — 0x0D compass, 0x15 touch, 0x20
+EXIO, 0x51 RTC, 0x6B IMU (0x7E is a reserved address and a residual artifact), with **56 single-ACK
+hits rejected**, matching the prediction.
+
+**Why this matters beyond the diagnostic**: this scan's output was part of the evidence for the
+"recurring freeze = wedged I2C bus" root cause. That leg is now void. Combined with the second
+finding below, the wedged-bus diagnosis should no longer be treated as established — see ROADMAP FT-06
+and the backlog work queue.
+
+**Also established this session (no code change)**: `[I2C] Bus reset OK` proves nothing on this chip.
+Read from the IDF 5.5 source: `i2c_master_bus_reset()` → `s_i2c_hw_fsm_reset(clear_bus=true)` →
+`s_i2c_master_clear_bus()`, which on ESP32-S3 (`SOC_I2C_SUPPORT_HW_CLR_BUS=1`) waits with
+`while (i2c_ll_master_is_bus_clear_done(hal->dev))` — and that function is hardcoded
+`return false; // not supported on esp32s3`. The wait loop never runs; the call returns `ESP_OK`
+without waiting for or verifying the clear. Every recovery path we ship rests on this primitive.
+
+**Build impact**: RAM 132,392 B (±0), flash 1,607,995 → 1,608,155 B (+160 B).
+
+**Code references**: `src/hardware/i2c/i2c_manager.cpp` (`scanBus()`).
 
 **I2C bus freeze — recurring full-interface lockup, self-heal recovery added** — ⏳ *fix built and
 committed; effectiveness monitored in the field rather than verified, since a stuck bus can't be
@@ -44,8 +146,12 @@ same, already-proven recovery primitive into something that triggers proactively
 
 **Separately found alongside this, not fixed**: after the self-recovered freeze, the on-screen
 DEV/perf HUD label stayed frozen at stale values even though touch/button/sound/rotation all came
-back. Leading hypothesis is a dangling `ui.perf_label` LVGL pointer (its update is gated by
-`lv_obj_is_valid()`, which would silently no-op forever with no error) — not yet root-caused or fixed.
+back. The first hypothesis was a dangling `ui.perf_label` LVGL pointer (its update is gated by
+`lv_obj_is_valid()`, which would silently no-op forever with no error), but a follow-up read makes
+that look weak: the label is created once on the radar stage (`ui_manager.cpp:311`) and nothing
+deletes it — `lv_obj_del` appears only for the standby screen and the WiFi modals. Not root-caused or
+fixed; `dev off` / `dev on` on the next recurrence discriminates between the pointer theory and a
+render-path stall.
 
 **Build impact**: RAM 132,384 → 132,392 B (+8 B), flash 1,607,099 → 1,607,967 B (+868 B).
 
@@ -53,8 +159,10 @@ back. Leading hypothesis is a dangling `ui.perf_label` LVGL pointer (its update 
 `src/hardware/i2c/i2c_manager.cpp` (`init()`, `read()`, `write()`), `src/utils/task_manager.cpp`
 (`checkI2CBusHealth()`, called from `systemTask()`).
 
-**Full analysis**: [`docs/TODO_next_session.md`](docs/TODO_next_session.md) → "PRIORITY 1" ·
-[ADR-0003](docs/adr/0003-proactive-i2c-bus-recovery-watchdog.md) · ROADMAP.md → FT-06.
+**Full analysis**: [ADR-0003](docs/adr/0003-proactive-i2c-bus-recovery-watchdog.md) (why these
+thresholds, and the alternatives rejected) · ROADMAP.md → FT-06 ·
+[`docs/performance_optimization_backlog.md`](docs/performance_optimization_backlog.md) → work queue
+§0 (what to watch for in the field).
 
 ### Changed
 
@@ -127,11 +235,15 @@ Task's rate. On hardware: **button unresponsive, buzzer silent.** Reverted immed
 
 The cost analysis behind the change was wrong in a specific and generalisable way — it counted the I2C
 Task's own CPU cost (a non-blocking queue drain plus a few timestamp compares, genuinely trivial) and
-never counted the actual contended resource: the **I2C bus**. The CST820 touch driver calls `Wire`
-directly, bypassing `i2c_mutex` entirely (the same constraint documented in
-`docs/compass_i2c_constraint.md`, which is why the compass can't be read from the I2C Task either).
-Doubling this task's rate doubles the collision rate against an already-contended bus, so the EXIO
-writes driving the buzzer and the button's own reads start failing.
+never counted the actual contended resource: the **I2C bus**.
+
+> **Correction, 2026-07-31**: this entry originally went on to explain the failure as *"the CST820
+> touch driver calls `Wire` directly, bypassing `i2c_mutex`"*, citing `docs/compass_i2c_constraint.md`.
+> **That mechanism is stale** — it describes the pre-ESP-IDF Arduino build. There is no `Wire` usage
+> anywhere in `src/`or `include/`; `cst820_read()` goes through `i2c_manager::read()` under the
+> recursive `g_bus_mutex` like every other device. The symptom and the revert are confirmed on
+> hardware; **the cause is not known** and should be treated as un-diagnosed. See backlog §8.1b and
+> `docs/compass_i2c_constraint.md` for the full correction.
 
 **`I2C_PROCESS_MS = 20` is therefore a tuned floor, not an arbitrary constant**, and 20ms is a hard
 limit on sonar timing resolution (~8% jitter at a 250ms interval) for as long as the buzzer is driven
@@ -840,7 +952,7 @@ Replaced IMU/Gyro heading fusion with the QMC5883L magnetometer built into the B
 - All waypoints, off-screen indicators, and north indicator rotate from `ui.current_heading`
 - Reaction time: ~1s. Smooth for walking speed.
 
-**Critical I2C constraint**: Compass cannot be read from the I2C Task. The CST820 touch driver calls `Wire.requestFrom()` directly, bypassing `i2c_mutex`. Reading compass from I2C Task causes immediate `Wire.cpp requestFrom Error -1`. Must use System Task (tolerates occasional errors).
+**Critical I2C constraint**: Compass cannot be read from the I2C Task. The CST820 touch driver calls `Wire.requestFrom()` directly, bypassing `i2c_mutex`. Reading compass from I2C Task causes immediate `Wire.cpp requestFrom Error -1`. Must use System Task (tolerates occasional errors). *(Accurate for the Arduino build this entry describes; the `Wire` bypass no longer exists after the ESP-IDF migration — see `docs/compass_i2c_constraint.md`.)*
 
 **Reference**: `docs/compass_i2c_constraint.md`
 

@@ -1705,6 +1705,10 @@ void handleCompassCommand(const char* args) {
         Serial.println("  X      Y      Z    Raw Hdg  Cal Hdg");
         Serial.println("------  ------  ------  -------  -------");
 
+        // Discard any stray byte left over from the CRLF that ended this command line —
+        // otherwise the "press any key to stop" check below fires on it immediately.
+        while (Serial.available()) Serial.read();
+
         uint32_t start = millis();
         uint32_t samples = 0;
 

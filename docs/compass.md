@@ -10,7 +10,7 @@ The QMC5883L 3-axis magnetometer is built into the Beitian BH-880 module. Hardwa
 |----------|-------|
 | Chip | QMC5883L |
 | I2C address | 0x0D |
-| Bus | Shared Wire (SDA=GPIO15, SCL=GPIO7, 400kHz) |
+| Bus | Shared I2C bus via `i2c_manager` (SDA=GPIO15, SCL=GPIO7, 400kHz) |
 | ODR configured | 200Hz continuous |
 | Range | 2 Gauss |
 | OSR | 512 (best noise rejection) |
@@ -81,67 +81,82 @@ true_heading += compass_declination_deg;  // += for this hardware (not -=)
 
 ```
 QMC5883L hardware (200Hz, 2G, 512 OSR)
-  → System Task reads every ~1s (Wire bus constraint — see below)
+  → System Task reads every 100ms (SYSTEM_UPDATE_MS — 10Hz)
   → Hard-iron offsets applied (cal_x, cal_y from NVS)
   → atan2(cy, cx) → magnetic heading
   → WMM declination added → true heading
   → COMPASS_UPDATE queued to UI Task
-  → EMA smoothing (α=0.8, 1Hz updates)
+  → EMA smoothing (HEADING_SMOOTHING α=0.3 at 10Hz)
+  → 0.5° render deadband on the smoothed heading
   → ui.current_heading → radar rotates
 ```
 
-**Reaction time**: ~1 second after physical rotation (1Hz read rate).
-**Smoothing**: α=0.8 EMA settles within ~3 seconds after a 90° turn.
+**Reaction time**: ~100ms after physical rotation (10Hz read rate).
+**Smoothing**: α=0.3 EMA at 10Hz — re-derived from α=0.8 when the rate went 1Hz → 10Hz, so the
+settling *time* is preserved rather than the per-sample coefficient.
 
 ---
 
 ## I2C Bus Constraint
 
-### The Problem
+> ⚠️ **Corrected 2026-07-31.** The mechanism this section used to give — *"the LVGL CST820 touch
+> driver calls `Wire.requestFrom()` directly, bypassing `i2c_mutex`"* — was written for the
+> Arduino-core build and **does not describe the current ESP-IDF firmware**. There is no `Wire` usage
+> in `src/` or `include/` at all; touch reads go through `i2c_manager::read()`
+> (`src/hardware/display/cst820.cpp:19`) under the recursive `g_bus_mutex`, exactly like the RTC,
+> EXIO and compass. **No participant on the bus is unprotected.** Full correction:
+> [`compass_i2c_constraint.md`](compass_i2c_constraint.md).
 
-Attempting to read the compass more frequently (e.g., from the I2C Task at 50Hz) immediately causes:
+### The Problem (as originally observed, on the Arduino build)
+
+Attempting to read the compass more frequently (e.g., from the I2C Task at 50Hz) caused:
 ```
 [E][Wire.cpp:499] requestFrom(): i2cWriteReadNonStop returned Error -1
 ```
-Followed by UI freezes and eventual crash.
+Followed by UI freezes and eventual crash. That error string is an Arduino `Wire` log line and cannot
+be produced by the current firmware.
 
-### Root Cause
+### Status under the current stack: untested, not disproved
 
-All I2C devices share one bus (GPIO15/7). The LVGL CST820 touch driver calls `Wire.requestFrom()` **directly** — it bypasses `i2c_manager` and never acquires `i2c_mutex`. Touch reads happen at ~60Hz from the UI Task on Core 1. Compass reads on a different task (Core 0) collide with these unprotected touch transactions.
+Nobody has retried moving the compass read to the I2C Task since the ESP-IDF migration removed the
+unprotected path. So the *reason* for the constraint is gone, but the *conclusion* has not been
+re-tested — treat it as an open question rather than either a settled prohibition or a green light.
+Devices and who reads them today:
 
 | Device | Address | Who reads | Bus access |
 |--------|---------|-----------|-----------|
-| CST820 touch | 0x15 | UI Task (LVGL), ~60Hz | Direct Wire — no mutex |
-| QMC5883L compass | 0x0D | System Task, ~1Hz | Direct Wire — no mutex |
+| CST820 touch | 0x15 | UI Task (LVGL), ~11.7Hz | Via i2c_manager + mutex |
+| QMC5883L compass | 0x0D | System Task, 10Hz | Via i2c_manager + mutex |
 | PCF85063 RTC | 0x51 | I2C Task | Via i2c_manager + mutex |
 | TCA9554 EXIO | 0x20 | I2C Task | Via i2c_manager + mutex |
 
-The mutex protects RTC/EXIO from each other, but **cannot protect against the unprotected touch reads**. Compass reads from any high-frequency task will randomly collide with touch reads.
+If it is picked up, measure rather than reason: move the read behind a runtime flag and watch
+`i2c_manager::getStats()` (`total_ops`, `failed_ops`, `consecutive_failures`) plus task health. Note
+the one hard adjacent data point — raising the **I2C Task's own rate** from 20ms to 10ms did break the
+button and buzzer on hardware (backlog §8.1b), and *that* failure is also un-root-caused. The bus is
+still worth respecting; the old explanation for why just isn't evidence.
 
-### Why 1Hz Works
+### The hardware fix that was considered and dropped: a dedicated bus
 
-The System Task loops every 1000ms. A compass read takes ~1ms. Touch reads take ~1ms at 60Hz. The collision probability per compass read at 1Hz is very low (~0.1%). At 50Hz it becomes frequent (~5% per read = multiple errors per second).
+Moving the compass wires to a second bus (GPIO19/20, the USB D+/D− pins, free only when
+`ARDUINO_USB_CDC_ON_BOOT=0`) would have removed contention physically. **Not pursued** — it needs a
+cable swap and it disables the serial monitor, which on this board is also the only way to run
+diagnostics at all. The `cc-radar-compass` build environment that existed for it was **removed
+2026-03-14**.
 
-### The Real Fix: Dedicated I2C Bus
-
-Move compass wires to Wire1 (GPIO19/20 — currently USB D+/D-):
-- GPIO19/20 are free when `ARDUINO_USB_CDC_ON_BOOT=0` (serial monitor unavailable)
-- Move compass SDA → GPIO19, SCL → GPIO20
-- Call `i2c_manager::setCompassBus(&Wire1)` (infrastructure already exists)
-- Move compass read to I2C Task → 50Hz updates → smooth rotation
-
-This approach was implemented in the `cc-radar-compass` build environment but not pursued because it requires a hardware cable swap and disables serial monitoring. The 1Hz/1s reaction time is acceptable for walking navigation.
+It is also no longer motivated by the read rate: the compass reads at **10Hz** today, from the System
+Task, on the shared bus, without incident.
 
 ---
 
 ## Performance Summary
 
-| Metric | Current | With Wire1 upgrade |
-|--------|---------|-------------------|
-| Read rate | ~1Hz | ~50Hz |
-| Rotation reaction time | ~1s | ~100ms |
-| Serial monitor | ✅ Available | ❌ Disabled |
-| Requires hardware mod | No | Yes (cable swap) |
+| Metric | Value |
+|--------|-------|
+| Read rate | 10Hz (`SYSTEM_UPDATE_MS = 100`) |
+| Rotation reaction time | ~100ms |
+| Heading EMA | α=0.3 (`HEADING_SMOOTHING`) |
+| Render deadband | 0.5° on the smoothed heading |
 
 ---
 

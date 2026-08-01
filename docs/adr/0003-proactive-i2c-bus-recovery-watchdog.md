@@ -71,4 +71,4 @@ not re-derived from the same reasoning that produced these numbers the first tim
 
 A second, unrelated bug was found alongside this one (the on-screen DEV/perf HUD label staying frozen
 after an otherwise-successful recovery) and is explicitly **not** addressed by this decision — see
-`docs/TODO_next_session.md` → "PRIORITY 1" for that follow-up.
+`docs/performance_optimization_backlog.md` → work queue → "Open bugs" for that follow-up.

@@ -324,8 +324,23 @@ void begin(uint32_t baud, int rxPin, int txPin) {
 bool read(GPSData &out) {
   bool updated = false;
 
-  uint8_t c;
-  while (s_uart_installed && uart_read_bytes(GPS_UART, &c, 1, 0) > 0) {
+  // Drain the UART in chunks, not byte by byte. Every uart_read_bytes() call takes the
+  // driver's ring-buffer lock, so the old one-byte-per-call form cost ~1-3k locked calls/s
+  // at 115200 baud with 10Hz NAV-PVT. 256 bytes covers a whole NAV-PVT frame (100 bytes on
+  // the wire) plus slack in one call; the loop refills as long as more is queued.
+  // The UBX state machine below is byte-wise and unchanged — only how bytes arrive changed,
+  // so a chunk boundary can fall anywhere in a message without affecting parsing.
+  uint8_t chunk[256];
+  int chunk_len = 0;
+  int chunk_pos = 0;
+
+  while (s_uart_installed) {
+    if (chunk_pos >= chunk_len) {
+      chunk_len = uart_read_bytes(GPS_UART, chunk, sizeof(chunk), 0);
+      if (chunk_len <= 0) break;   // nothing buffered — done for this call
+      chunk_pos = 0;
+    }
+    const uint8_t c = chunk[chunk_pos++];
 
     switch (s_state) {
       case UBXState::SYNC1:

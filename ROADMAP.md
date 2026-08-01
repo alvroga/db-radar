@@ -10,10 +10,13 @@ For completed features and history, see [CHANGELOG.md](CHANGELOG.md).
 
 ### FT-06: I2C Bus Freeze — Recurring
 **Severity**: Critical — full interface freeze, required a manual power cycle once
-**Status**: fix built and committed 2026-07-31. Effectiveness is **monitored in the field, not
-lab-verified** — there's no safe way to deliberately jam the I2C bus on demand, so this was a
-deliberate decision to trust the design (it reuses `reinit()`, the exact recovery primitive
-standby-wake already proved clears this on this device) rather than block on an unreproducible test.
+**Status**: recovery code shipped 2026-07-31, but ⚠️ **the root cause is back to unproven.** A third
+freeze that evening was not rescued by the watchdog, and re-examination voided two of the three
+evidence legs: the 61-device bus scan was a `diag i2c` probe artifact (fixed, verified 61 → 6), and
+`[I2C] Bus reset OK` is unverifiable on ESP32-S3 per the IDF source. The code stays (cheap, harmless);
+the diagnosis restarts from the next freeze, where the now-trustworthy `diag i2c` and `task status`
+loop counters give real evidence. **Note**: serial silence is not a freeze — the console died for
+~4 minutes while the device ran perfectly.
 
 **Symptom**: reported twice in one session. Button, touchscreen, and display updates all stop
 responding. First time needed a full power cycle to clear; second time self-cleared when the device
@@ -33,8 +36,10 @@ power cycle.
 freeze recovered, while touch/button/sound/rotation all came back — a distinct, not-yet-root-caused
 bug, likely a dangling LVGL object pointer. Not fixed by the above.
 
-**Full detail**: [`docs/TODO_next_session.md`](docs/TODO_next_session.md) → "PRIORITY 1" ·
-[ADR-0003](docs/adr/0003-proactive-i2c-bus-recovery-watchdog.md)
+**Full detail**: [CHANGELOG.md](CHANGELOG.md) → Unreleased → Fixed ·
+[ADR-0003](docs/adr/0003-proactive-i2c-bus-recovery-watchdog.md) ·
+[`docs/performance_optimization_backlog.md`](docs/performance_optimization_backlog.md) → work queue
+(what to watch for in the field)
 
 ---
 

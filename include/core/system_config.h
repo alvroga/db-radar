@@ -202,7 +202,7 @@ namespace timing {
     // task_manager.cpp) — otherwise 10Hz GPS + 10Hz compass would multiply renders.
     //
     // Also relieves the 2048-byte UART RX buffer, which held ~1000 bytes per 1s cycle.
-    constexpr uint32_t GPS_UPDATE_INTERVAL_MS = 100;     // Read every System Task tick (5Hz)
+    constexpr uint32_t GPS_UPDATE_INTERVAL_MS = 100;     // Read every System Task tick (10Hz)
 
     // System monitoring
     constexpr uint32_t STATUS_UPDATE_INTERVAL_MS = 1000; // Status update every second

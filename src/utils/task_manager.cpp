@@ -203,6 +203,14 @@ static void uiTask(void* parameter) {
         // Gate rendering to vsync boundaries for tear-free output (~37.6 Hz, ~26.6ms/frame).
         // on_vsync_cb (ISR) gives this semaphore at the start of each hardware frame.
         // 30ms timeout = ~3 missed vsyncs — fallback to timed delay if vsync not available.
+        //
+        // ⚠️ This paces nothing at the current frame time, and that is expected, not a bug.
+        // g_vsync_sem is a BINARY semaphore given every 26.6ms. A loop iteration that overruns one
+        // panel period (an ~85ms frame always does) finds it already signalled, so the take returns
+        // immediately and the loop free-runs. The gate only becomes a gate once frames fit inside
+        // 26.6ms. Left as-is deliberately: a counting semaphore would make it pace correctly but
+        // would also queue up missed frames, which is worse than free-running. Revisit only if the
+        // frame time ever drops under one panel period.
         SemaphoreHandle_t vsync_sem = device_manager::getVsyncSemaphore();
         if (vsync_sem) {
             xSemaphoreTake(vsync_sem, pdMS_TO_TICKS(30));
@@ -1263,19 +1271,20 @@ static void updateStatusLabels() {
             gps_position_valid = gps_position_valid && (quality.updates_received <= 1 || hdop_acceptable);
             // Rejection logging is edge-triggered + throttled, never once-per-sample.
             //
-            // Sampling runs at 5Hz (GPS_UPDATE_INTERVAL_MS), and a poor-sky condition
-            // persists for minutes, so an unconditional print here emits ~300 lines/min.
-            // That is not just noise: SerialClass ends every call in fflush(stdout), and
-            // on the USB CDC path that can stall when the host isn't draining — i.e. the
-            // logging itself steals System Task time in exactly the situation where GPS
-            // is already struggling.
+            // Sampling runs at 10Hz (GPS_UPDATE_INTERVAL_MS = 100), and a poor-sky condition
+            // persists for minutes, so an unconditional print here emits ~600 lines/min.
+            // (Correction: an earlier version of this comment justified the throttle with an
+            // unbounded USB CDC stall. There is no such stall — cdc_acm_fifo_fill rolls back and
+            // returns 0 when the host isn't draining, it drops bytes rather than waiting. The
+            // throttle is worth having for the plain reason: 600 lines/min of log is unusable,
+            // and the printing itself costs System Task time.)
             //
             // Log the transition into rejection, then at most once per 5s with a count,
             // then the recovery. Enough to diagnose, bounded regardless of sample rate.
             // Hysteresis, not edge-triggering.
             //
             // A marginal fix flaps: the module alternates HDOP 99.9 (no solution) and
-            // ~8 (marginal) every few samples. Logging each transition turns 5Hz sampling
+            // ~8 (marginal) every few samples. Logging each transition turns 10Hz sampling
             // into a REJECTED/RECOVERED ping-pong that is noisier than the unthrottled
             // print it replaced. So a state change is only *reported* once the new state
             // has held for STABLE_SAMPLES consecutive readings.
@@ -1288,7 +1297,12 @@ static void updateStatusLabels() {
                 static uint16_t s_consec_good        = 0;
                 static uint32_t s_reject_count       = 0;
                 static uint32_t s_last_reject_log    = 0;
-                constexpr uint16_t STABLE_SAMPLES          = 5;     // ~1s at 5Hz
+                // Sample count, so its real meaning halved (~1s → ~0.5s) when GPS sampling went
+                // 5Hz → 10Hz. Left at 5: this only debounces a LOG line, and 0.5s of flap
+                // suppression is still enough. Kept as a count rather than converted to a
+                // duration on purpose — see the τ-based EMA note in CLAUDE.md for the cases where
+                // that conversion IS required (anything feeding a decision or a rhythm).
+                constexpr uint16_t STABLE_SAMPLES          = 5;     // ~0.5s at 10Hz
                 constexpr uint32_t REJECT_LOG_INTERVAL_MS  = 15000;
 
                 if (!gps_position_valid) {

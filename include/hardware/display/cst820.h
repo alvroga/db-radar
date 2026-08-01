@@ -10,7 +10,7 @@ struct CST820Point {
   bool     pressed;
 };
 
-// Call once (after Wire.begin). Optionally pass a reset lambda if you want.
+// Call once, after i2c_manager::init(). Optionally pass a reset lambda if you want.
 bool cst820_begin(uint8_t i2c_addr = 0x15);
 
 // Returns true if read succeeded. 'pt.pressed' tells if finger is down.
