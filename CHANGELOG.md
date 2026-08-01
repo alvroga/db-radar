@@ -9,6 +9,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+**Heading smoothing re-derived as a time constant — the radar no longer bounces while walking
+(WP-0.2)** — ✅ *verified on hardware: "shakiness while walking is way better"*
+
+`HEADING_SMOOTHING` went from **α = 0.8 at 1 Hz** to **α = 0.3 at 10 Hz** when the compass rate was
+raised. Those look like a deliberate re-tune but are not equivalent: converting each to a time
+constant, `τ = −Δt / ln(1−α)`, gives **0.62 s → 0.28 s**. The filter ended up doing **2.2× less
+smoothing in time terms** than the behaviour it replaced, and the heading visibly bounced.
+
+**Fix**: α = 0.15, restoring τ ≈ 0.62 s at 10 Hz. The comment now states τ rather than only α, because
+α alone silently changes meaning the moment the sample rate moves — which is exactly what happened
+here, and is this project's most frequently repeated defect (a constant re-derived by rate but not by
+*meaning*).
+
+Also corrected the adjacent render-deadband rationale in `task_manager.cpp`, which did its arithmetic
+from α = 0.3. With α = 0.15 a single-sample ±2° noise excursion is attenuated to ~0.3° rather than
+~0.6°, so the 0.5° deadband gained margin rather than losing it — no code change needed there, but the
+stale number would have misled the next reader.
+
+This addresses **body shake only**. It does nothing for the tilt error (see the compass calibration
+entry in ROADMAP.md): tilt is a *bias*, which no amount of smoothing removes.
+
+**Build impact**: RAM 132,392 B (±0), flash 1,608,235 → 1,608,247 B (+12 B, alignment noise — the
+change is one constant and comments).
+
+**Code references**: `include/ui/navigation.h` (`HEADING_SMOOTHING`),
+`src/utils/task_manager.cpp` (`COMPASS_UPDATE` deadband comment).
+Analysis: [`docs/compass_calibration_foundation.md`](docs/compass_calibration_foundation.md) §9.1a.
+
 ### Changed
 
 **GPS UART drained in chunks instead of one syscall per byte (backlog §8.3)** — ⏳ *not yet verified

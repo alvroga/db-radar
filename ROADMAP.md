@@ -127,6 +127,31 @@ stays sharp).
 
 ---
 
+### Compass Calibration & Tilt — heading is only valid held flat
+**Severity**: High — the compass is the sole heading source, and it inverts when the device is tilted
+**Status**: designed 2026-08-01, blocked on field data
+
+**Symptom** (field-confirmed): facing north held **flat**, N points to the top — correct. Facing north
+held **vertical**, N points to the **bottom**. The heading formula is 2-axis (`atan2(cy, cx)`), so the
+large vertical field component leaks in as tilt grows; the crossover is at only **90° − inclination
+≈ 31.5°**, past which the reading inverts. Phone-style holding is deep past it. Separately, nothing
+detects a stale calibration — opening the enclosure invalidates it silently.
+
+**Plan**: four staged levels — (1) magnitude-based health metrics, free and no new hardware;
+(2) 3-axis calibration; (3) accelerometer tilt compensation; (4) τ-per-zoom smoothing. Gyro is
+deferred, not rejected. Nothing gets built before a field trip supplies the thresholds.
+
+**Also found**: `HEADING_SMOOTHING` went 0.8@1Hz → 0.3@10Hz, which did **not** preserve the time
+constant (0.62 s → 0.28 s) — a likely cause of the reported heading bounce. One-constant test, no
+field data needed.
+
+**Supersedes** FT-02 below, whose "won't fix" reasoning assumed a 1 Hz compass rate.
+
+**Full design, field protocol and implementation plan**:
+[`docs/compass_calibration_foundation.md`](docs/compass_calibration_foundation.md)
+
+---
+
 ## Resolved
 
 ### Waypoint desc/hint moved to PSRAM — Resolved (2026-07-31)

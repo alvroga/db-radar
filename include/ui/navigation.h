@@ -101,7 +101,12 @@ float metersToPixels(float meters, float meters_per_pixel);
 void handleTapAt(int screen_x, int screen_y);
 
 // Heading smoothing (used by task_manager COMPASS_UPDATE handler)
-constexpr float HEADING_SMOOTHING = 0.3f;  // 0=no update, 1=instant; 0.3 = smooth at 10Hz (was 0.8 at 1Hz)
+// Express this as a time constant, not an alpha: tau = -dt / ln(1 - a). Alpha alone
+// silently changes meaning the moment the compass rate changes, which is exactly what
+// happened here -- a=0.8 @ 1Hz (tau 0.62s) became a=0.3 @ 10Hz (tau 0.28s), i.e. 2.2x
+// less smoothing in time terms, and the heading visibly bounced.
+// a = 0.15 @ 10Hz restores tau ~= 0.62s. See docs/compass_calibration_foundation.md 9.1a.
+constexpr float HEADING_SMOOTHING = 0.15f;  // 0=no update, 1=instant; tau ~= 0.62s at 10Hz
 float smoothHeading(float current_heading, float target_heading, float smoothing_factor);
 
 } // namespace navigation

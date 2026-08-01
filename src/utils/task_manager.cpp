@@ -729,8 +729,10 @@ static void processUIUpdate(const UIUpdate& update) {
             // 1.5° -> 0.5° now that the compass runs at 10Hz and a frame costs ~94ms
             // instead of ~499ms. The arithmetic that picks this number:
             //   - raw QMC5883L noise standing still is ~±2°, and HEADING_SMOOTHING
-            //     (EMA a=0.3) attenuates a single-sample excursion to ~0.6° of it,
-            //     so 0.5° still sits at the noise floor and the radar holds still.
+            //     (EMA a=0.15, tau ~0.62s) attenuates a single-sample excursion to
+            //     ~0.3° of it, so 0.5° sits above the noise floor and the radar holds
+            //     still. This was ~0.6° when a was 0.3 — the deadband got *more*
+            //     margin, not less, when the smoothing was strengthened.
             //   - a genuine turn at 5°/s is 0.5°/sample at 10Hz and now passes; under
             //     the old 1.5° threshold nothing slower than 15°/s produced a redraw.
             // Raise it back toward 1.0° if the radar visibly twitches while stationary.
