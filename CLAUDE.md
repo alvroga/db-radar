@@ -909,9 +909,15 @@ being made — beeping vs silent, in range vs out. The beacon ring (§7.3c) want
 **Key Principles**:
 - **Major features** require CHANGELOG.md entry + component doc (`docs/*.md`)
 - **Critical fixes** documented with root cause, solution, and impact
+- **Architectural decisions** (a choice between real alternatives, not just "what we built") get an
+  ADR in `docs/adr/` — see below
 - **Build impact** always measured (flash/RAM changes)
 - **Code references** include file:line citations
-- **Templates** ensure consistency (CHANGELOG, component docs)
+- **Templates** ensure consistency (CHANGELOG, component docs, ADR)
+- **ROADMAP.md stays summary-only** — it's the plan, not the history. An entry gets a symptom/root
+  cause/status in a few sentences and a link to CHANGELOG.md or the relevant `docs/*.md`; the full
+  writeup (build impact, field-test notes, reasoning) lives there, not duplicated in ROADMAP.md. If a
+  ROADMAP entry is growing past that, the detail belongs in CHANGELOG.md instead.
 
 **Always Document**:
 - New features or subsystems
@@ -922,17 +928,36 @@ being made — beeping vs silent, in range vs out. The beacon ring (§7.3c) want
 - Performance optimizations
 - Build system changes
 
+**Architecture Decision Records** (`docs/adr/`, started 2026-07-31):
+CHANGELOG.md and component docs capture *what* was built and *why it works*; an ADR captures *why
+this option and not the others* — for decisions that were genuinely reversible another way, where a
+future reader will otherwise wonder "why didn't they just—". Use the template at
+`docs/adr/0000-template.md`, numbered sequentially (`0001-`, `0002-`, ...). Not every change needs
+one — a bug fix or a tuned constant doesn't; a choice like "software rotation vs hardware", "passive
+vs active BLE scan", "zero-copy `lv_obj` draw vs `lv_canvas`" does. When in doubt, check the backlog
+docs (`performance_optimization_backlog.md`, `ROADMAP.md`) first — several existing decisions
+documented there (the four load-bearing render flags, the `I2C_PROCESS_MS` floor, passive-vs-active
+BLE scanning) are ADR candidates once someone has time to extract them; new decisions from this point
+forward should get one directly instead of only living in prose docs.
+**Historical backfill** (decisions made before 2026-07-31) is a separate, lower-priority pass — not
+required for new work — tracked in `docs/adr/BACKFILL_PLAN.md`.
+
 **Documentation Flow**:
 1. **During**: Add one-line to CHANGELOG.md immediately
 2. **After**: Expand with technical details, build impact, user benefits
 3. **Component docs**: Create `docs/*.md` for major features
-4. **CLAUDE.md**: Update if architecture changed (brief summary + link to docs)
-5. **README.md**: Update features list if user-visible
+4. **ADR**: Add `docs/adr/NNNN-title.md` if the change was a decision between real alternatives
+5. **ROADMAP.md**: Move/update the entry's status (Known Issue → Planned → Resolved), summary-only,
+   linking to the CHANGELOG.md entry or component doc for detail — never restate it
+6. **CLAUDE.md**: Update if architecture changed (brief summary + link to docs)
+7. **README.md**: Update features list if user-visible
 
 **Quick Checklist** (after significant work):
 - [ ] CHANGELOG.md entry
 - [ ] Build impact measured
 - [ ] Component doc created/updated (if needed)
+- [ ] ADR added (if a real alternative was rejected)
+- [ ] ROADMAP.md status updated (summary-only, link to detail)
 - [ ] CLAUDE.md updated (if architecture changed)
 - [ ] README.md updated (if user-visible)
 

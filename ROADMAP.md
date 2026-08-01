@@ -36,6 +36,29 @@ For completed features and history, see [CHANGELOG.md](CHANGELOG.md).
 
 ## Planned
 
+### CRT / 8-bit Display Theme *(low priority)*
+**Severity**: Cosmetic — user preference, no functional impact
+
+**Ask**: the 480×480 IPS panel renders very sharp/clean; add a toggleable visual style that leans
+retro — scanlines, a coarser/pixelated font or dithering, maybe a subtle phosphor-glow color grade —
+to evoke a CRT / 8-bit look. Should be a **setting**, not a replacement of the current look (default
+stays sharp).
+
+**Open questions to resolve before implementation**:
+- Where do scanlines/dither come from — a static overlay image blended over the framebuffer, or a
+  per-pixel effect in the flush callback (`rotate90_tiled` in `device_manager.cpp` already touches
+  every pixel each frame, so a color/scanline pass could ride along, but that's the exact hot path
+  the Render Pipeline section says not to add work to lightly)
+- Cost: any per-pixel work in the flush path competes with the frame budget documented in "Render
+  Pipeline" above (currently ~85ms/frame, bus-bound) — needs a real measurement, not an assumption
+- Simpler alternative: LVGL theme/font swap only (pixel font, no scanlines) — near-zero render cost,
+  weaker effect
+
+**Key files**: `src/core/device_manager.cpp` (flush callback, if a per-pixel effect is chosen),
+`src/ui/settings_screen.cpp` (toggle), LVGL theme/font config if font-only
+
+---
+
 ### Waypoint Memory Optimization — raise the 50-waypoint cap
 **Severity**: Medium — real GPX files get silently truncated
 
