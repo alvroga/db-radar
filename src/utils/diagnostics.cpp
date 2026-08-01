@@ -18,6 +18,8 @@
 #include "hardware/sensors/battery.h"
 #include "hardware/connectivity/beacon_proximity.h"
 #include "hardware/sensors/compass_qmc5883l.h"
+#include "hardware/sensors/accel_qmi8658.h"
+#include "field_log.h"
 #include "core/arduino_compat.h"
 #include "esp_core_dump.h"
 #include <esp_system.h>
@@ -36,6 +38,8 @@ static void handleDevCommand(const char* args);
 static void handleBeaconCommand(const char* args);
 static void handlePerfCommand(const char* args);
 static void handleCompassCommand(const char* args);
+static void handleAccelCommand(const char* args);
+static void handleFlogCommand(const char* args);
 static void handleAPToggle(bool enable);
 
 // Global state
@@ -118,6 +122,10 @@ void parseCommand(const char* command) {
         handleDevCommand(p + 3);
     } else if (strncmp(p, "compass", 7) == 0) {
         handleCompassCommand(p + 7);
+    } else if (strncmp(p, "accel", 5) == 0) {
+        handleAccelCommand(p + 5);
+    } else if (strncmp(p, "flog", 4) == 0) {
+        handleFlogCommand(p + 4);
     } else if (strncmp(p, "beacon", 6) == 0) {
         handleBeaconCommand(p + 6);
     } else if (strncmp(p, "perf", 4) == 0) {
@@ -754,6 +762,13 @@ void printAvailableCommands() {
     Serial.println("  ntp timezone <gmt> [dst] - Set timezone (e.g., ntp timezone -5 1)");
     Serial.println("");
     Serial.println("Compass Commands (QMC5883L on BH-880):");
+    Serial.println("  flog [status]        - Field log state (bench testing)");
+    Serial.println("  flog start <label>   - Start a sample (flat360, phone360, ...)");
+    Serial.println("  flog stop            - Stop and close the current sample");
+    Serial.println("  accel [status]       - Show QMI8658 state and kill-switch");
+    Serial.println("  accel read           - Read accel (and gyro if on) once");
+    Serial.println("  accel on|off         - Kill switch for all accel I2C traffic");
+    Serial.println("  accel gyro on|off    - Enable gyro in the burst (logging only)");
     Serial.println("  compass [status]     - Show chip ID and configuration");
     Serial.println("  compass init         - Initialize sensor (continuous mode)");
     Serial.println("  compass read         - Read raw X/Y/Z and compute heading");
@@ -1530,6 +1545,133 @@ void handleBeaconCommand(const char* args) {
 // Compass (QMC5883L) Commands
 // ============================================================================
 
+// Bench-side twin of the Field Log screen. The screen is the field interface --
+// there is no serial on battery -- but on USB this is far quicker for verifying a
+// sample produces a well-formed file before the trip depends on it.
+void handleFlogCommand(const char* args) {
+    while (*args == ' ') args++;
+
+    if (strncmp(args, "start", 5) == 0) {
+        const char* lbl = args + 5;
+        while (*lbl == ' ') lbl++;
+        field_log::Label chosen = field_log::Label::FREEFORM;
+        bool found = false;
+        for (uint8_t i = 0; i < (uint8_t)field_log::Label::COUNT; i++) {
+            if (strncmp(lbl, field_log::labelName((field_log::Label)i),
+                        strlen(field_log::labelName((field_log::Label)i))) == 0) {
+                chosen = (field_log::Label)i;
+                found = true;
+                break;
+            }
+        }
+        if (!found && *lbl != '\0') {
+            Serial.printf("[FLOG] Unknown label '%s'. Valid labels:\n", lbl);
+            for (uint8_t i = 0; i < (uint8_t)field_log::Label::COUNT; i++) {
+                Serial.printf("  %s\n", field_log::labelName((field_log::Label)i));
+            }
+            return;
+        }
+        if (field_log::startSample(chosen)) {
+            Serial.printf("[FLOG] Started sample: %s\n", field_log::labelName(chosen));
+        }
+    }
+    else if (strncmp(args, "stop", 4) == 0) {
+        field_log::stopSample();
+        Serial.println("[FLOG] Stop requested (writer flushes and closes)");
+    }
+    else {
+        field_log::Stats st = field_log::stats();
+        Serial.println("==== Field Log ====");
+        Serial.printf("Storage    : %s\n", field_log::storageAvailable()
+                                            ? "SD ok" : "NO CARD — cannot record");
+        Serial.printf("Recording  : %s\n", st.recording ? "YES" : "no");
+        if (st.recording) {
+            Serial.printf("File       : %s\n", st.filename);
+            Serial.printf("Elapsed    : %lu ms\n", (unsigned long)st.elapsed_ms);
+        }
+        Serial.printf("Next #     : %u\n", (unsigned)(field_log::lastSampleNumber() + 1));
+        Serial.printf("Rows q/w/d : %lu / %lu / %lu\n",
+                      (unsigned long)st.rows_queued, (unsigned long)st.rows_written,
+                      (unsigned long)st.rows_dropped);
+        Serial.printf("File bytes : %lu\n", (unsigned long)st.file_bytes);
+        Serial.printf("Free       : %llu MB\n",
+                      (unsigned long long)(st.free_bytes / (1024 * 1024)));
+        Serial.println("===================");
+        Serial.println("Rows dropped > 0 means the writer could not keep up — the");
+        Serial.println("sample has gaps and should be retaken.");
+    }
+}
+
+void handleAccelCommand(const char* args) {
+    while (*args == ' ') args++;
+
+    if (strncmp(args, "read", 4) == 0) {
+        AccelData ad;
+        if (!accel_qmi8658::read(ad)) {
+            Serial.println("[ACCEL] Read failed (disabled, not initialized, or bus error)");
+            Serial.printf("[ACCEL] enabled=%s initialized=%s\n",
+                          accel_qmi8658::isEnabled() ? "yes" : "no",
+                          accel_qmi8658::isInitialized() ? "yes" : "no");
+            return;
+        }
+
+        float mag = sqrtf(ad.ax_g * ad.ax_g + ad.ay_g * ad.ay_g + ad.az_g * ad.az_g);
+        Serial.println("==== Accelerometer Reading ====");
+        Serial.printf("Raw    X %6d  Y %6d  Z %6d\n", ad.ax_raw, ad.ay_raw, ad.az_raw);
+        Serial.printf("Scaled X %+.3f  Y %+.3f  Z %+.3f  (g)\n", ad.ax_g, ad.ay_g, ad.az_g);
+        Serial.printf("Magnitude %.3f g  %s\n", mag,
+                      (mag > 0.85f && mag < 1.15f) ? "(plausible - near 1g)"
+                                                   : "(SUSPECT - should be ~1g at rest)");
+        if (ad.gyro_valid) {
+            Serial.printf("Gyro   X %+.1f  Y %+.1f  Z %+.1f  (deg/s)\n",
+                          ad.gx_dps, ad.gy_dps, ad.gz_dps);
+        } else {
+            Serial.println("Gyro   off");
+        }
+        Serial.println("===============================");
+        Serial.println("Held flat, one axis should read ~+/-1g and the other two ~0.");
+    }
+    else if (strncmp(args, "gyro on", 7) == 0) {
+        // Logging only, for field sample 9. The gyro cannot supply heading (it
+        // measures rate, so heading needs integration, so it drifts) and draws
+        // several times the accel's current -- see doc §6A.
+        Serial.println("[ACCEL] Enabling gyro in the read burst (12 bytes instead of 6)");
+        Serial.println("[ACCEL] NOTE: logging only. Costs power. Turn off when done.");
+        accel_qmi8658::setGyroEnabled(true);
+    }
+    else if (strncmp(args, "gyro off", 8) == 0) {
+        accel_qmi8658::setGyroEnabled(false);
+    }
+    else if (strncmp(args, "on", 2) == 0) {
+        accel_qmi8658::setEnabled(true);
+        settings_manager::saveAccelEnabled(true);
+        if (!accel_qmi8658::isInitialized()) accel_qmi8658::begin(accel_qmi8658::isGyroEnabled());
+    }
+    else if (strncmp(args, "off", 3) == 0) {
+        // The kill switch from doc §7.4 — stops all traffic to the chip without a
+        // reflash, in case the shared bus misbehaves (ADR-0013, FT-06).
+        accel_qmi8658::setEnabled(false);
+        settings_manager::saveAccelEnabled(false);
+    }
+    else {
+        const auto& st = i2c_manager::getStats();
+        Serial.println("==== Accelerometer Status ====");
+        Serial.printf("Kill switch : %s\n", accel_qmi8658::isEnabled() ? "ON (reading)" : "OFF (no traffic)");
+        Serial.printf("Initialized : %s\n", accel_qmi8658::isInitialized() ? "yes" : "no");
+        Serial.printf("Address     : 0x%02X\n", accel_qmi8658::address());
+        Serial.printf("Gyro        : %s\n", accel_qmi8658::isGyroEnabled() ? "ON (logging)" : "off");
+        Serial.printf("Setting     : %s\n",
+                      settings_manager::getSettings().accel_enabled ? "enabled" : "disabled");
+        Serial.println("-- shared I2C bus --");
+        Serial.printf("Total ops   : %lu\n", (unsigned long)st.total_ops);
+        Serial.printf("Failed ops  : %lu\n", (unsigned long)st.failed_ops);
+        Serial.printf("Consecutive : %lu\n", (unsigned long)st.consecutive_failures);
+        Serial.println("==============================");
+        Serial.println("Compare failed ops before/after enabling — any rise is blocking.");
+        Serial.println("Commands: accel read | accel on|off | accel gyro on|off");
+    }
+}
+
 void handleCompassCommand(const char* args) {
     // Skip whitespace
     while (*args == ' ') args++;
@@ -1626,29 +1768,30 @@ void handleCompassCommand(const char* args) {
         Serial.println("[COMPASS] Mode: Continuous, 200Hz, 2G range, 512x oversampling");
     }
     else if (strncmp(args, "read", 4) == 0) {
-        // Read raw magnetic field data
-        uint8_t data[6] = {0};
-        if (!i2c_manager::read(i2c_manager::COMPASS_DEVICE, REG_DATA, data, 6)) {
-            Serial.println("[COMPASS] Failed to read data registers");
+        // Goes through the driver rather than reading registers directly, so what
+        // prints is what the radar actually uses -- calibration applied, H exposed.
+        CompassData cd;
+        if (!compass_qmc5883l::read(cd)) {
+            Serial.println("[COMPASS] Read failed (no data-ready, or driver not initialized)");
             Serial.println("[COMPASS] Try 'compass init' first to start measurements");
             return;
         }
 
-        int16_t x = (int16_t)(data[1] << 8 | data[0]);
-        int16_t y = (int16_t)(data[3] << 8 | data[2]);
-        int16_t z = (int16_t)(data[5] << 8 | data[4]);
-
-        float heading = atan2((float)y, (float)x) * 180.0f / M_PI;
-        if (heading < 0) heading += 360.0f;
+        int16_t ox = 0, oy = 0, oz = 0;
+        compass_qmc5883l::getCalibration(ox, oy, oz);
 
         Serial.println("==== Compass Reading ====");
-        Serial.printf("Raw X: %6d\n", x);
-        Serial.printf("Raw Y: %6d\n", y);
-        Serial.printf("Raw Z: %6d\n", z);
-        Serial.printf("Heading: %.1f° (magnetic, uncalibrated)\n", heading);
+        Serial.printf("Raw       X %6d  Y %6d  Z %6d\n", cd.x_raw, cd.y_raw, cd.z_raw);
+        Serial.printf("Offsets   X %6d  Y %6d  Z %6d\n", ox, oy, oz);
+        Serial.printf("Corrected X %6d  Y %6d  Z %6d\n", cd.cx, cd.cy, cd.cz);
+        // 120 LSB/uT at the 2 G range. Horizontal field in LA is ~24.5 uT (~2940 LSB).
+        Serial.printf("H (horiz) %.0f LSB  = %.1f uT\n", cd.h_mag, cd.h_mag / 120.0f);
+        Serial.printf("Heading   %.1f deg (magnetic, calibration applied)\n", cd.heading);
+        Serial.printf("Overflow  %s\n", cd.overflow ? "YES - strong local source" : "no");
         Serial.println("=========================");
-        Serial.println("Note: This is raw magnetic heading without calibration.");
-        Serial.println("Rotate device to verify values change smoothly.");
+        Serial.println("H should stay CONSTANT as you rotate the device held flat.");
+        Serial.println("It swinging tens of percent means tilt; a slow sinusoid in");
+        Serial.println("heading means the hard-iron calibration is stale.");
     }
     else if (strncmp(args, "cal set", 7) == 0) {
         // compass cal set X Y  — manually set hard-iron offsets and persist to NVS

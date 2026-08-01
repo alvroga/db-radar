@@ -9,7 +9,135 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+**Field data logging: accelerometer driver + CSV sample capture (WP-1)** — ✅ *verified on hardware,
+2026-08-02 — field-test pre-flight checklist run, full START/STOP/back navigation chain exercised
+repeatedly including auto-standby, no crash or hang*
+
+The compass calibration work (`docs/compass_calibration_foundation.md`) is blocked on constants that
+cannot be guessed — `H₀`, the tilt threshold, the accel gravity τ, the body-shake spectrum, and the
+actual tilt bias while walking. This is the build that measures them.
+
+**Why files and not serial**: the serial monitor requires USB, and USB also powers the 5V rail and
+charges the battery, so a battery-powered field trip produces **no serial output at all**. Every
+"walk around then read the log" approach is impossible. Samples land in CSVs and come off the device
+over WiFi afterwards.
+
+- **`compass_qmc5883l`** — now exposes the hard-iron-corrected vector (`cx/cy/cz`) and
+  `h_mag = sqrt(cx²+cy²)`, the horizontal field magnitude the heading `atan2` was already computing
+  and discarding. Held flat with a good calibration this is constant with heading, so departures from
+  it separate tilt from a stale calibration from a magnetic disturbance. `cal_z_offset` is now
+  applied; it is still 0 (a flat 360° spin cannot calibrate Z), and the heading formula stays 2-axis,
+  so this changes no behaviour today — it makes the code correct ahead of WP-5.
+- **`accel_qmi8658`** — new minimal driver for the QMI8658 already sitting on the shared I2C bus.
+  Accel-only (`CTRL7 = 0x01`), ±4G/250Hz, one 6-byte burst at 10Hz from the System Task. **Not** a
+  revival of `imu_sampling.cpp`: that did *gyro* heading fusion, which drifts by construction. This
+  reads gravity, which does not. The gyro rides along in the same contiguous burst for logging only.
+- **Read placement** — inside the existing compass gate chain in the System Task, so it inherits the
+  WiFi-AP suspension and post-standby re-init those gates exist for. Reading it anywhere else would
+  reintroduce exactly those failures.
+- **`field_log`** — one CSV per sample, `/sdcard/logs/cal_<NNN>_<label>.csv`. The sensor tick pushes
+  rows into a 512-row PSRAM ring; a dedicated Core 0 writer task drains it. No filesystem call ever
+  happens on the sensor path — an SD write stalling would show up as jitter in the `ms` column,
+  corrupting the timing data the samples exist to measure. Free-space and storage checks are cached
+  by the writer for the same reason (`f_getfree` can walk the whole FAT, and the live readout polls
+  from the UI Task).
+- **Field Log screen** (DEV tab) — START/STOP, a label selector cycling the fixed §8.3 vocabulary, and
+  live elapsed/rows/size/free readout. **Buzzer confirmation is not decoration**: half these samples
+  are taken while tumbling the device or holding it phone-style, i.e. not looking at the screen.
+  Chirp on start, double-beep on stop, rapid pulse on failure-to-start.
+- **100Hz mode** for sample 9 — a short-lived task created only while a `shake-100hz` sample records
+  and deleted on stop. `SYSTEM_UPDATE_MS` is deliberately untouched: it is the sensor clock for both
+  the compass and the GPS gate, and the heading EMA τ is derived from it. This accepts the 100Hz bus
+  risk for 30 seconds inside a controlled recording rather than architecturally, and I2C op/failure
+  counts are written into every sample's header and footer so the cost is measurable per-sample.
+- **`/logs` page** now lists `.csv` as well as `.log`, or the samples would exist on the card and be
+  invisible — that page is the only way off the device without serial.
+- Serial commands `accel [status|read|on|off|gyro on|off]` and `flog [status|start <label>|stop]`.
+- Kill switch (`accel_enabled`, NVS-persisted, also on the Field Log screen) per the I2C risk
+  assessment: the bus has a tuned timing floor with an undiagnosed cause (ADR-0013) and an open
+  freeze issue (FT-06), so a sixth actively-read device must be instantly reversible without a
+  reflash. Defaulted **on** — the likelier failure is collecting a whole trip with no accel data.
+
+**⚠️ Corrected a wrong premise in the plan document**: it asserted `/sdcard` was the FFat mount. It is
+not. `device_manager::initSD()` mounts a **physical SD card** via `esp_vfs_fat_sdmmc_mount`, and the
+11.7MB `ffat` partition in `partitions_ota.csv` is never mounted by anything. **A card must be
+inserted or there is nowhere to write.** The screen shows "NO SD CARD" and `startSample()` refuses,
+but that is a thing to find at the desk, not at the trailhead.
+
+**Known coupling**: the accel read sits inside `if (compass_ok)`, so a compass that failed to
+initialise also silences the accel. Accepted deliberately — inheriting the gate chain is worth more
+than independence, and a sample with no heading columns is mostly worthless anyway.
+
+**Build impact**: RAM 132,392 → 132,640 B static (+248 B); flash 1,608,247 → 1,621,707 B (+13,460 B).
+Plus, in DEV mode only, ~44KB PSRAM for the row ring and two task stacks (6KB writer, 4KB high-rate,
+the latter only while a `shake-100hz` sample records).
+
+**Code references**: `src/hardware/sensors/accel_qmi8658.cpp`, `src/utils/field_log.cpp`,
+`src/ui/field_log_screen.cpp`, `src/utils/task_manager.cpp` (System Task sensor block,
+`highRateTask`), `src/gpx/gpx_server.cpp` (`logs_list_handler`).
+Plan and field protocol: [`docs/compass_calibration_foundation.md`](docs/compass_calibration_foundation.md) §8, §12.
+
 ### Fixed
+
+**Field Log pre-flight checklist found three bugs before the trip, not during it (WP-1
+verification, 2026-08-02)** — ✅ *all three verified fixed on hardware*
+
+Running the checklist itself (rather than trusting "builds clean") surfaced three independent bugs,
+two of them severe enough that the outdoor trip would have produced no usable data or a bricked
+session.
+
+1. **CSV files never saved; START immediately auto-stopped; 3rd START rebooted the device.** Root
+   cause: `CONFIG_FATFS_LONG_FILENAMES=y` in `sdkconfig.defaults` is not a real leaf option — it's the
+   Kconfig **choice group name**, so setting it `=y` is silently ignored and the build kept
+   `FATFS_LFN_NONE=y`. Every `fopen("/sdcard/logs/cal_001_flat360.csv", "wb")` was therefore being
+   evaluated against strict 8.3 short-name rules and failing. Fix: the actual selectable symbol is
+   `CONFIG_FATFS_LFN_HEAP=y` (heap over stack — the LFN buffer, up to `FATFS_MAX_LFN` chars, would
+   otherwise land on already-tight task stacks like `field_log`'s 6KB writer). Verified via a full
+   `sdkconfig.cc-radar` regeneration + diff (PlatformIO does not regenerate it from
+   `sdkconfig.defaults` automatically — see the sdkconfig note in the Render Pipeline section of
+   CLAUDE.md) showing exactly the intended change and no drift elsewhere.
+
+2. **Two LVGL crashes and one hang, all in `navigation::goToSettingsScreen()`, all the same root
+   cause wearing different masks.** `LV_MEM_SIZE` is only 64KB (`include/ui/lv_conf.h`) and a full
+   settings screen is ~6 tabs of widgets; LVGL doesn't check allocation failures at every call site
+   (e.g. `disp->screens[]`'s unchecked `lv_mem_realloc()`, `lv_obj_class.c:70`). Every failure traced
+   to **two full settings-screen trees being alive in LVGL's pool at the same time**:
+   - *Crash #1* (`LoadProhibited` in `lv_obj_get_local_style_prop`): the outgoing screen was deleted
+     while it was still the *active* screen (a long-press-to-settings firing while already on
+     Settings — real when touch is dead and the user falls back to the physical button), corrupting
+     LVGL's active-screen bookkeeping. First fix: defer that delete until after the replacement
+     loads.
+   - *Crash #2* (`LoadProhibited`, near-null, inside `lv_label_create` while populating the DEV tab):
+     with crash #1's fix in place, `settings → field log → back` left the outgoing screen alive while
+     a second full tree was built on top of it. Second fix: delete the outgoing screen immediately,
+     before building the replacement, whenever it is *not* the active one.
+   - *Hang* (no panic — `UI_Task not responding`, loop count frozen, health-monitor recovery
+     exhausted its 3 attempts): the two fixes above were individually correct but structurally in
+     tension — the deferred-delete branch from fix #1 still built the replacement tree while the old
+     *active* one was alive, reproducing the exact condition fix #2 had just eliminated on the other
+     path. This time the pool corruption landed in the allocator's internal free-list instead of a
+     data pointer, so `lv_mem_alloc()` spun forever walking a corrupted list instead of crashing.
+     Diagnosed live via `task status` (I2C/Network/System tasks all healthy, only UI_Task failed —
+     ruling out an I2C freeze or general heap exhaustion; `memory report` showed 6.4MB heap / 6.3MB
+     PSRAM free, confirming the exhaustion was in LVGL's separate internal pool, not the general
+     allocator). **Final fix**: never build a replacement while any old settings tree is alive,
+     including the active-screen case — bounce off the always-valid radar screen as a momentary
+     placeholder first (load radar → delete old tree → build new tree → load it). Nothing between the
+     two `lv_scr_load()` calls yields to `lv_task_handler()`, so the radar screen is never actually
+     flushed to the panel — no visible flicker.
+
+3. Incidentally, this pass also captured the first evidence in weeks for **FT-06 (I2C bus freeze)**
+   that isn't a probe-script artifact: a runtime NACK burst on the compass (an established, previously
+   working device — not a boot-time probe) that also took down touch and the buzzer since they share
+   the bus, and on the following reboot `[I2C] Bus reset OK` / `[I2C] EXIO recovered after clock
+   pulses`, confirming the bus was genuinely electrically wedged across the reboot. This does not
+   change FT-06's status (still unfixed, recovery code already in place) but does partially reopen the
+   2026-07-31 finding that the earlier evidence was purely a probe artifact — see ROADMAP.md.
+
+**Code references**: `sdkconfig.defaults` (FATFS section), `src/ui/navigation.cpp`
+(`goToSettingsScreen()`).
 
 **Heading smoothing re-derived as a time constant — the radar no longer bounces while walking
 (WP-0.2)** — ✅ *verified on hardware: "shakiness while walking is way better"*

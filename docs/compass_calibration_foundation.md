@@ -485,12 +485,26 @@ plan of the form "walk around, then read the serial log" is impossible.
 
 Logging must therefore write **files**, and the retrieval path already exists:
 
-- `system_logger.cpp:171` already opens and appends to a file on FFat.
+- `system_logger.cpp:171` already opens and appends to a file under `/sdcard/logs`.
 - `gpx_server.cpp:873-879, 507-523` already serves a `/logs` page with a Download button and a
   `/download/logs/<file>` endpoint.
 
-So: log to FFat on battery in the field → come home, power up, join WiFi, download in a browser.
+So: log to storage on battery in the field → come home, power up, join WiFi, download in a browser.
 No new retrieval infrastructure.
+
+**⚠️ Correction (found while building WP-1.4): this is the physical SD card, not FFat.** This
+document previously said `/sdcard` was the FFat mount. It is not. `device_manager::initSD()` calls
+`esp_vfs_fat_sdmmc_mount("/sdcard", ...)` against the SDMMC host — a real card in the slot — and the
+11.7MB `ffat` partition declared in `partitions/partitions_ota.csv` is **never mounted by anything**
+in the firmware. Consequences that matter for the trip:
+
+- **A card must be physically inserted or there is nowhere to write.** `field_log::startSample()`
+  fails with a clear reason and the screen shows "NO SD CARD", but that is a thing to discover at the
+  desk, not at the trailhead.
+- Capacity is the card's, so the ~11.7MB budget in §8.2 is moot — any card has room for all nine
+  samples many times over. The auto-stop caps still matter (a forgotten session, not a full disk).
+- Nothing else changes: the `/logs` page, the download endpoint, and `system_logger` all already
+  target this same path, which is why the mistake was invisible until someone checked the mount call.
 
 ### 8.2 Session model — one file per sample
 
@@ -622,7 +636,7 @@ isn't rediscovered later.
 | Is the vertical heading really confined to 180° ± 31.5°? | 2 | **structurally confirmed** at 4 azimuths (§3.3) — N and S land on 180° exactly, as predicted with no free parameters. Arc *width and sign per azimuth* still need sample 2 |
 | Does accel-only suffice, or is a gyro needed — and at what rate? | 9 | unknown (§6A.2) |
 | Gyro power draw | — | **unknown; datasheet check required before committing** |
-| Does α = 0.15 fix the bounce? | — | testable immediately, no field data needed (§9.1a) |
+| Does α = 0.15 fix the bounce? | — | **answered: yes.** Verified on a walk 2026-08-01 — "way better". Confirms the τ regression in §9.1a was the cause |
 
 ---
 
@@ -650,22 +664,30 @@ the numbers this document exists to measure.
 
 Do these first; they are independent of everything else.
 
-**0.1 — Fix the two stale declination comments.** The code is correct (`+=`, empirically verified,
+**0.1 — Fix the two stale declination comments.** ✅ **Done 2026-08-01.** The code is correct (`+=`, empirically verified,
 `feedback_wmm_sign.md`); the comments are wrong. Do not "fix" the code.
 - `include/utils/wmm_declination.h` — the `@return` block says `true_heading = magnetic_heading - declination`
 - `include/settings_manager.h:69` — says `Apply: true_heading = magnetic_heading - compass_declination_deg`
 - Both should read `true_heading = magnetic_heading + declination` (positive = East).
 
-**0.2 — Heading smoothing experiment (§9.1a).** Change `HEADING_SMOOTHING` in `include/ui/navigation.h:104`
-from `0.3f` to `0.15f`, restoring the pre-10 Hz time constant (τ ≈ 0.62 s). Update the trailing comment
-to state τ, not just α.
-- *Acceptance*: **user verifies on hardware, on a walk.** This is a feel change; it cannot be validated
-  from a build log. Do not commit before that verification.
-- If 0.15 feels sluggish, the answer is the τ table (WP-7), not a hand-picked middle value.
+**0.2 — Heading smoothing experiment (§9.1a).** ✅ **Done and verified on hardware 2026-08-01** —
+field report: *"shakiness while walking is way better with this last change."* `HEADING_SMOOTHING` is
+now `0.15f` (τ ≈ 0.62 s at 10 Hz) and the comment states τ rather than only α. The render deadband
+comment in `task_manager.cpp`, whose arithmetic assumed α = 0.3, was corrected at the same time (the
+deadband gained margin — a single-sample ±2° excursion now attenuates to ~0.3°, not ~0.6°).
+- **This changes body shake only.** Tilt error is a *bias*; no smoothing constant touches it.
+- If 0.15 ever feels sluggish, the answer is the τ table (WP-7), not a hand-picked middle value.
 
 ### WP-1 — Field logging build (blocks the trip)
 
-**1.1 — Compass: expose the full corrected vector.**
+**Status: ✅ verified on hardware 2026-08-02.** Full START/STOP/back navigation chain exercised
+repeatedly (settings → DEV → Field Log → start → stop → back → repeat, including through auto-standby)
+with no crash or hang. Pre-flight testing itself caught and fixed three bugs first: a `sdkconfig.defaults`
+Kconfig footgun that silently kept FATFS on 8.3 filenames (CSV writes were failing outright), and two
+LVGL screen-lifecycle bugs in `goToSettingsScreen()` (two crashes + one hang, same root cause each
+time — see CHANGELOG entry and `memory/lvgl_screen_lifecycle.md`). Cleared for WP-2.
+
+**1.1 — Compass: expose the full corrected vector.** ✅ implemented
 `src/hardware/sensors/compass_qmc5883l.cpp`
 - Apply `cal_z_offset` in `read()` — it is currently stored and ignored (`compass_qmc5883l.cpp:113-114`).
   With the offset still 0 this changes no behaviour today; it makes the code correct for WP-5.
@@ -673,7 +695,7 @@ to state τ, not just α.
   (`include/hardware/sensors/compass_qmc5883l.h`).
 - *Acceptance*: `compass read` serial output shows raw, corrected and H; heading unchanged from before.
 
-**1.2 — Accelerometer: new minimal driver.**
+**1.2 — Accelerometer: new minimal driver.** ✅ implemented
 New `src/hardware/sensors/accel_qmi8658.cpp` + header, modelled on `compass_qmc5883l.cpp`'s shape.
 - **Do not resurrect `gyro_qmi8658.cpp` wholesale** — it enables both sensors (`CTRL7 = 0x43`), uses
   file-scope globals, and is flagged in CLAUDE.md as needing a C++ refactor. Read it for the register
@@ -687,7 +709,7 @@ New `src/hardware/sensors/accel_qmi8658.cpp` + header, modelled on `compass_qmc5
 - *Acceptance*: `accel read` prints plausible values; held flat one axis reads ≈ ±1 g and the other two
   ≈ 0; `i2c_manager` failure counters unchanged over 10 minutes.
 
-**1.3 — Wire the accel read into the System Task.**
+**1.3 — Wire the accel read into the System Task.** ✅ implemented
 `src/utils/task_manager.cpp`, immediately after the compass read (~line 1462-1520).
 - Same tick, same place. **Must obey the existing gates**: reads fully suspended while the WiFi AP is
   up, chip re-initialised after standby (`task_manager.cpp:1465-1516`). Skipping this reintroduces
@@ -696,7 +718,7 @@ New `src/hardware/sensors/accel_qmi8658.cpp` + header, modelled on `compass_qmc5
 - **Do not move the compass read to the I2C Task** while doing this — see
   `docs/compass_i2c_constraint.md`.
 
-**1.4 — Field log module.**
+**1.4 — Field log module.** ✅ implemented
 New `src/utils/field_log.cpp` + header.
 - API roughly: `begin()`, `startSample(label)`, `stopSample()`, `isRecording()`, `appendRow(...)`,
   `stats()`.
@@ -714,7 +736,7 @@ New `src/utils/field_log.cpp` + header.
 - *Acceptance*: a 60 s sample produces a well-formed CSV of the expected size that parses cleanly in a
   spreadsheet, with no dropped rows (row count ≈ rate × duration).
 
-**1.5 — Field Log screen (DEV mode).**
+**1.5 — Field Log screen (DEV mode).** ✅ implemented
 `src/ui/` — follow the existing settings/overlay screen patterns.
 - **START / STOP** button, large, one-handed reachable. START opens a new file, STOP closes and flushes.
 - **Label selector** cycling the fixed list: `flat360`, `phone360`, `walk-straight`, `stand-still`,
@@ -728,14 +750,14 @@ New `src/utils/field_log.cpp` + header.
   UI Task at loop count 2.
 - *Acceptance*: start/stop 5 times in a row produces exactly 5 files, correctly named, none empty.
 
-**1.6 — High-rate mode for sample 9.**
+**1.6 — High-rate mode for sample 9.** ✅ implemented
 - The System Task runs at 100 ms, so it cannot produce 100 Hz. Spawn a **short-lived dedicated task**
   (Core 0, 10 ms period) that exists only while a `shake-100hz` sample is recording, and delete it on
   stop. Do not raise `SYSTEM_UPDATE_MS`.
 - Log `i2c_manager` failure statistics into the file header and footer for this mode specifically.
 - *Acceptance*: row count ≈ 100 × duration; no I2C failures; nothing else on the device misbehaves.
 
-**1.7 — Make the logs downloadable.**
+**1.7 — Make the logs downloadable.** ✅ implemented
 `src/gpx/gpx_server.cpp:895` — `logs_list_handler` filters strictly on a `.log` extension, so `.csv`
 files will **not appear** on the `/logs` page. Extend the filter to accept `.csv` as well (the
 `/download/logs/<file>` route itself needs no change).

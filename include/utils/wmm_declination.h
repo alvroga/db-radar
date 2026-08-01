@@ -13,7 +13,10 @@ namespace wmm {
  * @param alt_m    Altitude above WGS84 ellipsoid in meters (0 for ground level)
  * @param year     Decimal year, e.g. 2026.2 for mid-March 2026
  * @return         Declination in degrees, positive = East
- *                 Apply: true_heading = magnetic_heading - declination
+ *                 Apply: true_heading = magnetic_heading + declination
+ *                 (This said "-" for a long time while every call site added.
+ *                  The sign was verified empirically on hardware — the code is
+ *                  correct, the comment was not. See memory feedback_wmm_sign.md.)
  */
 float computeDeclination(float lat_deg, float lon_deg, float alt_m, float year);
 

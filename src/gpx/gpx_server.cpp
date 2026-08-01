@@ -892,7 +892,12 @@ static esp_err_t logs_list_handler(httpd_req_t* req) {
     while ((entry = readdir(dir)) != nullptr) {
         const char* name = entry->d_name;
         size_t nl = strlen(name);
-        if (nl >= 4 && strcasecmp(name + nl - 4, ".log") == 0) {
+        // .csv as well as .log — field-log samples are CSVs, and without this they
+        // exist on the card but are invisible on this page, which is the only way
+        // to get them off the device (no serial on battery).
+        bool is_log = (nl >= 4 && strcasecmp(name + nl - 4, ".log") == 0);
+        bool is_csv = (nl >= 4 && strcasecmp(name + nl - 4, ".csv") == 0);
+        if (is_log || is_csv) {
             char filepath[256];
             snprintf(filepath, sizeof(filepath), "%s/%s", LOGS_FOLDER, name);
             struct stat st;

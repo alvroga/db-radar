@@ -142,18 +142,46 @@ void goToRadarScreen() {
 void goToSettingsScreen() {
     ui_manager::UIState& ui = ui_manager::getUIState();
 
-    // Always recreate to pick up fresh runtime state (Found/Missing, WiFi status, etc.)
-    if (ui.screen_settings && lv_obj_is_valid(ui.screen_settings)) {
-        lv_obj_del(ui.screen_settings);
-        ui.screen_settings      = nullptr;
-        ui.settings_tabview     = nullptr;
-        ui.settings_tab_gps     = nullptr;
-        ui.settings_tab_wifi    = nullptr;
-        ui.settings_tab_display = nullptr;
-        ui.settings_tab_sound   = nullptr;
-        ui.settings_tab_beacon  = nullptr;
-        ui.settings_tab_dev     = nullptr;
+    // Three failure modes have been observed here (docs/crash.md, 2026-08-01/02), and
+    // they all trace to one rule: LVGL must always have a valid active screen, AND at
+    // most one full settings tree (~6 tabs of widgets) may exist at a time. LV_MEM_SIZE
+    // is only 64KB (include/ui/lv_conf.h) and LVGL doesn't check allocation failures at
+    // every call site (e.g. the unchecked lv_mem_realloc() growing disp->screens[],
+    // lv_obj_class.c:70), so violating either half of that rule corrupts LVGL state —
+    // sometimes as an immediate near-null crash (lv_label_create during DEV tab
+    // creation), sometimes as a corrupted allocator free-list that spins forever on the
+    // next lv_mem_alloc() (a hang, not a crash — UI_Task loop count freezes with no
+    // panic). An earlier version of this function tried to satisfy both halves by
+    // deferring the delete only when the outgoing screen was active, but that still
+    // built the replacement tree while the active one was alive — reproducing the
+    // "two full trees alive" condition on that path, just with no crash-log evidence
+    // that time. Fix: never build a replacement while an old settings tree is alive,
+    // even when it's the active screen — bounce off the always-valid radar screen as a
+    // momentary placeholder first. This never flushes to the physical panel: nothing
+    // between the two lv_scr_load() calls below calls lv_task_handler(), so LVGL only
+    // marks radar dirty and then immediately re-marks the new settings screen dirty
+    // before the next real refresh cycle runs.
+    lv_obj_t* old_screen = ui.screen_settings;
+    if (old_screen && lv_obj_is_valid(old_screen)) {
+        if (lv_scr_act() == old_screen && ui.screen_radar && lv_obj_is_valid(ui.screen_radar)) {
+            lv_scr_load(ui.screen_radar);
+        }
+        lv_obj_del(old_screen);
+        old_screen = nullptr;
     }
+
+    // Always recreate to pick up fresh runtime state (Found/Missing, WiFi status,
+    // etc.) — settings_screen::create() no-ops if ui.screen_settings is non-null,
+    // so it must be cleared here regardless of what happened to old_screen above.
+    ui.screen_settings      = nullptr;
+    ui.settings_tabview     = nullptr;
+    ui.settings_tab_gps     = nullptr;
+    ui.settings_tab_wifi    = nullptr;
+    ui.settings_tab_display = nullptr;
+    ui.settings_tab_sound   = nullptr;
+    ui.settings_tab_beacon  = nullptr;
+    ui.settings_tab_dev     = nullptr;
+
     Serial.println("[NAVIGATION] Creating settings screen...");
     ui_manager::createSettingsScreen();
 

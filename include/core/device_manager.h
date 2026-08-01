@@ -11,6 +11,7 @@
 #include "i2c_manager.h"
 #include "gps_bh880.h"
 #include "compass_qmc5883l.h"
+#include "accel_qmi8658.h"
 #include "system_config.h"
 
 namespace device_manager {
@@ -54,6 +55,7 @@ struct DeviceState {
     bool scanner_ok = false;
     bool gps_ok = false;
     bool compass_ok = false;
+    bool accel_ok = false;
     bool lcd_ok = false;
     bool backlight_ok = false;
     bool sd_ok = false;
@@ -70,6 +72,10 @@ struct DeviceState {
 
     // Compass data
     CompassData last_compass_data;
+
+    // Accelerometer data (QMI8658) — gravity vector for future tilt compensation,
+    // and the raw feed for field logging. Zeroed when the accel is disabled.
+    AccelData last_accel_data;
 
     // Hardware handles
     spi_device_handle_t spi_handle = nullptr;
@@ -91,6 +97,7 @@ bool initRTC();
 bool initScanner();
 bool initGPS();
 bool initCompass();
+bool initAccel();
 bool initLCD(const Config& config);
 bool initSD(const Config& config);
 bool initBacklight(const Config& config);

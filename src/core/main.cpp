@@ -13,6 +13,7 @@
 #include "utils/diagnostics.h"
 #include "utils/task_manager.h"
 #include "utils/system_logger.h"
+#include "utils/field_log.h"
 #include "utils/ntp_sync.h"
 #include "utils/standby_manager.h"
 #include "core/system_config.h"
@@ -92,6 +93,11 @@ extern "C" void app_main() {
                 }
             }
             if (settings.dev_mode) {
+                // Field data logger — DEV mode only. Allocates a 512-row PSRAM ring
+                // and a writer task; both are pure overhead outside a field trip,
+                // so they never exist in normal mode.
+                field_log::begin();
+
                 Serial.println("[DEV] ==========================================");
                 Serial.println("[DEV] DEV MODE ACTIVE at boot");
                 Serial.println("[DEV] ==========================================");

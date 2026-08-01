@@ -59,6 +59,13 @@ struct RadarSettings {
     bool dev_tab_visible = false;        // DEV tab visible in settings (default: OFF for release)
     bool logging_enabled = false;        // System event logging enabled (default: OFF for release)
 
+    // Accelerometer (QMI8658) — runtime kill switch for the added I2C traffic.
+    // Default ON: the chip is already on the bus and ACKing, and the read adds
+    // ~0.2 percentage points of bus utilisation. Defaulting OFF would risk
+    // collecting a whole field trip with no accel data, which is worse than the
+    // bus risk this guards against. See docs/compass_calibration_foundation.md §7.4.
+    bool accel_enabled = true;
+
     // Compass calibration (hard iron offsets)
     int16_t compass_cal_x = 0;
     int16_t compass_cal_y = 0;
@@ -66,7 +73,10 @@ struct RadarSettings {
     bool compass_calibrated = false;
 
     // Magnetic declination (auto-computed from WMM at GPS fix, cached in NVS)
-    // Apply: true_heading = magnetic_heading - compass_declination_deg
+    // Apply: true_heading = magnetic_heading + compass_declination_deg
+    // (positive = East). The sign was verified empirically on hardware — this
+    // comment previously said "-" while the code has always added. The code is
+    // right; see memory feedback_wmm_sign.md and task_manager.cpp's COMPASS block.
     float compass_declination_deg = 0.0f;   // Degrees East (positive = East)
     bool  compass_declination_valid = false; // True once computed from a GPS fix
 
@@ -221,6 +231,7 @@ bool saveDeclination(float declination_deg);
  */
 bool saveCompassCalibration(int16_t x, int16_t y, int16_t z);
 
+bool saveAccelEnabled(bool enabled);
 bool saveBeaconProximityEnabled(bool enabled);
 bool saveBeaconSoundEnabled(bool enabled);
 bool saveBeaconMAC(const char* mac);

@@ -10,6 +10,7 @@
 #include "ui_manager.h"
 #include "settings_manager.h"
 #include "system_logger.h"
+#include "field_log.h"
 #include "ntp_sync.h"
 #include "rtc_pcf85063.h"
 #include "gps_bh880.h"
@@ -388,6 +389,99 @@ static void networkTask(void* parameter) {
  * @brief System Task - Handles memory monitoring and diagnostics
  * Runs on Core 0 with low priority, background operations
  */
+// =============================================================================
+// HIGH-RATE SAMPLING TASK — field sample 9 (`shake-100hz`) only.
+//
+// The System Task runs at SYSTEM_UPDATE_MS = 100, so it structurally cannot
+// produce 100Hz. Raising SYSTEM_UPDATE_MS is not an option: it is the sensor
+// clock for the compass AND the GPS gate, and everything downstream (the heading
+// EMA time constant, the render coalescing) is derived from it.
+//
+// So this is a separate task that exists only while a shake-100hz sample is
+// recording and is deleted the moment it stops. That is deliberate risk
+// containment rather than tidiness: 100Hz on this shared I2C bus is exactly the
+// regime §7.3 warns about — a tuned timing floor with an undiagnosed cause
+// (ADR-0013) and an open freeze issue (FT-06). Accepting it for 30 seconds inside
+// a controlled recording is very different from accepting it architecturally.
+//
+// It logs accel/gyro at full rate and carries the most recent compass and GPS
+// values along unchanged; those genuinely are 10Hz sources and interpolating them
+// would fabricate data. The `ms` column is what the analysis trusts.
+// =============================================================================
+static TaskHandle_t high_rate_task_handle = nullptr;
+static volatile bool high_rate_running = false;
+
+static void highRateTask(void* parameter) {
+    Serial.println("[FLOG] High-rate (100Hz) sampling task started");
+    TickType_t last_wake = xTaskGetTickCount();
+
+    while (high_rate_running) {
+        AccelData a;
+        bool accel_ok = accel_qmi8658::read(a);
+
+        const device_manager::DeviceState& ds = device_manager::getDeviceState();
+        const CompassData& c = ds.last_compass_data;
+        const GPSData&     g = ds.last_gps_data;
+
+        field_log::Row row = {};
+        row.ms = millis();
+        row.mx = c.x_raw; row.my = c.y_raw; row.mz = c.z_raw;
+        row.cx = c.cx;    row.cy = c.cy;    row.cz = c.cz;
+        row.h_mag = c.h_mag;
+        row.heading_mag = c.heading;
+        row.heading_true = c.heading;
+        const auto& s = settings_manager::getSettings();
+        if (s.compass_declination_valid) {
+            row.heading_true += s.compass_declination_deg;
+            if (row.heading_true < 0.0f)    row.heading_true += 360.0f;
+            if (row.heading_true >= 360.0f) row.heading_true -= 360.0f;
+        }
+        if (accel_ok) {
+            row.ax = a.ax_raw; row.ay = a.ay_raw; row.az = a.az_raw;
+            row.gx = a.gx_raw; row.gy = a.gy_raw; row.gz = a.gz_raw;
+            row.flags |= field_log::FLAG_ACCEL_OK;
+            if (a.gyro_valid) row.flags |= field_log::FLAG_GYRO_OK;
+        }
+        row.lat = g.lat; row.lon = g.lon;
+        row.speed_kn = g.speed; row.course = g.course; row.hdop = g.hdop;
+        row.sats = (uint8_t)g.sats;
+        row.zoom = (uint8_t)ui_manager::getUIState().current_zoom;
+        if (g.valid)    row.flags |= field_log::FLAG_GPS_FIX;
+        if (c.overflow) row.flags |= field_log::FLAG_MAG_OVF;
+        if (c.valid)    row.flags |= field_log::FLAG_COMPASS_OK;
+
+        field_log::appendRow(row);
+
+        vTaskDelayUntil(&last_wake, pdMS_TO_TICKS(10));
+    }
+
+    Serial.println("[FLOG] High-rate sampling task exiting");
+    high_rate_task_handle = nullptr;
+    vTaskDelete(nullptr);
+}
+
+// Create/destroy the high-rate task to match the recording state. Called from the
+// System Task tick, so the lifetime is managed from one place with no cross-task
+// handshake.
+static void updateHighRateSampling() {
+    bool want = field_log::isRecording() &&
+                field_log::currentLabel() == field_log::Label::SHAKE_100HZ;
+
+    if (want && !high_rate_running) {
+        high_rate_running = true;
+        // Priority 2 (same as the I2C Task) so its 10ms period is actually
+        // honoured against the priority-1 System/Network tasks it shares Core 0
+        // with. Never Core 1 — the UI Task must not compete with this.
+        if (xTaskCreatePinnedToCore(highRateTask, "FlogHiRate", 4096, nullptr, 2,
+                                    &high_rate_task_handle, 0) != pdPASS) {
+            Serial.println("[FLOG] High-rate task creation FAILED — sample will be 10Hz");
+            high_rate_running = false;
+        }
+    } else if (!want && high_rate_running) {
+        high_rate_running = false;   // the task deletes itself on the next tick
+    }
+}
+
 static void systemTask(void* parameter) {
     Serial.println("[TASK] System Task started on Core 0");
     system_stats.system_task.is_healthy = true;
@@ -453,6 +547,9 @@ static void systemTask(void* parameter) {
 
         // Auto-sleep: check if inactivity timeout has elapsed
         standby_manager::checkInactivityTimeout();
+
+        // Start/stop the 100Hz sampling task to match the recording state.
+        updateHighRateSampling();
 
         // =========================================================================
         // PERIODIC LOG FLUSH (every 30 seconds)
@@ -1558,6 +1655,98 @@ static void updateStatusLabels() {
                             s_compass_fail_count = 0;
                             compass_qmc5883l::reset();
                         }
+                    }
+
+                    // =========================================================
+                    // ACCELEROMETER — read in the SAME tick, immediately after
+                    // the compass, and inside the same gate structure.
+                    //
+                    // Placement is deliberate, not convenience. The compass block
+                    // above suspends reads entirely while the WiFi AP is up (RF
+                    // interrupts wreck I2C bit timing on this shared bus, which
+                    // also hosts the touch chip) and re-initialises after standby.
+                    // Reading the accel anywhere else would reintroduce exactly
+                    // the failures those gates exist to prevent. Sitting in the
+                    // `else` branch of that chain means it inherits all of them
+                    // for free — if the compass is suspended, so is this.
+                    //
+                    // Cost: one 6-byte burst at 10Hz, ~2ms of bus time per second
+                    // against ~2% total utilisation (doc §7.1). No new address, no
+                    // new capacitive load — the chip already ACKs on this bus.
+                    //
+                    // KNOWN COUPLING: this sits inside `if (compass_ok)`, so a
+                    // compass that failed to initialise also silences the accel.
+                    // Accepted deliberately — inheriting the gate chain is worth
+                    // more than independence, and with no compass the field log's
+                    // heading columns are empty anyway, which is most of the point
+                    // of a sample. Revisit if the accel ever drives something the
+                    // compass doesn't (e.g. stillness detection, doc §9.2).
+                    // =========================================================
+                    if (accel_qmi8658::isEnabled() && accel_qmi8658::isInitialized()) {
+                        static uint8_t s_accel_fail_count = 0;
+                        AccelData accel_data;
+                        if (accel_qmi8658::read(accel_data)) {
+                            s_accel_fail_count = 0;
+                            device_manager::DeviceState& acc_state =
+                                const_cast<device_manager::DeviceState&>(compass_dev_state);
+                            acc_state.last_accel_data = accel_data;
+                        } else if (++s_accel_fail_count >= 5) {
+                            Serial.println("[ACCEL] 5 consecutive failures — attempting re-init");
+                            s_accel_fail_count = 0;
+                            accel_qmi8658::reset();
+                        }
+                    }
+
+                    // =========================================================
+                    // FIELD LOG — one CSV row per sensor tick while recording.
+                    //
+                    // appendRow() is a bounded memcpy into a PSRAM ring and
+                    // returns immediately when not recording. No filesystem call
+                    // happens here: a dedicated writer task drains the ring. That
+                    // separation is the point — an SD write stalling for tens of
+                    // ms on this task would show up as jitter in the `ms` column,
+                    // corrupting the timing data the samples exist to measure.
+                    // =========================================================
+                    // Skipped while the 100Hz task owns row production, or the
+                    // sample would carry two interleaved rates in one file.
+                    if (field_log::isRecording() && !high_rate_running) {
+                        const CompassData& c = compass_dev_state.last_compass_data;
+                        const AccelData&   a = compass_dev_state.last_accel_data;
+                        const GPSData&     g = compass_dev_state.last_gps_data;
+
+                        field_log::Row row = {};
+                        row.ms = compass_now;
+                        row.mx = c.x_raw; row.my = c.y_raw; row.mz = c.z_raw;
+                        row.cx = c.cx;    row.cy = c.cy;    row.cz = c.cz;
+                        row.h_mag = c.h_mag;
+                        row.heading_mag = c.heading;
+
+                        float th = c.heading;
+                        const auto& ds = settings_manager::getSettings();
+                        if (ds.compass_declination_valid) {
+                            th += ds.compass_declination_deg;
+                            if (th < 0.0f)    th += 360.0f;
+                            if (th >= 360.0f) th -= 360.0f;
+                        }
+                        row.heading_true = th;
+
+                        row.ax = a.ax_raw; row.ay = a.ay_raw; row.az = a.az_raw;
+                        row.gx = a.gx_raw; row.gy = a.gy_raw; row.gz = a.gz_raw;
+
+                        row.lat = g.lat;   row.lon = g.lon;
+                        row.speed_kn = g.speed;
+                        row.course   = g.course;
+                        row.hdop     = g.hdop;
+                        row.sats     = (uint8_t)g.sats;
+                        row.zoom     = (uint8_t)ui_manager::getUIState().current_zoom;
+
+                        if (g.valid)      row.flags |= field_log::FLAG_GPS_FIX;
+                        if (c.overflow)   row.flags |= field_log::FLAG_MAG_OVF;
+                        if (c.valid)      row.flags |= field_log::FLAG_COMPASS_OK;
+                        if (a.valid)      row.flags |= field_log::FLAG_ACCEL_OK;
+                        if (a.gyro_valid) row.flags |= field_log::FLAG_GYRO_OK;
+
+                        field_log::appendRow(row);
                     }
                 }
             }

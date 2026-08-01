@@ -3,6 +3,21 @@
 
 struct CompassData {
     int16_t x_raw = 0, y_raw = 0, z_raw = 0;
+
+    // Hard-iron-corrected vector (raw minus the stored offsets). cz is only
+    // meaningful once a 3-axis calibration exists -- a flat 360 spin cannot
+    // calibrate Z at all (the axis never changes what it points at), so
+    // cal_z_offset is 0 today and cz == z_raw. See
+    // docs/compass_calibration_foundation.md 3.4.
+    int16_t cx = 0, cy = 0, cz = 0;
+
+    // Horizontal field magnitude, sqrt(cx^2 + cy^2), in raw LSB (120 LSB/uT at
+    // the 2 G range). Held flat with a good calibration this is CONSTANT
+    // regardless of heading -- so departures from that baseline are what
+    // distinguish tilt from a stale calibration from a magnetic disturbance.
+    // Computed implicitly by the heading atan2 and previously discarded.
+    float h_mag = 0.0f;
+
     float heading = NAN;       // degrees 0-360, magnetic north
     bool valid = false;
     bool overflow = false;     // sensor saturation flag

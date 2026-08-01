@@ -115,12 +115,24 @@ bool read(CompassData& out) {
     // Check overflow
     out.overflow = (status & STATUS_OVL) != 0;
 
-    // Apply hard-iron calibration offsets
-    int16_t cx = out.x_raw - cal_x_offset;
-    int16_t cy = out.y_raw - cal_y_offset;
+    // Apply hard-iron calibration offsets.
+    // Z is included for the first time here. It changes nothing today because a
+    // flat 360 spin cannot calibrate Z (the axis keeps pointing at the same part
+    // of the sky, so min ~= max) and cal_z_offset is therefore hardcoded 0 at
+    // save time -- but the heading formula stays 2-axis, so a real Z offset from
+    // a future tumble calibration cannot perturb the heading either. This makes
+    // the code correct ahead of that work rather than silently ignoring a stored
+    // value. See docs/compass_calibration_foundation.md 3.4.
+    out.cx = out.x_raw - cal_x_offset;
+    out.cy = out.y_raw - cal_y_offset;
+    out.cz = out.z_raw - cal_z_offset;
+
+    // Horizontal field magnitude. Constant with heading when flat and calibrated;
+    // every failure mode perturbs it distinguishably (5.1 of the doc above).
+    out.h_mag = sqrtf((float)out.cx * (float)out.cx + (float)out.cy * (float)out.cy);
 
     // Compute heading (degrees, 0-360, magnetic north)
-    float heading = atan2f((float)cy, (float)cx) * 180.0f / M_PI;
+    float heading = atan2f((float)out.cy, (float)out.cx) * 180.0f / M_PI;
     if (heading < 0) heading += 360.0f;
 
     // No mounting offset needed — empirically verified with 4 cardinal points.

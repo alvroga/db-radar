@@ -153,6 +153,11 @@ bool initializeAll(const Config& config) {
     // 6b. Compass - QMC5883L on BH-880 module (non-critical)
     g_device_state.compass_ok = initCompass();
 
+    // 6c. Accelerometer - QMI8658 on the main board (non-critical).
+    // Already on the shared bus and ACKing before this change; only transactions
+    // are new. Honours the accel_enabled kill switch.
+    g_device_state.accel_ok = initAccel();
+
     // 7. LCD Display - Critical component
     g_device_state.lcd_ok = initLCD(g_config);
     if (!g_device_state.lcd_ok) {
@@ -386,6 +391,29 @@ bool initCompass() {
     }
 
     Serial.println("[COMPASS] Initialized successfully");
+    return true;
+}
+
+bool initAccel() {
+    const auto& settings = settings_manager::getSettings();
+    if (!settings.accel_enabled) {
+        accel_qmi8658::setEnabled(false);
+        Serial.println("[ACCEL] Disabled in settings — not initializing");
+        return false;
+    }
+
+    Serial.println("[ACCEL] Initializing QMI8658 (accelerometer only)...");
+    accel_qmi8658::setEnabled(true);
+
+    // Gyro stays off. It is the wrong sensor for tilt (it measures rate, not
+    // which way is down) and it draws several times the accel's current. It is
+    // enabled only for field sample 9, from the Field Log screen.
+    if (!accel_qmi8658::begin(false)) {
+        Serial.println("[ACCEL] Initialization failed — tilt data unavailable");
+        return false;
+    }
+
+    Serial.println("[ACCEL] Initialized successfully");
     return true;
 }
 

@@ -46,6 +46,7 @@ static const char* KEY_HEADING_UP = "heading_up";
 static const char* KEY_COMPASS_CAL_X  = "cal_cx";
 static const char* KEY_COMPASS_CAL_Y  = "cal_cy";
 static const char* KEY_COMPASS_CAL_Z  = "cal_cz";
+static const char* KEY_ACCEL_EN       = "accel_en";
 static const char* KEY_COMPASS_CALED  = "cal_done";
 static const char* KEY_DECL_DEG   = "decl_deg";
 static const char* KEY_DECL_VALID = "decl_valid";
@@ -271,6 +272,7 @@ bool loadSettings(RadarSettings& settings) {
     settings.compass_calibrated          = nvs_getbool(h, KEY_COMPASS_CALED, false);
     settings.compass_declination_deg     = nvs_getfloat(h, KEY_DECL_DEG, 0.0f);
     settings.compass_declination_valid   = nvs_getbool(h, KEY_DECL_VALID, false);
+    settings.accel_enabled               = nvs_getbool(h, KEY_ACCEL_EN, true);
 
     nvs_close_ns(h, false);
     return true;
@@ -685,6 +687,13 @@ bool loadGPSState(double& lat, double& lon, uint32_t& fix_time) {
 // ============================================================================
 // Beacon Proximity Settings
 // ============================================================================
+
+bool saveAccelEnabled(bool enabled) {
+    if (!is_initialized) return false;
+    NVS_SAVE_OPEN(); nvs_setbool(h, KEY_ACCEL_EN, enabled); NVS_SAVE_CLOSE();
+    g_cached_settings.accel_enabled = enabled;
+    Serial.printf("[SETTINGS] Accelerometer reads %s\n", enabled ? "ENABLED" : "DISABLED");
+    return true; }
 
 bool saveBeaconProximityEnabled(bool enabled) {
     // Session-only — update cache only, never write to NVS.

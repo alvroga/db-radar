@@ -10,13 +10,14 @@ For completed features and history, see [CHANGELOG.md](CHANGELOG.md).
 
 ### FT-06: I2C Bus Freeze — Recurring
 **Severity**: Critical — full interface freeze, required a manual power cycle once
-**Status**: recovery code shipped 2026-07-31, but ⚠️ **the root cause is back to unproven.** A third
-freeze that evening was not rescued by the watchdog, and re-examination voided two of the three
-evidence legs: the 61-device bus scan was a `diag i2c` probe artifact (fixed, verified 61 → 6), and
-`[I2C] Bus reset OK` is unverifiable on ESP32-S3 per the IDF source. The code stays (cheap, harmless);
-the diagnosis restarts from the next freeze, where the now-trustworthy `diag i2c` and `task status`
-loop counters give real evidence. **Note**: serial silence is not a freeze — the console died for
-~4 minutes while the device ran perfectly.
+**Status**: recovery code shipped 2026-07-31; the 2026-07-31 debunking (61-device scan was a probe
+artifact, `Bus reset OK` unverifiable) is now **partially reopened**. 2026-08-02 field-log
+verification caught a fresh, non-probe freeze: a runtime NACK burst on the compass — an established,
+previously-working device, not a boot-time probe — that also took down touch and the buzzer (shared
+bus), and on the next reboot `[I2C] Bus reset OK` / `[I2C] EXIO recovered after clock pulses` fired,
+meaning the bus was genuinely electrically wedged across the reboot. Root cause and trigger still
+unknown; recovery code appears to be doing real work this time. **Note**: serial silence is not a
+freeze — the console died for ~4 minutes in an earlier incident while the device ran perfectly.
 
 **Symptom**: reported twice in one session. Button, touchscreen, and display updates all stop
 responding. First time needed a full power cycle to clear; second time self-cleared when the device
@@ -129,7 +130,8 @@ stays sharp).
 
 ### Compass Calibration & Tilt — heading is only valid held flat
 **Severity**: High — the compass is the sole heading source, and it inverts when the device is tilted
-**Status**: designed 2026-08-01, blocked on field data
+**Status**: WP-0 done and verified; WP-1 (field logging build) implemented 2026-08-01, awaiting
+hardware verification, then the trip
 
 **Symptom** (field-confirmed): facing north held **flat**, N points to the top — correct. Facing north
 held **vertical**, N points to the **bottom**. The heading formula is 2-axis (`atan2(cy, cx)`), so the
@@ -141,9 +143,9 @@ detects a stale calibration — opening the enclosure invalidates it silently.
 (2) 3-axis calibration; (3) accelerometer tilt compensation; (4) τ-per-zoom smoothing. Gyro is
 deferred, not rejected. Nothing gets built before a field trip supplies the thresholds.
 
-**Also found**: `HEADING_SMOOTHING` went 0.8@1Hz → 0.3@10Hz, which did **not** preserve the time
-constant (0.62 s → 0.28 s) — a likely cause of the reported heading bounce. One-constant test, no
-field data needed.
+**Resolved along the way**: `HEADING_SMOOTHING` went 0.8@1Hz → 0.3@10Hz, which did **not** preserve
+the time constant (0.62 s → 0.28 s). Restored to α = 0.15 (τ ≈ 0.62 s) and **verified on a walk** —
+the heading bounce is gone. See CHANGELOG.md.
 
 **Supersedes** FT-02 below, whose "won't fix" reasoning assumed a 1 Hz compass rate.
 

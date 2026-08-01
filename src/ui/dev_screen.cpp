@@ -5,6 +5,7 @@
 #include "settings_manager.h"
 #include "system_logger.h"
 #include "ntp_sync.h"
+#include "ui/field_log_screen.h"
 #include "core/arduino_compat.h"
 
 namespace dev_screen {
@@ -32,6 +33,12 @@ static void logging_toggle_event(lv_event_t* e) {
 
         // Update status display
         updateLoggerStatus();
+    }
+}
+
+static void field_log_button_event(lv_event_t* e) {
+    if (lv_event_get_code(e) == LV_EVENT_CLICKED) {
+        field_log_screen::open();
     }
 }
 
@@ -278,6 +285,25 @@ void createDevTab(lv_obj_t* parent) {
     lv_obj_center(refresh_label);
 
     y_offset += 45;
+
+    // === FIELD LOG (compass calibration data capture) ===
+    // Deliberately at the top of the tab: it is the one control that has to be
+    // found quickly, sometimes outdoors in the sun with gloves on.
+    lv_obj_t* flog_btn = lv_btn_create(parent);
+    lv_obj_set_size(flog_btn, 200, 48);
+    lv_obj_align(flog_btn, LV_ALIGN_TOP_LEFT, 0, y_offset);
+    lv_obj_set_style_bg_color(flog_btn, lv_color_hex(0x006688), 0);
+    lv_obj_set_style_border_width(flog_btn, 0, 0);
+    lv_obj_set_style_radius(flog_btn, 8, 0);
+    lv_obj_add_event_cb(flog_btn, field_log_button_event, LV_EVENT_CLICKED, nullptr);
+
+    lv_obj_t* flog_lbl = lv_label_create(flog_btn);
+    lv_label_set_text(flog_lbl, "Field Log >");
+    lv_obj_set_style_text_font(flog_lbl, &iosevka_16, 0);
+    lv_obj_set_style_text_color(flog_lbl, lv_color_white(), 0);
+    lv_obj_center(flog_lbl);
+
+    y_offset += 60;
 
     // === SYSTEM LOGGING SECTION ===
     lv_obj_t* logging_label = lv_label_create(parent);
