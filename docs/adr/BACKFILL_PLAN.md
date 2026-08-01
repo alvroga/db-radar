@@ -1,9 +1,10 @@
-# ADR historical backfill — prepared, not yet run
+# ADR historical backfill — ✅ run 2026-08-01
 
-**Status**: not started. This is a ready-to-fire agent spec for a future session — no need to run it
-now. Trigger with something like "run the ADR backfill" and paste the prompt below into a fresh
-non-fork agent (a fork would inherit an unrelated conversation; this job wants a clean read of the
-repo instead).
+**Status**: complete. Produced ADRs **0004–0017** (14 files), listed in
+[`README.md`](README.md#index). The plan below is kept as the record of what was intended; see
+[Outcome](#outcome--what-actually-happened) at the end for how it differed in practice.
+
+Everything from here to "Outcome" is the original pre-run spec, unedited.
 
 ## Why this is a backward pass, and why it's low-priority
 
@@ -74,3 +75,42 @@ flag it back for review rather than committing directly. Spot-check 2-3 ADRs aga
 material for the most likely failure mode: an ADR that states the *fix* as if it were the original
 *decision* (e.g. writing "decision: use τ-based EMAs" when the actual decision-with-alternatives was
 "continuous mapping vs discrete zones," and the EMA is just an implementation detail of that).
+
+---
+
+## Outcome — what actually happened
+
+Run 2026-08-01. Haiku survey → editorial review → three Sonnet writers in parallel. 19 candidates
+surveyed, 14 ADRs written (0004–0017). Four things are worth knowing before anyone reuses this
+procedure.
+
+**The model split held up, and the review gate between the steps was where the value was.** Haiku
+enumerated and quoted accurately; its *judgement* needed correcting on five of nineteen candidates.
+Four were rejected outright as not-decisions — a one-character bug fix (sonar `+=` vs `= now +`), a
+tuned constant whose loser stopped mattering rather than losing on merit (32 vs 64px tile), an item
+still genuinely undecided (bounce buffer), and `clip_corner`, which the survey itself conceded "was
+never a genuine choice" before listing it anyway. Three others (beacon tempo / waypoint tempo /
+input-filtering principle) were merged into one ADR, as this plan had already guessed they might be.
+Having the survey emit verbatim quotes rather than only pointers is what made that review cheap
+enough to do properly, and it meant the writing pass never had to re-read the ~10,300 lines.
+
+**Parallelising the write is safe if — and only if — the numbers are assigned up front.** Three
+agents wrote concurrently with fixed number ranges and disjoint file lists. No collisions, no
+renumbering.
+
+**The predicted failure mode did occur, in the survey, and was caught.** It quoted the 480-line
+buffer's rationale out of CLAUDE.md's section explicitly headed `⚠️ SUPERSEDED` — the one whose own
+header says three of its claims are now false — and reproduced a dead justification as current.
+Generalise: a backfill agent reading historical prose will not notice that the prose has been
+retracted. Anything quoting a doc section marked superseded needs a human check.
+
+**Verification instructions produced better ADRs than the survey could have.** Told to confirm rather
+than accept a framing, the writers overturned the survey twice and found material nobody had: 90°
+hardware rotation turned out to be *unavailable* on an RGB ST7701 (no line buffer for MADCTL `MV`)
+rather than rejected, with two further alternatives — pre-rotating geometry, remounting the panel —
+that the backlog explicitly says not to re-propose; and 0006 surfaced a real open gap, that no fresh
+justification for `BUFFER_LINES = 480` has been written since the pipeline was rewritten around it.
+The lesson is narrow and reusable: point the writing pass at the *specific* claims you doubt.
+
+Three ADRs (0006, 0013, 0014) deliberately record reasoning that is stale or untested rather than
+settled — see the caveat in [`README.md`](README.md#status). That is the honest state of the record.

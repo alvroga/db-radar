@@ -6,7 +6,7 @@ The ESP32-S3 Touch LCD Template features a comprehensive configuration managemen
 
 ## Central Configuration Files
 
-### `include/system_config.h`
+### `include/core/system_config.h`
 The main configuration header that consolidates all system parameters into organized namespaces:
 
 - **Hardware Variant Selection**: Choose between supported display configurations
@@ -18,14 +18,14 @@ The main configuration header that consolidates all system parameters into organ
 - **Memory Configuration**: Heap thresholds, pool settings, monitoring intervals
 - **Feature Enablement**: Runtime flags for optional functionality
 
-### `include/system_config_variants.h`
+### `include/core/system_config_variants.h`
 Hardware variant definitions for different display configurations with complete pin mappings and timing parameters.
 
 ## Hardware Variant Support
 
 ### Selecting a Hardware Variant
 
-In `include/system_config.h`, uncomment ONE of the following lines:
+In `include/core/system_config.h`, uncomment ONE of the following lines:
 
 ```cpp
 // Hardware variant selection

@@ -24,7 +24,7 @@ This is a **production-ready PlatformIO template** for ESP32-S3 touch LCD develo
 
 The project now features a comprehensive configuration management system that consolidates all magic numbers and provides runtime control via serial commands.
 
-**Central Configuration** (`include/system_config.h`):
+**Central Configuration** (`include/core/system_config.h`):
 - **Hardware Variants**: Support for multiple display configurations (480x480, 320x240, 240x320)
 - **Organized Namespaces**: display, pins, communication, timing, ui, backlight, memory, features
 - **Compile-time Validation**: Static assertions ensure configuration consistency
@@ -66,8 +66,8 @@ namespace system_config {
 
 The project now features a **comprehensive FreeRTOS multitasking architecture** that eliminates the I2C-based freezes and significantly improves system responsiveness. This addresses the core issue of 100ms UI freezes caused by blocking I2C operations.
 
-**Task Architecture** (`src/task_manager.cpp` and `include/task_manager.h`):
-- **UI Task** (Core 1, Priority 3) - LVGL processing and touch input for maximum responsiveness
+**Task Architecture** (`src/utils/task_manager.cpp` and `include/utils/task_manager.h`):
+- **UI Task** (Core 1, Priority 5) - LVGL processing and touch input for maximum responsiveness
 - **I2C Task** (Core 0, Priority 2) - All device communication via queued requests with callbacks
 - **Network Task** (Core 0, Priority 1) - WiFi/BLE scanning operations (can be disabled)
 - **System Task** (Core 0, Priority 1) - Memory monitoring, diagnostics, and status updates
@@ -84,11 +84,20 @@ The project now features a **comprehensive FreeRTOS multitasking architecture** 
 struct TaskConfig {
     static constexpr size_t UI_STACK_SIZE = 16384;     // UI + LVGL processing
     static constexpr size_t I2C_STACK_SIZE = 8192;     // I2C operations
-    static constexpr UBaseType_t UI_PRIORITY = 3;      // Highest for responsiveness
+    static constexpr UBaseType_t UI_PRIORITY = 5;      // Above FreeRTOS timer svc (1), below WiFi driver (22-23)
     static constexpr BaseType_t UI_CORE = 1;           // Core 1 for UI
     static constexpr BaseType_t OTHER_CORE = 0;        // Core 0 for everything else
 };
 ```
+
+**`UI_PRIORITY` is a bracket, not a tuned value** — don't "tidy" it back down. Higher number = higher
+priority in FreeRTOS (opposite of Unix `nice`), and priority only arbitrates *within a core*. The UI
+Task is alone on Core 1; I2C/Network/System are all on Core 0, so their numbers never compete with it.
+The only constraint is the one the comment states: stay above `loopTask` and the FreeRTOS timer
+service (both priority 1, `CONFIG_FREERTOS_TIMER_TASK_PRIORITY=1`) and well below the WiFi/BT stack
+(~22-23) and IPC tasks (24), which must outrank application code. Nothing in the project occupies 3
+or 4, so any value in that gap schedules identically — this was 3 for a long time with no behavioural
+difference, and the docs said 3 well after the code said 5.
 
 **Task Management Commands** (via serial):
 - `task status` - Show real-time task statistics and health
@@ -107,11 +116,23 @@ The legacy `timer1sCallback` in navigation.cpp was performing direct I2C operati
 **Backwards Compatibility:**
 The system includes a fallback mode that can switch to legacy loop-based architecture if needed, ensuring project compatibility while providing the benefits of advanced multitasking.
 
-### **✅ OPTIMIZED DISPLAY PERFORMANCE** (Priority 3.6 Complete)
+### **⚠️ OPTIMIZED DISPLAY PERFORMANCE** (Priority 3.6 — SUPERSEDED, kept as history)
+
+> **Read the Render Pipeline section near the end of this file instead.** This section predates the
+> ESP-IDF migration and the 2026-07-28 render work, and three of its claims are now false:
+> - *"ESP-IDF version doesn't support bounce buffer"* — **wrong.** A 10-line SRAM bounce buffer is
+>   configured and active (`system_config.h` `BOUNCE_BUFFER_LINES = 10`, 18.75KB;
+>   `device_manager.cpp` `cfg.bounce_buffer_size_px`).
+> - *"`full_refresh = 0` / partial refresh"* — **inverted.** It is `1` in the default TILED rotation
+>   mode and must be, or the transpose leaves stale pixels. See load-bearing constraint #3.
+> - *"software rotation"* — replaced by a tiled transpose in the flush callback; LVGL `sw_rotate` is
+>   off in the default mode.
+>
+> What is still true: the 10MHz PCLK boundary, `BUFFER_LINES = 480`, and the tearing analysis.
 
 The project now features **enhanced display performance** through careful optimization while maintaining the rock-solid stability of the proven 10MHz PCLK timing. Comprehensive testing revealed critical stability boundaries that guided the final optimization approach.
 
-**Display Configuration Optimizations** (`include/system_config.h` and `src/device_manager.cpp`):
+**Display Configuration Optimizations** (`include/core/system_config.h` and `src/core/device_manager.cpp`):
 - **Full-Frame LVGL Buffers**: Optimized from 40 → 50 → 120 → 160 → **480 lines** (full frame — eliminates transition wipe artifact with software rotation)
 - **Partial Refresh for Performance**: Enabled selective screen updates for fast rendering
 - **Critical Timing Preserved**: 10MHz PCLK maintained as the proven stable frequency
@@ -160,26 +181,29 @@ disp_drv.full_refresh = 0;          // Partial refresh for fast rendering
 - **Critical path optimization** requires extreme care in interrupt-driven callbacks
 
 ### **PlatformIO Settings**
+
+**The build is ESP-IDF, not Arduino.** The env is `cc-radar`; `cc-moat-port` and the Arduino
+framework are pre-migration history. Behaviour-affecting settings live in `sdkconfig.defaults`, not
+only here — and editing that file alone does **not** change the build (see the `sdkconfig` note in
+the Render Pipeline section).
+
 ```ini
-[env:cc-moat-port]
+[env:cc-radar]
 platform = espressif32
 board = esp32-s3-devkitc-1
-framework = arduino
+framework = espidf
 board_upload.flash_size = 16MB
-board_build.partitions = partitions/partitions.csv
+board_build.partitions = partitions/partitions_ota.csv
 board_build.filesystem = fatfs
-board_build.arduino.memory_type = qio_opi
-build_flags =
-    -DARDUINO_USB_MODE=1
-    -DARDUINO_USB_CDC_ON_BOOT=1
-    -DLV_CONF_INCLUDE_SIMPLE
-    -Iinclude
+board_build.flash_mode = dio        ; ROM-loader mode only — runs QIO at runtime, see the .ini comment
+board_build.f_flash = 80000000L
 ```
 
 ### **Memory Layout**
-- **Custom Partitions**: `partitions/partitions.csv` with 3MB app space and 10MB FFat filesystem
-- **PSRAM**: QIO OPI for enhanced performance with 64-byte alignment
-- **Flash**: 16MB with optimized partition scheme
+- **Custom Partitions**: `partitions/partitions_ota.csv` — 2 × 2MB OTA app slots + ~11.7MB FFat.
+  (`partitions/partitions.csv` is the orphaned pre-OTA 3MB/10MB table — unused, see its header.)
+- **PSRAM**: octal PSRAM, 64-byte alignment for DMA/framebuffer allocations
+- **Flash**: 16MB, running **QIO** despite `flash_mode = dio` above
 
 ## Development Commands
 
@@ -375,8 +399,8 @@ src/
 ### **LVGL Integration**
 - **Version**: 8.3.11
 - **Configuration**: `LV_CONF_INCLUDE_SIMPLE` mode
-- **Memory**: Direct framebuffer access with dual buffers
-- **Performance**: 40-line bounce buffer, 64-byte PSRAM alignment
+- **Memory**: Direct framebuffer access with dual buffers, `BUFFER_LINES = 480` (full frame)
+- **Performance**: 10-line SRAM bounce buffer (18.75KB), 64-byte PSRAM alignment
 
 ### **✅ PROFESSIONAL MEMORY MANAGEMENT** (Priority 2.3 Complete)
 
@@ -444,7 +468,8 @@ if (millis() - last_read >= 5000) {  // 5 second intervals
 
 ### **✅ Display Performance**
 ```cpp
-// Use full refresh for stability
+// full_refresh tracks the rotation mode — 1 for TILED (the default), 0 otherwise.
+// It is NOT a free choice: see load-bearing constraint #3 in the Render Pipeline section.
 lv_disp_drv_t disp_drv;
 disp_drv.full_refresh = 1;
 
@@ -622,7 +647,9 @@ Dual-strategy intelligent filtering system that prevents visual clutter while ma
 - Keeps only closest waypoint per sector
 - **Result**: 50 waypoints off-screen → only 8 indicators (prevents clutter)
 
-**Performance**: O(n) complexity, <2ms for 50 waypoints @ 240MHz, 128 bytes stack allocation
+**Performance**: O(n) complexity, 128 bytes stack allocation. The "<2ms for 50 waypoints" figure once
+quoted here was never measured — waypoint drawing is ~5ms in the instrumented frame breakdown. Read
+`wpt_us` off the `perf` HUD rather than trusting either number.
 
 **Code References**:
 - Algorithm: `src/ui/navigation.cpp:291-395` - `drawWaypoints()` function
@@ -690,10 +717,13 @@ Dual-mode navigation system allowing users to choose between heading-up (walking
 
 **User Problem Solved**: "when I turn left my brain was expecting to move forward but in the radar I was moving left" - cognitive dissonance eliminated
 
-**GPS Heading Source**:
-- NMEA RMC sentence fields 7-8 (speed + course)
-- Reliability threshold: 0.5 knots minimum speed
-- Update rate: 1 Hz (GPS limitation)
+**Heading Source** — ⚠️ **this is now the compass, not GPS.** GPS heading fusion was removed from
+`navigation.cpp` entirely; the QMC5883L is the sole heading source, read at 10Hz by the System Task
+and applied via `ui.current_heading`. GPS still supplies *position*, over **UBX** (NAV-PVT), not NMEA.
+The description below is retained only to explain the older design:
+- ~~NMEA RMC sentence fields 7-8 (speed + course)~~ — GPS is UBX binary; RMC is not parsed
+- ~~Reliability threshold: 0.5 knots minimum speed~~ — no longer applicable, a compass works at rest
+- ~~Update rate: 1 Hz~~ — heading updates at 10Hz from the compass
 
 **Coordinate Rotation**:
 - 2D rotation matrix: `-heading` radians (counterclockwise)

@@ -24,11 +24,45 @@ renumbered to make file order match decision order. Each ADR's `Date:` field car
 decision date, so sort on that field for chronological order — not on the filename. This is so a
 citation like "ADR-0007" never breaks.
 
+## Index
+
+Sorted by number (creation order). The `Date:` field inside each file carries the real decision
+date — sort on that for chronology, not on the filename.
+
+| # | Decision | Date | Status |
+|---|---|---|---|
+| [0001](0001-waypoint-detail-psram-cache.md) | Cache waypoint desc/hint in PSRAM rather than re-reading the GPX file on tap | 2026-07-31 | Accepted |
+| [0002](0002-serial-logging-default-independent-of-dev-mode.md) | Serial logging defaults ON, independent of `dev_mode` | 2026-07-31 | Accepted |
+| [0003](0003-proactive-i2c-bus-recovery-watchdog.md) | Proactive I2C bus-recovery watchdog, not per-failure or task-hang-triggered recovery | 2026-07-31 | Accepted |
+| [0004](0004-tiled-transpose-display-rotation.md) | Tiled transpose in the flush callback, not LVGL `sw_rotate` | 2026-07-28 | Accepted |
+| [0005](0005-zero-copy-radar-draw-event.md) | Radar paints via `LV_EVENT_DRAW_MAIN`, not an `lv_canvas` blit | 2026-07-28 | Accepted |
+| [0006](0006-full-frame-lvgl-draw-buffers.md) | Full-frame (480-line) LVGL draw buffers | 2026-03-20 | Accepted |
+| [0007](0007-dual-panel-framebuffers-zero-copy-flush.md) | Dual panel framebuffers with zero-copy flush | 2026-07-28 | Accepted |
+| [0008](0008-zero-copy-render-path-invariants.md) | Accept the zero-copy render path's four load-bearing invariants | 2026-07-28 | Accepted |
+| [0009](0009-nimble-instead-of-bluedroid.md) | NimBLE instead of Bluedroid | 2026-03-20 | Accepted |
+| [0010](0010-continuous-passive-ble-scan.md) | Continuous passive BLE scan instead of active stop/restart | 2026-07-31 | Accepted |
+| [0011](0011-continuous-mappings-input-filtering.md) | Continuous mappings with input-side filtering, instead of discrete zones with output-side hysteresis | 2026-07-31 | Accepted |
+| [0012](0012-beacon-priority-over-waypoint-sonar.md) | Beacon takes absolute priority over the fixed-waypoint sonar | 2026-07-31 | Accepted |
+| [0013](0013-i2c-process-ms-tuned-floor.md) | `I2C_PROCESS_MS = 20` is a tuned floor, not an arbitrary interval | 2026-07-31 | Accepted |
+| [0014](0014-compass-stays-on-shared-i2c-bus.md) | Compass stays on the shared I2C bus rather than moving to a second bus | 2026-03 | Accepted |
+| [0015](0015-body-shadow-direction-finding-not-aoa.md) | Body-shadow direction finding instead of BT 5.1 Angle-of-Arrival | 2026-07-31 | **Proposed** |
+| [0016](0016-freertos-multitask-architecture.md) | FreeRTOS multi-task architecture instead of a single Arduino loop | 2025-10 | Accepted |
+| [0017](0017-compass-sole-heading-source.md) | Compass as the sole heading source, replacing GPS heading fusion | 2026-03-20 | Accepted |
+
 ## Status
 
 - **Going forward**: new architectural decisions get an ADR at the time they're made (see CLAUDE.md
-  → Documentation Standards).
-- **Historical backfill**: decisions made before 2026-07-31 are *not yet* captured as ADRs — they
-  live only in CHANGELOG.md, ROADMAP.md, and `docs/performance_optimization_backlog.md`. A plan for
-  reconstructing them (a lightweight background pass, not urgent) is prepared in
-  [`BACKFILL_PLAN.md`](BACKFILL_PLAN.md).
+  → Documentation Standards). Next free number: **0018**.
+- **Historical backfill**: ✅ complete (2026-08-01). ADRs 0004–0017 were reconstructed from
+  CHANGELOG.md, ROADMAP.md, `docs/performance_optimization_backlog.md`, the component docs and git
+  history, following [`BACKFILL_PLAN.md`](BACKFILL_PLAN.md). They carry
+  `Decided by: Claude (backfilled from project history 2026-07-31)` so a reader can tell a
+  reconstruction from a decision recorded as it was made.
+
+  **Read backfilled ADRs with one caveat**: their reasoning was recovered from prose written at
+  various times, and three of them record reasoning now known to be *stale or unverified* rather
+  than settled — 0006 (the 480-line buffer's original justification expired when the render pipeline
+  was rewritten around it, and no fresh one has been written), 0013 (10ms broke the device on
+  hardware, but the root cause was never diagnosed) and 0014 (the original "compass can't share the
+  bus" reasoning describes the pre-ESP-IDF Arduino build and has never been retested). Each says so
+  in its own text. That is the honest state of the record, not an omission to be tidied away.
