@@ -230,8 +230,10 @@ int parseGPXFile(const char* filepath) {
                         }
                         strncpy(wp.name,         wp_name,         sizeof(wp.name) - 1);
                         strncpy(wp.display_name, dname,           sizeof(wp.display_name) - 1);
-                        strncpy(wp.desc,         wp_desc,         sizeof(wp.desc) - 1);
-                        strncpy(wp.hint,         wp_hint,         sizeof(wp.hint) - 1);
+                        // desc/hint are pointers into a PSRAM block (see ui_manager::init());
+                        // null only if that allocation failed.
+                        if (wp.desc) strncpy(wp.desc, wp_desc, ui_manager::WaypointDetail::DESC_SIZE - 1);
+                        if (wp.hint) strncpy(wp.hint, wp_hint, ui_manager::WaypointDetail::HINT_SIZE - 1);
                         waypoints_loaded++;
                         ui.waypoint_count = waypoints_loaded;
 

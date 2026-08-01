@@ -27,12 +27,29 @@ constexpr ZoomConfig RadarConfig::ZOOM_CONFIGS[];
 static Config g_config;
 static UIState g_ui_state;
 
+// PSRAM-backed desc/hint storage for all waypoints — see WaypointDetail comment in ui_manager.h.
+// Frees ~64KB SRAM (50 waypoints x 1280B) vs. embedding these fields directly in Waypoint.
+static WaypointDetail* g_waypoint_details = nullptr;
+
 UIState& getUIState() {
     return g_ui_state;
 }
 
 bool init(const Config& config) {
     g_config = config;
+
+    // Allocate waypoint desc/hint storage in PSRAM and wire each waypoint's pointers to it.
+    // heap_caps_calloc zero-initializes, matching the fields' default-constructed state.
+    g_waypoint_details = (WaypointDetail*)heap_caps_calloc(
+        RadarConfig::MAX_WAYPOINTS, sizeof(WaypointDetail), MALLOC_CAP_SPIRAM);
+    if (!g_waypoint_details) {
+        Serial.println("[UI] ERROR: PSRAM alloc failed for waypoint desc/hint — details disabled");
+    } else {
+        for (int i = 0; i < RadarConfig::MAX_WAYPOINTS; i++) {
+            g_ui_state.waypoints[i].desc = g_waypoint_details[i].desc;
+            g_ui_state.waypoints[i].hint = g_waypoint_details[i].hint;
+        }
+    }
 
     // Set root screen background (15% grey)
     lv_obj_t* scr = lv_scr_act();

@@ -114,7 +114,7 @@ void open() {
     // HINT SECTION — shown first so it's always reachable without scrolling
     // Hidden by default (geocaching spoiler), tap header to reveal/re-hide
     // =========================================================================
-    if (wp.hint[0]) {
+    if (wp.hint && wp.hint[0]) {
         lv_obj_t* lbl_hint_hdr = lv_label_create(panel);
         lv_label_set_text(lbl_hint_hdr, "HINT  (tap to reveal)");
         lv_obj_set_style_text_color(lbl_hint_hdr, lv_color_hex(0xFFAA00), 0);
@@ -146,7 +146,7 @@ void open() {
     // =========================================================================
     // DESCRIPTION SECTION — below hint, scroll down to read
     // =========================================================================
-    if (wp.desc[0]) {
+    if (wp.desc && wp.desc[0]) {
         lv_obj_t* lbl_desc_hdr = lv_label_create(panel);
         lv_label_set_text(lbl_desc_hdr, "DESCRIPTION");
         lv_obj_set_style_text_color(lbl_desc_hdr, lv_color_hex(0x00AA00), 0);

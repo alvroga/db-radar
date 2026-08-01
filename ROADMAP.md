@@ -64,29 +64,11 @@ stays sharp).
 
 **Symptom**: `RadarConfig::MAX_WAYPOINTS = 50` is a hard *load-time* cap. `gpx_loader.cpp:376` stops parsing at 50 and sets `was_truncated`. A geocaching.com pocket query routinely contains hundreds of caches, so most of the file never loads.
 
-**Root cause — it's a RAM ceiling, not a render ceiling.** `g_ui_state` is the single largest symbol in the firmware at **70,992 bytes** (next largest is `work_mem_int$4` at 65,536), which is ~37% of all static RAM. Almost all of it is the waypoint array:
-
-| Field | Bytes |
-|---|---|
-| `desc[1024]` | 1024 |
-| `hint[256]` | 256 |
-| `display_name[64]` | 64 |
-| `name[48]` | 48 |
-| lat/lon/valid/found | 24 |
-| **`sizeof(Waypoint)` (padded)** | **~1416** |
-
-× 50 = ~70,800 B. **`desc` + `hint` alone are 90% of it** — and they are read in exactly one place, `waypoint_screen.cpp:117,149`, the detail screen for a *single* waypoint at a time. All 50 copies sit resident in SRAM permanently to serve one on demand.
-
-**Proposed fix**: move `desc`/`hint` out of SRAM — either into PSRAM (8 MB, effectively free) or drop them from RAM entirely and re-read from the GPX file when a waypoint is tapped. `Waypoint` drops to ~136 bytes:
-
-- same 50 waypoints → ~6.8 KB instead of 70.8 KB (**frees ~64 KB SRAM**)
-- or the same ~70 KB budget buys **~500 waypoints**
-
-**⚠️ Implementation constraint**: allocate via `ps_malloc()` in `ui_manager::init()`. Do **not** use section attributes — `.ext_ram_noinit` causes a boot crash on this ESP-IDF version because constructors are not called for objects placed there. Keep the hot fields (LVGL pointers, zoom, heading, GPS centre — ~300 bytes) in SRAM and move only the `Waypoint[]` array.
+**The SRAM ceiling that motivated this cap is gone** — see Resolved below: `desc`/`hint` moved to PSRAM, freeing ~64 KB. `MAX_WAYPOINTS` itself has **not** been raised yet; this entry is now just that remaining step.
 
 **Note on the render side**: the cap is *not* what limits drawing. `drawWaypoints()` culls by distance before drawing (`navigation.cpp:633`) and renders only the fixed waypoint when one is selected (`navigation.cpp:614`), so draw cost scales with *visible* waypoints. What does scale with the cap is the per-waypoint Haversine loop — and the ESP32-S3 FPU is single-precision only, so all that `double` trig is soft-float. Read `wpt_us` off the `perf` HUD before raising the cap; §3.6 of the perf backlog proposes an equirectangular approximation that would cut it.
 
-**Key files**: `include/ui/ui_manager.h` (`Waypoint`, `MAX_WAYPOINTS`), `src/gpx/gpx_loader.cpp`, `src/ui/waypoint_screen.cpp`
+**Key files**: `include/ui/ui_manager.h` (`Waypoint`, `MAX_WAYPOINTS`), `src/gpx/gpx_loader.cpp`
 
 **Related**: [`docs/performance_optimization_backlog.md`](docs/performance_optimization_backlog.md) step 11
 
@@ -111,6 +93,17 @@ stays sharp).
 ---
 
 ## Resolved
+
+### Waypoint desc/hint moved to PSRAM — Resolved (2026-07-31)
+**Was**: `g_ui_state` was the largest firmware symbol (70,992 B, ~37% of static RAM), almost entirely `desc[1024]`/`hint[256]` × 50 waypoints, read in exactly one place (the detail screen, one waypoint at a time) but resident for all 50 permanently.
+
+**Resolution**: moved into a `WaypointDetail` block allocated once in PSRAM (`heap_caps_calloc(..., MALLOC_CAP_SPIRAM)` in `ui_manager::init()`); `Waypoint::desc`/`hint` are now pointers into it, guarded against a failed allocation rather than crashing. Frees ~64 KB SRAM — and flash dropped by almost the same amount too, confirmed via a `readelf` section diff (see CHANGELOG for why). **Verified on hardware, no regressions.**
+
+**Does not by itself raise `MAX_WAYPOINTS`** (still 50) — see Planned above for that follow-up.
+
+**Full analysis**: [`CHANGELOG.md`](CHANGELOG.md) · [ADR-0001](docs/adr/0001-waypoint-detail-psram-cache.md)
+
+---
 
 ### Beacon Responsiveness — the BLE feed was rate-starved at 2 Hz — Resolved (2026-07-31)
 **Was**: beacon proximity felt sluggish. ~3.3 s from moving to the ring changing, and the ring only had 4 states.

@@ -186,22 +186,24 @@ attenuates 2.4 GHz by 10–20 dB, and the QMC5883L supplies heading per sample.
 
 ---
 
-## 5. Waypoint memory optimization ⭐ *the real resource win* *(M)*
+## 5. Waypoint memory optimization ⭐ *the real resource win* *(M)* — ✅ DONE (partial), verified on hardware
 
-**If the goal is banking resources, this is the highest-yield item in the project** — ~8× more SRAM
-than anything in the render backlog, and it lifts a real user-facing limit.
+Built and field-verified 2026-07-31, no regressions. RAM 195,984 → 132,384 B (59.8% → 40.4%), flash
+1,670,831 → 1,607,099 B (79.7% → 76.6% — confirmed via `readelf` that the flash saving is real, not a
+residual guess: `g_ui_state` had non-zero fields forcing the whole object into `.dram0.data` instead of
+free `.bss`, so the all-zero `desc`/`hint` regions were costing flash too).
 
-`g_ui_state` is the largest symbol in the firmware at **70,992 B** (~37% of static RAM), almost all of
-it `desc[1024]` + `hint[256]` × 50 waypoints — read in exactly one place, for one waypoint at a time.
-
-- [ ] Move `desc`/`hint` out of SRAM (PSRAM via `ps_malloc()` in `ui_manager::init()`, or re-read from
-      the GPX file on tap). **Frees ~64 KB**, or buys ~500 waypoints in the same budget.
-- [ ] **⚠️ Do NOT use section attributes** — `.ext_ram_noinit` boot-crashes on this IDF because
-      constructors aren't called there. Keep hot fields (~300 B) in SRAM, move only `Waypoint[]`.
-- [ ] Read `wpt_us` off the `perf` HUD *before* raising the cap — the per-waypoint Haversine is
+- [x] Moved `desc`/`hint` out of SRAM into a PSRAM `WaypointDetail` block (`heap_caps_calloc(...,
+      MALLOC_CAP_SPIRAM)` in `ui_manager::init()`); `Waypoint::desc`/`hint` are now pointers into it,
+      guarded (`nullptr`-checked) at both call sites instead of crashing on alloc failure.
+- [x] No section attributes used, per the `.ext_ram_noinit` boot-crash warning.
+- [ ] **Still open**: `MAX_WAYPOINTS` itself is unchanged (still 50) — this only freed the headroom.
+      Read `wpt_us` off the `perf` HUD before raising the cap — the per-waypoint Haversine is
       soft-float `double` on a single-precision FPU. §3.6 proposes an equirectangular approximation.
 
-Details in [`../ROADMAP.md`](../ROADMAP.md).
+Details in [`../ROADMAP.md`](../ROADMAP.md), [`../CHANGELOG.md`](../CHANGELOG.md), and
+[`adr/0001-waypoint-detail-psram-cache.md`](adr/0001-waypoint-detail-psram-cache.md) (why PSRAM caching
+was chosen over re-reading the GPX file on tap).
 
 ---
 

@@ -17,6 +17,17 @@ struct Config {
     const lv_font_t* font = &iosevka_16;
 };
 
+// Backing storage for the large, rarely-read per-waypoint text fields.
+// Allocated as one PSRAM block (RadarConfig::MAX_WAYPOINTS entries) in ui_manager::init();
+// Waypoint::desc/hint below just point into it. Do NOT use section attributes
+// (.ext_ram_noinit boot-crashes on this IDF — constructors aren't run there).
+struct WaypointDetail {
+    static constexpr size_t DESC_SIZE = 1024;
+    static constexpr size_t HINT_SIZE = 256;
+    char desc[DESC_SIZE] = {};  // Description (short+long combined, HTML stripped, capped)
+    char hint[HINT_SIZE] = {};  // Hint (groundspeak:encoded_hints, empty for plain waypoints)
+};
+
 // Waypoint storage
 struct Waypoint {
     double lat = 0.0;
@@ -25,8 +36,8 @@ struct Waypoint {
     bool found = false;         // Marked found by tapping while within 15m
     char name[48] = {};         // Cache code (e.g. GC38EVJ) or waypoint name tag
     char display_name[64] = {}; // Human-readable title (groundspeak:name or fallback to name)
-    char desc[1024] = {};       // Description (short+long combined, HTML stripped, capped)
-    char hint[256] = {};        // Hint (groundspeak:encoded_hints, empty for plain waypoints)
+    char* desc = nullptr;       // Points into the PSRAM WaypointDetail block (nullptr if alloc failed)
+    char* hint = nullptr;       // Points into the PSRAM WaypointDetail block (nullptr if alloc failed)
 };
 
 // Zoom levels for radar display

@@ -633,6 +633,50 @@ Dual-strategy intelligent filtering system that prevents visual clutter while ma
 
 ---
 
+## Waypoint Memory Layout
+
+**Status**: Complete ✅ (2026-07-31) | [ADR-0001](docs/adr/0001-waypoint-detail-psram-cache.md)
+
+`Waypoint::desc`/`hint` (1024B + 256B each, × `MAX_WAYPOINTS` = 50) live in **PSRAM**, not SRAM — they
+were the single largest firmware symbol (70,992 B, ~37% of static RAM) despite being read in exactly
+one place (the detail screen, one waypoint at a time).
+
+```cpp
+// include/ui/ui_manager.h
+struct WaypointDetail {           // allocated as one PSRAM block, MAX_WAYPOINTS entries
+    char desc[1024] = {};
+    char hint[256] = {};
+};
+struct Waypoint {
+    // ... lat/lon/valid/found/name/display_name stay in SRAM (hot, small) ...
+    char* desc = nullptr;         // points into the PSRAM WaypointDetail block
+    char* hint = nullptr;         // nullptr if PSRAM allocation failed — guard before use
+};
+```
+
+**Allocation**: `heap_caps_calloc(MAX_WAYPOINTS, sizeof(WaypointDetail), MALLOC_CAP_SPIRAM)` in
+`ui_manager::init()` — never a section attribute (`.ext_ram_noinit` boot-crashes on this IDF, since
+constructors aren't run for objects placed there).
+
+**⚠️ `sizeof(wp.desc)` is now `sizeof(char*)` (8), not 1024.** Any code touching these fields must use
+`WaypointDetail::DESC_SIZE`/`HINT_SIZE` explicitly — this bitten-once footgun is why the guard exists.
+
+**Frees ~64KB SRAM — and flash too**, confirmed via a `readelf -S` section diff, not assumed:
+`g_ui_state` has non-zero-initialized fields (e.g. `current_zoom`'s default), so the whole object was
+placed in `.dram0.data` (a PROGBITS section — its zero bytes are literal zeros stored in flash and
+copied to RAM at boot) rather than the free `.dram0.bss`. `.dram0.bss` was byte-identical before/after
+the change; the entire saving came out of `.dram0.data`.
+
+This frees the SRAM headroom but does **not** itself raise `MAX_WAYPOINTS` past 50 — see ROADMAP.md.
+
+**Code References**:
+- Struct: `include/ui/ui_manager.h` - `WaypointDetail`, `Waypoint::desc`/`hint`
+- Allocation: `src/ui/ui_manager.cpp` - `init()`
+- Write site: `src/gpx/gpx_loader.cpp` - waypoint commit on `</wpt>`
+- Read site: `src/ui/waypoint_screen.cpp` - `open()`
+
+---
+
 ## Navigation Modes System
 
 **Status**: Complete ✅ | [Complete Guide](docs/navigation_modes.md)
@@ -967,4 +1011,4 @@ required for new work — tracked in `docs/adr/BACKFILL_PLAN.md`.
 
 *This document serves as the master reference for ESP32-S3 Touch LCD projects. Keep it updated as the architecture evolves.*
 
-**Last updated**: 2026-07-31 (full-subsystem performance audit: beacon BLE rate, sonar rhythm, direction-finding feasibility)
+**Last updated**: 2026-07-31 (waypoint desc/hint moved to PSRAM, freeing ~64KB SRAM and flash; full-subsystem performance audit: beacon BLE rate, sonar rhythm, direction-finding feasibility)

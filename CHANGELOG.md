@@ -9,6 +9,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+**Waypoint `desc`/`hint` moved from SRAM to PSRAM — frees ~64KB static RAM** — ✅ *verified on
+hardware, no regressions*
+
+`g_ui_state` was the largest symbol in the firmware (70,992 B, ~37% of static RAM), almost all of it
+`desc[1024]` + `hint[256]` × 50 waypoints — read in exactly one place (`waypoint_screen.cpp`, one
+waypoint at a time) but resident for all 50 permanently. Added a `WaypointDetail` struct holding just
+those two fields, allocated once as a single block via `heap_caps_calloc(MAX_WAYPOINTS,
+sizeof(WaypointDetail), MALLOC_CAP_SPIRAM)` in `ui_manager::init()`; `Waypoint::desc`/`hint` became
+`char*` pointers into it instead of embedded arrays. No section attributes (`.ext_ram_noinit`
+boot-crashes on this IDF); allocation failure is handled by leaving the pointers `nullptr` rather than
+crashing, guarded at both the one write site (`gpx_loader.cpp`) and the one read site
+(`waypoint_screen.cpp`). See [ADR-0001](docs/adr/0001-waypoint-detail-psram-cache.md) for why PSRAM
+caching was chosen over re-reading the GPX file on tap.
+
+**Flash dropped too, not just RAM — confirmed via `readelf`, not assumed.** `g_ui_state` has some
+non-zero-initialized fields (e.g. `current_zoom`'s default enum value), so the whole object —
+including the large all-zero `desc`/`hint` regions — was being placed in `.dram0.data` (a PROGBITS
+section: its zero bytes are stored as literal zeros in flash and copied to RAM at boot) rather than
+the free `.dram0.bss`. A `git stash` + `readelf -S` diff on the ELF showed `.dram0.bss` byte-identical
+before/after; the entire saving came out of `.dram0.data`, which is why shrinking this struct paid off
+in both partitions at once — not a coincidence, and not attributed without checking.
+
+`MAX_WAYPOINTS` is still 50 — this frees the headroom but does not itself raise the cap; that remains
+a separate follow-up (see ROADMAP).
+
+**Build impact**: RAM 195,984 → 132,384 B (59.8% → 40.4%), flash 1,670,831 → 1,607,099 B
+(79.7% → 76.6%).
+
+**Code references**: `include/ui/ui_manager.h` (`WaypointDetail`, `Waypoint::desc`/`hint`),
+`src/ui/ui_manager.cpp` (`init()` allocation), `src/gpx/gpx_loader.cpp` (write site),
+`src/ui/waypoint_screen.cpp` (read site).
+
 ### Fixed
 
 **Beacon sonar was choppy — the continuous tempo and trend-beep from the previous entry both had a
