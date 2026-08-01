@@ -81,9 +81,23 @@ bool init(const Config& config) {
     Serial.printf("[I2C] Initialized: SDA=%d, SCL=%d, freq=%luHz\n",
                   config.sda_pin, config.scl_pin, (unsigned long)config.frequency);
 
-    // Basic connectivity check
+    // Basic connectivity check. A failure here after a reboot (rather than a
+    // cold power-on) usually means a slave was left mid-transaction by whatever
+    // caused the reboot and is still holding SDA low — an MCU-only reset does
+    // not reset external chips. Clock it free before giving up: 9 SCL pulses
+    // (resetBus()) is the standard I2C bus-recovery procedure, and it's exactly
+    // what wake-from-standby already does successfully via reinit(). Retrying
+    // here means a reboot that follows a bus wedge comes back up working
+    // instead of staying crippled until a manual power cycle.
     if (!ping(EXIO_DEVICE)) {
-        Serial.println("[I2C] WARNING: EXIO device not responding after init");
+        Serial.println("[I2C] WARNING: EXIO device not responding — attempting clock recovery");
+        resetBus();
+        vTaskDelay(pdMS_TO_TICKS(10));
+        if (!ping(EXIO_DEVICE)) {
+            Serial.println("[I2C] WARNING: EXIO device still not responding after recovery");
+        } else {
+            Serial.println("[I2C] EXIO recovered after clock pulses");
+        }
     }
 
     return true;
@@ -131,7 +145,12 @@ bool read(DeviceHandle& dev, uint8_t reg, uint8_t* data, size_t len, int retries
     }
 
     xSemaphoreGiveRecursive(g_bus_mutex);
-    if (!success) g_stats.failed_ops++;
+    if (!success) {
+        g_stats.failed_ops++;
+        g_stats.consecutive_failures++;
+    } else {
+        g_stats.consecutive_failures = 0;
+    }
     return success;
 }
 
@@ -179,7 +198,12 @@ bool write(DeviceHandle& dev, uint8_t reg, const uint8_t* data, size_t len, int 
     }
 
     xSemaphoreGiveRecursive(g_bus_mutex);
-    if (!success) g_stats.failed_ops++;
+    if (!success) {
+        g_stats.failed_ops++;
+        g_stats.consecutive_failures++;
+    } else {
+        g_stats.consecutive_failures = 0;
+    }
     return success;
 }
 

@@ -8,6 +8,36 @@ For completed features and history, see [CHANGELOG.md](CHANGELOG.md).
 
 ## Known Issues
 
+### FT-06: I2C Bus Freeze — Recurring
+**Severity**: Critical — full interface freeze, required a manual power cycle once
+**Status**: fix built and committed 2026-07-31. Effectiveness is **monitored in the field, not
+lab-verified** — there's no safe way to deliberately jam the I2C bus on demand, so this was a
+deliberate decision to trust the design (it reuses `reinit()`, the exact recovery primitive
+standby-wake already proved clears this on this device) rather than block on an unreproducible test.
+
+**Symptom**: reported twice in one session. Button, touchscreen, and display updates all stop
+responding. First time needed a full power cycle to clear; second time self-cleared when the device
+went to standby and woke back up.
+
+**Root cause**: a stuck I2C bus — a slave (touch/RTC/EXIO) left mid-transaction holds SDA low
+indefinitely, and an MCU-only reset doesn't free it, so every subsequent I2C transaction fails until
+the bus is explicitly clock-recovered. Wake-from-standby already does this recovery
+(`i2c_manager::reinit()`) as a side effect, which is why the second occurrence cleared itself.
+
+**Fix**: a new consecutive-I2C-failure counter feeds (1) a boot-time retry-with-recovery when the
+initial device ping fails, and (2) a runtime watchdog in System Task that proactively calls the same
+`reinit()` recovery standby-wake already proved works, instead of requiring a manual sleep/wake or
+power cycle.
+
+**Related, separately broken**: the on-screen DEV/perf HUD label stayed frozen after the second
+freeze recovered, while touch/button/sound/rotation all came back — a distinct, not-yet-root-caused
+bug, likely a dangling LVGL object pointer. Not fixed by the above.
+
+**Full detail**: [`docs/TODO_next_session.md`](docs/TODO_next_session.md) → "PRIORITY 1" ·
+[ADR-0003](docs/adr/0003-proactive-i2c-bus-recovery-watchdog.md)
+
+---
+
 ### FT-03: Zoom Levels Not Progressive
 **Severity**: Medium — navigation confusion
 

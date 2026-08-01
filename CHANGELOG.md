@@ -9,6 +9,53 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+**I2C bus freeze — recurring full-interface lockup, self-heal recovery added** — ⏳ *fix built and
+committed; effectiveness monitored in the field rather than verified, since a stuck bus can't be
+safely reproduced on demand*
+
+Reported twice in one session: button, touchscreen, and display updates all stopped responding.
+First occurrence needed a full power cycle; the second self-cleared when the device went to standby
+and woke back up.
+
+**Root cause, confirmed rather than assumed**: a stuck I2C bus. A slave (CST820 touch, PCF85063 RTC,
+or TCA9554 EXIO) left mid-transaction holds SDA low indefinitely — an MCU-only reset doesn't power-cycle
+external chips, so it can't free them — and every subsequent transaction to every address fails until
+the bus is explicitly clock-recovered. The second occurrence is the confirming evidence, not just the
+theory: wake-from-standby calls `i2c_manager::reinit()` as part of its own recovery sequence
+(`standby_manager.cpp`), and that's what cleared touch/button/sound. The fix below generalizes that
+same, already-proven recovery primitive into something that triggers proactively.
+
+**Three changes**:
+1. **New `i2c_manager::Stats::consecutive_failures` counter** — increments on every failed
+   `read()`/`write()`, resets to 0 on success. A wedged bus fails *every* transaction to *every*
+   address, so a sustained run here (not one device's occasional miss, which clears on its next
+   success) is the signal a watchdog can act on.
+2. **Boot-time self-heal** in `i2c_manager::init()` — when the initial EXIO ping fails, run a clock
+   recovery (9 SCL pulses) and retry once before giving up, instead of warning and continuing
+   crippled. This also covers the previously-documented boot-hang case in `docs/troubleshooting.md`,
+   and any reboot that follows a runtime wedge — previously the device would come back up still
+   jammed, since an MCU reset can't free a slave that's holding the line.
+3. **Runtime watchdog** `checkI2CBusHealth()` in System Task (~10Hz) — at ≥10 consecutive failures
+   (under 1s of a fully jammed bus, given touch's ~11.7Hz poll rate), calls `i2c_manager::reinit()`.
+   2s cooldown between attempts, gives up after 5 with an `UNRECOVERABLE` log rather than retrying
+   forever against genuinely dead hardware.
+
+**Separately found alongside this, not fixed**: after the self-recovered freeze, the on-screen
+DEV/perf HUD label stayed frozen at stale values even though touch/button/sound/rotation all came
+back. Leading hypothesis is a dangling `ui.perf_label` LVGL pointer (its update is gated by
+`lv_obj_is_valid()`, which would silently no-op forever with no error) — not yet root-caused or fixed.
+
+**Build impact**: RAM 132,384 → 132,392 B (+8 B), flash 1,607,099 → 1,607,967 B (+868 B).
+
+**Code references**: `include/hardware/i2c/i2c_manager.h` (`Stats::consecutive_failures`),
+`src/hardware/i2c/i2c_manager.cpp` (`init()`, `read()`, `write()`), `src/utils/task_manager.cpp`
+(`checkI2CBusHealth()`, called from `systemTask()`).
+
+**Full analysis**: [`docs/TODO_next_session.md`](docs/TODO_next_session.md) → "PRIORITY 1" ·
+[ADR-0003](docs/adr/0003-proactive-i2c-bus-recovery-watchdog.md) · ROADMAP.md → FT-06.
+
 ### Changed
 
 **Waypoint `desc`/`hint` moved from SRAM to PSRAM — frees ~64KB static RAM** — ✅ *verified on

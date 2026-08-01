@@ -20,6 +20,97 @@ flash 1,670,831 (79.7%). On-device state as of this writing: **flashed and verif
 
 ---
 
+## 🔴 PRIORITY 1 — I2C bus freeze, recurring (2× reported) — ✅ fix built and committed 2026-07-31,
+⏳ effectiveness monitored in the field (no safe way to force-reproduce a stuck bus on demand)
+
+**Symptom** (reported twice same session): full interface freeze — button unresponsive, touchscreen
+unresponsive, display stops updating. First occurrence required a **full power cycle** (unplug USB +
+disconnect battery ~10s) to clear — matches the documented boot-hang failure mode in
+`docs/troubleshooting.md`, except this happened **mid-session**, not at boot. Second occurrence
+recovered on its own once the device went to standby and woke back up — button, sound, touchscreen,
+rotation all came back — but the on-screen DEV/perf HUD text stayed frozen at its last values even
+after everything else recovered (separate bug, see "Related, NOT fixed" below).
+
+**Root cause (code-confirmed, not guessed)**: a stuck I2C bus. Any slave (CST820 touch, PCF85063 RTC,
+TCA9554 EXIO) left mid-transaction — e.g. by a task hang or a reset — keeps holding SDA low waiting
+for a byte that never comes. **An MCU-only event does not reset external chips**, so the bus comes up
+already jammed and every subsequent transaction to *every* address fails, not just the one device that
+was mid-transfer.
+
+**Why the second occurrence is the smoking gun**: wake-from-standby calls `i2c_manager::reinit()`
+(`standby_manager.cpp:358-360`) as part of its recovery sequence — a full bus teardown/rebuild that
+includes 9 SCL clock-recovery pulses. That call is *exactly* what cleared touch/button/sound this
+time. This confirms both the diagnosis and that the fix (below) uses an already-proven recovery
+primitive — it isn't a new, unverified mechanism, just the existing one triggered proactively instead
+of needing a manual sleep/wake or power cycle.
+
+**What was already true before today**: `i2c_manager::read()`/`write()` (`i2c_manager.cpp:96-184`) are
+individually well-bounded — 50ms IDF-level timeout, 3 retries, 200ms mutex-wait cap — so a single
+stuck transaction can't hang a calling task forever on its own. `CONFIG_ESP_TASK_WDT_PANIC=n`
+(`sdkconfig.defaults:95`) means a genuinely hung task does **not** auto-reboot the device, it only logs
+a warning — consistent with the user needing a manual power cycle rather than the device silently
+recovering. The existing generic task-health recovery (`attemptTaskRecovery()`,
+`task_manager.cpp:781`) only suspends/resumes a stalled task's FreeRTOS handle — it does **not** touch
+the I2C bus at all, so it would be a no-op against a genuinely wedged bus if a hung task ever triggered
+it.
+
+**Fix implemented, three parts, all built and compiling (RAM 132,384→132,392 [+8B], flash
+1,607,099→1,607,967 [+868B])**:
+
+1. **New failure-burst counter** — `i2c_manager::Stats::consecutive_failures`
+   (`include/hardware/i2c/i2c_manager.h`), incremented on every failed `read()`/`write()` and reset to
+   0 on the next success (`src/hardware/i2c/i2c_manager.cpp`). A wedged bus fails *every* transaction
+   to *every* address, so a sustained run here — as opposed to one device's occasional failed read,
+   which resets it on its very next success — is a reliable signal.
+2. **Boot-time self-heal** (`i2c_manager::init()`, `i2c_manager.cpp:84-98`) — when the initial
+   `ping(EXIO_DEVICE)` fails, call `resetBus()` (9 SCL clock-recovery pulses) and retry the ping once
+   before giving up, instead of just printing a warning and continuing crippled. Directly fixes the
+   already-documented boot-hang scenario in `docs/troubleshooting.md`, and any case where a reboot
+   follows a bus wedge — currently the device comes back up still jammed since an MCU reset doesn't
+   free the slave that's holding the line.
+3. **Runtime watchdog** — new `checkI2CBusHealth()` (`task_manager.cpp`, called from `systemTask()`'s
+   existing health-monitoring block, ~10Hz). Watches `consecutive_failures`; at ≥10 (under 1s of a
+   fully jammed bus at touch's ~11.7Hz poll rate — long enough not to fire on a single retried
+   transaction, short enough the freeze doesn't linger) it calls `i2c_manager::reinit()` — the same
+   call standby-wake already uses successfully. Gated by a 2s cooldown between attempts and capped at
+   5 attempts before logging `UNRECOVERABLE` (via `system_logger::error`) and giving up rather than
+   spamming `reinit()` forever against genuinely dead hardware. Attempt count resets whenever
+   `consecutive_failures` returns to 0 (confirmed healthy), since `reinit()` internally calls `init()`
+   which resets all of `Stats` including this counter.
+
+**Decision**: committed without hardware verification of the recovery path itself — there's no safe
+way to deliberately jam the I2C bus on demand, and the failure is inherently unpredictable in timing.
+Trusting the design (it reuses `reinit()`, the exact primitive standby-wake already proved clears this
+on this device) and **monitoring in the field** instead of blocking on a reproduction we can't force.
+
+**→ WATCH FOR, if it happens again**:
+- Serial output `[I2C] EXIO recovered after clock pulses` (boot path) or `[I2C] %lu consecutive
+  failures — bus appears wedged, attempting recovery` (runtime path).
+- Whether the freeze now self-clears within ~2-4s (one cooldown cycle) instead of requiring
+  standby-wake or a power cycle.
+- Confirm normal operation (touch, button, sound, rotation) is unaffected when the bus is healthy —
+  `consecutive_failures` should sit at 0 essentially always, so this should be invisible in normal use.
+- If the threshold/cooldown ever need retuning, do it from real log data (how many consecutive
+  failures were actually seen, how long recovery actually took) — not by re-deriving the same
+  reasoning that picked 10/2000ms/5 the first time.
+
+**Design rationale for the threshold/cooldown/cap numbers and the rejected alternatives** (call
+`reinit()` on every failure; fold into the existing task-hang recovery instead): see
+[ADR-0003](adr/0003-proactive-i2c-bus-recovery-watchdog.md).
+
+**Related, NOT fixed — separate bug, needs its own investigation**: after the second (self-recovered)
+freeze, the on-screen DEV/perf HUD label stayed frozen showing stale values even after touch/button/
+sound/rotation all recovered. The label's update code (`navigation.cpp:1267-1300`) runs inside the
+same `updateRadarDisplay()` call that draws the (now-working) radar, gated by
+`lv_obj_is_valid(ui.perf_label) && !lv_obj_has_flag(ui.perf_label, LV_OBJ_FLAG_HIDDEN)`. Since
+rotation/zoom prove that function is executing, the leading hypothesis is `ui.perf_label` became a
+dangling pointer to a deleted LVGL object at some point during the freeze/recovery — `lv_obj_is_valid()`
+would then silently skip the update forever with no error. **Not yet fixed or root-caused** — if it
+recurs, try `dev off` then `dev on` via serial (re-creates the label's visibility state) and see if
+that clears it; that would confirm the dangling-pointer theory.
+
+---
+
 ## 0. ✅ DONE — verified on hardware 2026-07-31
 
 Commit `4452718`'s two audible sonar fixes were tested and **both pass**. The beat is steady; the
@@ -65,12 +156,12 @@ Built 2026-07-31. Combined flash +264 B, RAM ±0.
   bytes rather than waiting, and the only `portMAX_DELAY` in that driver is on the read side with
   `s_blocking` false by default. The real (smaller) problem was that the unconditional `fflush`
   *defeated* stdout's line buffering. Nine flushes removed; `SerialClass::setLogEnabled()` gate added,
-  default ON; `serial on|off` command added. **±0 flash** — the removals paid for the additions. Boot
-  logs and all serial commands used throughout the rest of this session worked normally, which
-  exercises the gate's default-ON path — but `serial off` → `serial on` specifically has not been
-  tried.
-  **→ still to test:** confirm `serial off` silences output and `serial on` restores it (input is
-  deliberately never gated, so the command works while muted).
+  default ON; `serial on|off` command added. **±0 flash** — the removals paid for the additions.
+  **✅ Verified on hardware 2026-07-31**: `serial off` silences output, `serial on` restores it, input
+  keeps working while muted.
+  **Follow-up resolved**: default stays ON regardless of `dev_mode` — no hot-path Serial logging exists
+  to gate, and most boot logging predates settings load anyway. See
+  [ADR-0002](adr/0002-serial-logging-default-independent-of-dev-mode.md).
 
 **Explicitly do NOT do**: `-O2` (spends flash, the scarcest resource, at 79.5% of a 2 MB OTA slot, to
 buy ms that can't be spent) · cache sizes (costs 48 KB SRAM) · higher PCLK (may be net-negative) ·
@@ -158,35 +249,7 @@ several.
 
 ---
 
-## 4. Beacon direction finding — "which way do I walk?" *(M)* — **UNBLOCKED**
-
-~~Blocked on item 3~~ — item 3 is built and **verified: 4.24–4.37 Hz measured live** (confirms the
-"~5 Hz" case below, not yet the 100 ms/10 Hz case). At 2 Hz a rotation yielded 1.7 samples per 30° bin
-(noise); at the confirmed ~4.3 Hz it yields ~4, and at 10 Hz (tag reconfigured to 100 ms) 8.3, which
-gives 7–14 dB of SNR. Full design in
-[`beacon_direction_finding.md`](beacon_direction_finding.md).
-
-True BT 5.1 AoA is **impossible** here (single antenna, no CTE IQ). Body-shadow DF works: the body
-attenuates 2.4 GHz by 10–20 dB, and the QMC5883L supplies heading per sample.
-
-- [ ] Publish `latest_heading` global from System Task; read it in the NimBLE `onResult` callback.
-      100 ms staleness = 3.6° error at a 10 s rotation. No sync machinery needed.
-- [ ] Accumulate `X += rssi*cos(θ)`, `Y += rssi*sin(θ)`, `W += |rssi|`. Bearing = `atan2(Y,X)`,
-      confidence = `sqrt(X²+Y²)/W`. **Not `argmax`.**
-- [ ] Per-bin counts for a coverage gate — refuse until every sector has ≥ K samples.
-- [ ] **⚠️ Calibrate the sign empirically.** Body shadowing says peak = beacon direction, but the
-      device's own asymmetric pattern may offset or invert it. Place the beacon at a known bearing,
-      rotate, record where the peak lands. Repeat at 10/25/40 m. **Do not derive this.**
-- [ ] Confidence gate must **refuse** rather than guess. Expect ±30–45° outdoors at 10–40 m;
-      unreliable indoors.
-- [ ] UI mode + bearing arrow.
-
-**Optional complement**: GPS gradient DF — log `(lat, lon, rssi)` while walking, trilaterate over two
-~15 m legs. More robust outdoors, no user ritual, and could be built first.
-
----
-
-## 5. Waypoint memory optimization ⭐ *the real resource win* *(M)* — ✅ DONE (partial), verified on hardware
+## 4. Waypoint memory optimization ⭐ *the real resource win* *(M)* — ✅ DONE (partial), verified on hardware
 
 Built and field-verified 2026-07-31, no regressions. RAM 195,984 → 132,384 B (59.8% → 40.4%), flash
 1,670,831 → 1,607,099 B (79.7% → 76.6% — confirmed via `readelf` that the flash saving is real, not a
@@ -207,14 +270,14 @@ was chosen over re-reading the GPX file on tap).
 
 ---
 
-## 6. Lower priority / justify first
+## 5. Lower priority / justify first
 
 - [ ] **§1.4 bounce-buffer A/B** *(S, medium risk)* — removing it frees **18.75 KB SRAM**. The safety
       blocker was checked and isn't one: `on_frame_buf_complete` fires in both modes
       (`esp_lcd_panel_rgb.c:871`), so the tearing guard survives. But the panel would then stream
       directly from PSRAM, competing for the bandwidth `rotate` is ~76% bound by. **Two builds + the
       `perf` HUD, be ready to revert** — the risk lands on display stability, which is currently
-      flawless. Scale check: 18.75 KB vs item 5's 64 KB.
+      flawless. Scale check: 18.75 KB vs item 4's 64 KB.
       **Now linked to §1.5** (confirmed 2026-07-31: the panel ISR — which is doing this exact
       PSRAM→SRAM bounce copy at ~17.4 MB/s — shares Core 1 with `uiTask`). The same
       `BOUNCE_BUFFER_LINES = 0` build answers both items' unmeasured magnitude in one A/B.
@@ -247,3 +310,22 @@ Don't re-audit these.
 - **Render** — 85.2 ms/frame outruns the 10 Hz sensor feed. Four flags are load-bearing and must not
   be "cleaned up": `clip_corner` OFF, `radar_obj` not `CLICKABLE`, `full_refresh` tied to rotation
   mode, and the `on_frame_buf_complete` guard. See CLAUDE.md.
+
+---
+
+## Out of scope for this queue — experimental feature, not an optimization
+
+**Beacon direction finding ("which way do I walk?")** was previously numbered as item 4 in this
+queue, alongside verified optimization work. **Pulled 2026-07-31** — it doesn't belong there. Every
+other item here is "make an existing, working thing smoother/faster/more stable" (regression risk on
+something proven). This one is "does body-shadow RSSI attenuation even produce a usable directional
+signal on this specific enclosure" (feasibility risk on something unproven) — a different category,
+correctly tracked separately under **Planned** in [`../ROADMAP.md`](../ROADMAP.md), not this backlog.
+
+The BLE rate work that *unblocked* it (item 3 above) was legitimate performance/stability work and
+stays in this queue. The direction-finding feature itself does not — treat it as its own experiment,
+opt into it explicitly, don't fold it into a performance pass.
+
+- **Status**: unblocked (4.24–4.37 Hz measured live), not yet built.
+- **Full design**: [`beacon_direction_finding.md`](beacon_direction_finding.md).
+- **Summary**: [`../ROADMAP.md`](../ROADMAP.md) → Planned → "Beacon Direction Finding".

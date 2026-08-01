@@ -1728,7 +1728,7 @@ and the take returns immediately — so the loop spins with no delay at all unti
 works as intended only once frames are under one panel period. Worth a comment, or a counting
 semaphore, so the intent survives.
 
-### 3.5 `Serial` flushes on every call — ✅ done 2026-07-31, ⏳ unverified
+### 3.5 `Serial` flushes on every call — ✅ done and verified 2026-07-31
 
 **⚠️ The stated rationale for this item was wrong, and the fix is right anyway.** It was filed as
 *"reliability, not performance — `fflush` stalls unboundedly on the USB CDC path when the host isn't
@@ -1771,6 +1771,17 @@ command exactly.
 Still open, unchanged: `SerialClass::available()` calls `fgetc(stdin)` — it consumes a byte to test
 for one. It works because of the ring buffer behind it, but it is fragile and does a VFS call per
 poll. Not a stall, just ugly.
+
+**Verified on hardware 2026-07-31**: `serial off` silences output, `serial on` restores it, input
+keeps working while muted (the confirmation prints before muting on the way down, as designed).
+
+**Follow-up question, resolved**: should the *default* be OFF when `dev_mode` is OFF, matching the
+"no dev overhead in normal mode" principle applied to the HUD/perf labels and beacon test path?
+**No** — see [ADR-0002](adr/0002-serial-logging-default-independent-of-dev-mode.md). In short: there's
+no hot-path Serial logging to gate (verified by grepping the render path — the ~326 call sites are all
+one-shot events), and most boot logging happens before `dev_mode` is even loaded from NVS, so tying the
+default to it wouldn't protect the thing it would need to protect. Default stays ON; `serial off`
+remains a manual override.
 
 ### 3.6 Recompute less per frame
 
@@ -1892,7 +1903,7 @@ of the time is in stage 3.
 | 23 | Decouple touch polling from the render (§8.2) | M | drag/scroll feel | Medium | open, justify first |
 | 24 | GPS bulk UART read (§8.3) | S | Core 0 CPU only | Low | open |
 | **25** | **Panel ISR core check (§1.5)** | XS | — (diagnostic) | — | ✅ **CONFIRMED: ISR on core 1, shared with uiTask** |
-| **26** | **`Serial` fflush gating (§3.5)** | S | ~~reliability~~ **small efficiency** — premise was wrong, see §3.5 | Low | ✅ built, ⏳ unverified |
+| **26** | **`Serial` fflush gating (§3.5)** | S | ~~reliability~~ **small efficiency** — premise was wrong, see §3.5 | Low | ✅ built and verified |
 | 27 | Bounce-buffer A/B — remove for 18.75 KB SRAM (§1.4) | S | SRAM; ms unknown | Medium | open, measure first — now linked to step 25, same A/B answers both |
 | **28** | **Beacon absolute priority + continuous sonar tempo + trend-driven beep (§7.5)** | S | fixes "beeping is choppy" and "silent beacon" field reports | Low | ✅ built same day as 16–18; priority + choppy-fix feel ⏳ not separately re-tested |
 

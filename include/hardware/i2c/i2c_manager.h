@@ -52,6 +52,11 @@ struct Stats {
     uint32_t total_ops = 0;
     uint32_t failed_ops = 0;
     uint32_t retry_count = 0;
+    // Back-to-back failures across ANY device, reset to 0 on the next success.
+    // A wedged bus (a slave holding SDA low) fails every transaction to every
+    // address, so a sustained run here — as opposed to one device's occasional
+    // failed read — is the signal a runtime recovery watchdog should act on.
+    uint32_t consecutive_failures = 0;
 };
 const Stats& getStats();
 

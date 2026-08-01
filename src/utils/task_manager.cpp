@@ -63,6 +63,7 @@ static void processUIUpdate(const UIUpdate& update);
 static void updateMemoryStats();
 static void updateStatusLabels();
 static void checkTaskHealth();
+static void checkI2CBusHealth(uint32_t now);
 static void flushRadarRender();
 
 // =============================================================================
@@ -420,6 +421,7 @@ static void systemTask(void* parameter) {
 
         // System health monitoring
         checkTaskHealth();
+        checkI2CBusHealth(now);
 
         updateStatusLabels();
 
@@ -933,6 +935,63 @@ static void checkTaskHealth() {
         system_stats.system_task.is_healthy = (system_task_handle != nullptr);
         system_stats.system_task.health.last_loop_time_ms = now;
     }
+}
+
+// Runtime I2C bus wedge detector — self-heals a bus jammed by a slave (touch,
+// RTC, EXIO) left mid-transaction, the same failure mode documented in
+// docs/troubleshooting.md's boot-hang entry, but occurring mid-session
+// instead of at boot. A genuinely wedged bus (a slave holding SDA low) fails
+// every transaction to every address, so a sustained run of consecutive
+// failures across devices polled at different rates (touch ~11.7Hz,
+// EXIO/RTC/compass slower) is a strong signal — unlike one device's
+// occasional failed read, which resets the counter on its very next success.
+//
+// This mirrors what wake-from-standby already does (i2c_manager::reinit(),
+// standby_manager.cpp) — confirmed on hardware 2026-07-31 to clear this exact
+// failure mode — just triggered proactively instead of needing a manual
+// sleep/wake or power cycle.
+static void checkI2CBusHealth(uint32_t now) {
+    // touch alone polls at ~11.7Hz, so 10 straight failures is under 1s of a
+    // fully jammed bus — long enough not to fire on a single bad transaction
+    // (read()/write() already retry up to 3x internally before counting as
+    // failed), short enough that the freeze doesn't linger.
+    static constexpr uint32_t WEDGED_THRESHOLD      = 10;
+    static constexpr uint32_t RECOVERY_COOLDOWN_MS  = 2000;
+    static constexpr uint8_t  MAX_RECOVERY_ATTEMPTS = 5;
+
+    static uint32_t last_recovery_ms  = 0;
+    static uint8_t  recovery_attempts = 0;
+    static bool     gave_up_logged    = false;
+
+    const uint32_t consecutive = i2c_manager::getStats().consecutive_failures;
+    if (consecutive == 0) recovery_attempts = 0;  // sustained health clears the attempt count
+    if (consecutive < WEDGED_THRESHOLD) return;
+
+    if (recovery_attempts >= MAX_RECOVERY_ATTEMPTS) {
+        if (!gave_up_logged) {
+            gave_up_logged = true;
+            char msg[128];
+            snprintf(msg, sizeof(msg),
+                     "I2C bus UNRECOVERABLE after %u attempts (consecutive_failures=%lu)",
+                     recovery_attempts, (unsigned long)consecutive);
+            system_logger::error("I2C_HEALTH", msg);
+            Serial.printf("[I2C] %s\n", msg);
+        }
+        return;
+    }
+
+    if (now - last_recovery_ms < RECOVERY_COOLDOWN_MS) return;  // let the last attempt take effect
+
+    recovery_attempts++;
+    last_recovery_ms = now;
+    gave_up_logged = false;
+
+    Serial.printf("[I2C] %lu consecutive failures — bus appears wedged, attempting recovery #%u/%u\n",
+                  (unsigned long)consecutive, recovery_attempts, MAX_RECOVERY_ATTEMPTS);
+    system_logger::warn("I2C_HEALTH", "Bus wedged — attempting reinit recovery");
+
+    Serial.println(i2c_manager::reinit() ? "[I2C] Recovery reinit reported success"
+                                          : "[I2C] Recovery reinit reported failure");
 }
 
 // =============================================================================
