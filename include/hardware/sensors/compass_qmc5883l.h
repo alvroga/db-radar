@@ -45,8 +45,12 @@ namespace compass_qmc5883l {
         HEALTHY,       // h_mag within tolerance of H0
         TILTED,        // h_mag elevated well above H0 -- field-confirmed: tilt INFLATES h_mag
                        // (+23% at ~45-50 deg tilt, docs/calibration/wp3_results.md), never reduces it
-        DISTURBANCE,   // h_mag depressed well below H0, or sensor overflow -- a local magnetic
-                       // source, not tilt
+        DISTURBANCE,   // Sensor overflow ONLY (hardware-reported saturation). There is deliberately
+                       // no magnitude-based low-ratio guess here -- an earlier version tried one and
+                       // it was unreliable in the field (2026-08-02): a nearby ferromagnetic object
+                       // likely INFLATES h_mag, the same direction as tilt, not the opposite, so a
+                       // low-side threshold was probably backwards for the common case. See the
+                       // implementation comment in classifyHealth().
     };
 
     const char* healthToString(CompassHealth health);

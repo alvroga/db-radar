@@ -75,12 +75,20 @@ NVS alongside them (`cal_h0`, `cal_resid`, `cal_axr`):
   A persistent departure indicates soft iron or per-axis scale error.
 
 `compass_qmc5883l::classifyHealth(data, h0)` uses `H0` at runtime: it smooths `h_mag` with a ~1s EMA
-and applies hysteresis (enter/exit 1.12/1.08 for tilt, 0.85/0.90 for disturbance) to classify each
-reading as `HEALTHY`, `TILTED` (h_mag elevated — tilt only ever inflates it), `DISTURBANCE` (h_mag
-depressed, or sensor overflow), or `UNCALIBRATED` (no `H0` yet). **This detects, it does not
-correct** — the radar HUD shows a "Compass: hold flat" / "Compass: interference" /
-"Compass: recalibrate?" indicator, hidden when healthy, but the heading itself is unchanged (that's
-Level 3 tilt compensation, WP-6, which needs the accelerometer).
+and applies hysteresis (enter/exit 1.12/1.08) to classify each reading as `HEALTHY`, `TILTED` (h_mag
+elevated — tilt only ever inflates it), `DISTURBANCE` (sensor overflow only), or `UNCALIBRATED` (no
+`H0` yet). **This detects, it does not correct** — the radar HUD shows a "Compass: hold flat" /
+"Compass: interference" / "Compass: recalibrate?" indicator, hidden when healthy, but the heading
+itself is unchanged (that's Level 3 tilt compensation, WP-6, which needs the accelerometer).
+
+**⚠️ Corrected 2026-08-02, same day as ship**: the first version also tried a low-magnitude threshold
+(ratio < 0.85) for `DISTURBANCE`, guessing a disturbance might weaken the field. Reported unreliable
+in the field within hours — "interference" fired inconsistently walking near metal objects. The guess
+was never field-verified and is probably backwards for the common case: a nearby ferromagnetic object
+concentrates field lines, which *inflates* `h_mag` in the same direction as tilt, not the opposite.
+`DISTURBANCE` is now sensor-overflow-only — a hardware fact, not a threshold guess — until someone
+logs `h_mag` walking past a real disturbance (§8.3 sample 7, `disturbance` label) and derives an
+actual threshold from it.
 
 The "recalibrate?" case comes from the **stored** calibration's own residual/axis-ratio score, not
 from live dynamics — telling a stale calibration apart from a momentary tilt using a single live
@@ -112,11 +120,13 @@ calibration lasts indefinitely. Re-run it when:
 **Not a reason to recalibrate**: changing location. That's magnetic declination (WMM, below), which
 is computed automatically every session from the GPS fix — no user action needed.
 
-**Gap to be aware of**: the live classifier (`TILTED`/`DISTURBANCE`) cannot fully distinguish "the
-calibration has gone stale" from "you're just holding it at an angle" from a single reading — §5.1 of
-the foundation doc explains why that distinction needs data this project doesn't have. If the device
-reads `TILTED`/interference while held flat and away from obvious magnetic sources, treat that as a
-recalibration hint too, even without a case-open event.
+**Gap to be aware of**: the live classifier (`TILTED`) cannot fully distinguish "the calibration has
+gone stale" from "you're just holding it at an angle" from a single reading — §5.1 of the foundation
+doc explains why that distinction needs data this project doesn't have. If the device reads `TILTED`
+while held flat and away from obvious magnetic sources, treat that as a recalibration hint too, even
+without a case-open event. (`DISTURBANCE` is unambiguous — it only fires on sensor-reported overflow,
+a genuinely strong nearby source — but correspondingly won't catch a milder disturbance; see the
+correction above.)
 
 **One-time migration note**: a calibration saved *before* this feature existed has no `H0` baseline
 (`compass_cal_h0 == 0` in NVS), so the HUD will show "Compass: recalibrate?" once after updating to

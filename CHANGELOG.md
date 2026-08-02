@@ -121,11 +121,19 @@ no new hardware, no bus cost. Built on the WP-3 field numbers (`H₀` ≈ 3000, 
   alongside the existing hard-iron offsets.
 - **`compass_qmc5883l::classifyHealth()`** — a new runtime classifier: `UNCALIBRATED` (no `H₀` yet),
   `HEALTHY`, `TILTED` (h_mag elevated — tilt only ever inflates it, per the field data), or
-  `DISTURBANCE` (h_mag depressed, or sensor overflow). Smooths `h_mag` with a ~1s EMA and applies
-  hysteresis around the transition ratios (enter/exit at 1.12/1.08 and 0.85/0.90) so the state
-  doesn't chatter at the ~3% noise floor — the same shape as the beacon proximity zone classifier.
+  `DISTURBANCE` (sensor overflow only — see correction below). Smooths `h_mag` with a ~1s EMA and
+  applies hysteresis around the tilt transition ratio (enter/exit at 1.12/1.08) so the state doesn't
+  chatter at the ~3% noise floor — the same shape as the beacon proximity zone classifier.
   **This detects; it does not correct** — recovering true heading from a tilted reading needs the
   tilt axis, which is Level 3 (WP-6), not this.
+  - **⚠️ Correction, same day**: the first version also guessed a low-magnitude threshold (ratio <
+    0.85) for `DISTURBANCE`, reasoning a disturbance might weaken the field. That was never
+    field-verified and reported as unreliable in use within hours (hit-or-miss "interference"
+    warnings walking near metal objects) — and is probably backwards for the common case: a nearby
+    ferromagnetic object concentrates field lines, which **inflates** `h_mag`, the same direction as
+    tilt, not the opposite. Removed. `DISTURBANCE` is now sensor-overflow-only (a hardware fact, not
+    a guess) until someone logs `h_mag` walking past a real disturbance and derives an actual
+    threshold.
 - **Radar HUD trust indicator** — a new HUD label, hidden when healthy, that surfaces "Compass: hold
   flat" / "Compass: interference" / "Compass: recalibrate?" / "Compass: not calibrated". The
   recalibrate prompt comes from the *stored* calibration's own quality score (residual > 5% or axis

@@ -798,8 +798,8 @@ Decision record, including why the gyro is deferred rather than folded in now:
 raw x/y sums and the *final* offset, not a running approximation) and shown live during calibration.
 Runtime classification (`compass_qmc5883l::classifyHealth()`) implements the magnitude half of the
 §5.1 table — `HEALTHY`/`TILTED`/`DISTURBANCE`/`UNCALIBRATED` — with a ~1s EMA and hysteresis around
-the transition ratios (1.12/1.08 tilt, 0.85/0.90 disturbance) sized off the ~3% noise floor and the
-~23% tilt inflation from WP-3. A HUD trust indicator surfaces it, hidden when healthy.
+the tilt transition ratio (1.12/1.08) sized off the ~3% noise floor and the ~23% tilt inflation from
+WP-3. A HUD trust indicator surfaces it, hidden when healthy.
 
 **Deliberately not attempted**: distinguishing a *stale calibration* from a *momentary tilt* using
 live single-reading dynamics, per §5.1's caveat that the ripple threshold "must be gated on known-flat
@@ -810,12 +810,25 @@ by anything computed live. This is an honest Level 1 output, not a gap: correcti
 between stale-cal and tilt from live dynamics alone was never claimed as feasible with the data in
 hand.
 
+**⚠️ Correction, same day (2026-08-02)**: the first shipped version *also* guessed a low-magnitude
+threshold (ratio < 0.85) for `DISTURBANCE`, reasoning a disturbance might weaken the field. That
+guess was never field-verified — no sample in WP-3's analysis characterized `h_mag` during the
+`disturbance` label (§8.3 sample 7) — and is probably backwards for the common case: a nearby
+ferromagnetic object concentrates field lines, which *inflates* `h_mag` the same direction as tilt,
+not the opposite. Reported unreliable in the field within hours of shipping (hit-or-miss
+"interference" near metal objects). Removed. `DISTURBANCE` is now sensor-overflow-only — a hardware
+fact, not a threshold guess. This is exactly the "un-instrumented constant" failure mode this project
+has hit before (see `feedback_residual_attribution.md`, the render-pipeline residual traps) — here in
+a threshold rather than a timing number.
+
 Not built (optional, not required for WP-5/6 to proceed): the WMM absolute cross-check (§5.4) —
 `wmm_declination.cpp` still only computes horizontal X/Y, and the intensity accuracy of the n=1..3
-truncation is unverified.
+truncation is unverified. Also not built: an actual magnitude-based disturbance threshold — needs a
+fresh `disturbance`-labeled field sample analyzed for its `h_mag` signature, which WP-3's original
+analysis didn't do.
 
 Build impact: +344 bytes RAM. Full writeup: CHANGELOG.md "Compass Level 1 health metrics + trust
-indicator (WP-4)".
+indicator (WP-4)" and its same-day correction entry.
 
 ### WP-5 — Level 2: 3-axis calibration *(needs WP-4)*
 

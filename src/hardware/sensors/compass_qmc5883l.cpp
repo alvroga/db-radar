@@ -183,6 +183,9 @@ CompassHealth classifyHealth(const CompassData& data, float h0) {
     }
 
     if (data.overflow) {
+        // Sensor-reported saturation -- a hardware fact, not a guessed threshold. This is the
+        // only trigger for DISTURBANCE; see the note below on why a magnitude-based low-ratio
+        // guess was removed.
         health_state = CompassHealth::DISTURBANCE;
         return health_state;
     }
@@ -209,29 +212,33 @@ CompassHealth classifyHealth(const CompassData& data, float h0) {
 
     float ratio = health_h_mag_ema / h0;
 
-    // Hysteresis bands, informed by docs/calibration/wp3_results.md: noise floor is ~2.5-3.3%
-    // relative, tilt inflates h_mag by ~23% at 45-50 deg. Entry sits well above the noise floor;
-    // exit sits below entry so the state doesn't chatter at the boundary -- same shape as the
-    // beacon proximity zone hysteresis (+-3 dBm).
+    // Hysteresis band for TILT, informed by docs/calibration/wp3_results.md: noise floor is
+    // ~2.5-3.3% relative, tilt inflates h_mag by ~23% at 45-50 deg. Entry sits well above the
+    // noise floor; exit sits below entry so the state doesn't chatter at the boundary -- same
+    // shape as the beacon proximity zone hysteresis (+-3 dBm).
+    //
+    // There is deliberately NO magnitude-based low-ratio threshold for DISTURBANCE. An earlier
+    // version guessed one (ratio < 0.85), reasoning a disturbance might weaken the field -- that
+    // was never field-verified, and is probably backwards for the common case: a nearby
+    // ferromagnetic object concentrates field lines, which INFLATES h_mag in the same direction as
+    // tilt, not the opposite. Confirmed unreliable in the field 2026-08-02 (hit-or-miss near metal
+    // objects, indistinguishable from a misfire). Only the hardware overflow flag above is trusted
+    // for disturbance until someone logs h_mag walking past a real disturbance and derives an
+    // actual threshold -- see docs/compass_calibration_foundation.md §5.1.
     constexpr float TILT_ENTER = 1.12f, TILT_EXIT = 1.08f;
-    constexpr float DIST_ENTER_LOW = 0.85f, DIST_EXIT_LOW = 0.90f;
 
-    if (health_state == CompassHealth::UNCALIBRATED) {
-        // Just gained a baseline -- classify fresh rather than latching onto UNCALIBRATED forever.
-        if (ratio > TILT_ENTER) health_state = CompassHealth::TILTED;
-        else if (ratio < DIST_ENTER_LOW) health_state = CompassHealth::DISTURBANCE;
-        else health_state = CompassHealth::HEALTHY;
+    if (health_state == CompassHealth::UNCALIBRATED || health_state == CompassHealth::DISTURBANCE) {
+        // Just gained a baseline, or overflow just cleared -- classify fresh rather than latching.
+        health_state = (ratio > TILT_ENTER) ? CompassHealth::TILTED : CompassHealth::HEALTHY;
         return health_state;
     }
 
     if (ratio > TILT_ENTER) {
         health_state = CompassHealth::TILTED;
-    } else if (ratio < DIST_ENTER_LOW) {
-        health_state = CompassHealth::DISTURBANCE;
-    } else if (ratio >= DIST_EXIT_LOW && ratio <= TILT_EXIT) {
+    } else if (ratio <= TILT_EXIT) {
         health_state = CompassHealth::HEALTHY;
     }
-    // else: ratio sits in a hysteresis gap -- keep the current state.
+    // else: ratio sits in the hysteresis gap -- keep the current state.
 
     return health_state;
 }
