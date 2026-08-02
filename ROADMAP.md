@@ -130,8 +130,8 @@ stays sharp).
 
 ### Compass Calibration & Tilt — heading is only valid held flat
 **Severity**: High — the compass is the sole heading source, and it inverts when the device is tilted
-**Status**: WP-0 done and verified; WP-1 (field logging build) implemented 2026-08-01, awaiting
-hardware verification, then the trip
+**Status**: WP-0 through WP-3 done. Field trip (WP-2) and offline analysis (WP-3) both complete
+2026-08-01/02 — **go decision for Level 3 tilt compensation**, WP-4 onward not yet built.
 
 **Symptom** (field-confirmed): facing north held **flat**, N points to the top — correct. Facing north
 held **vertical**, N points to the **bottom**. The heading formula is 2-axis (`atan2(cy, cx)`), so the
@@ -139,9 +139,17 @@ large vertical field component leaks in as tilt grows; the crossover is at only 
 ≈ 31.5°**, past which the reading inverts. Phone-style holding is deep past it. Separately, nothing
 detects a stale calibration — opening the enclosure invalidates it silently.
 
+**WP-3 confirmed the tilt error is heading-dependent, not a fixed bias** — at ~46–50° tilt, heading
+error vs GPS course was −135° walking north and +4° walking south. No lookup-table correction can fix
+that; only real accelerometer-based tilt compensation can. Flat holding stays accurate in every
+direction tested (under 8° mean error). Also answered: `H₀` ≈ 3000 (raw units), a figure-8 tumble
+covers the full sphere (3-D calibration is feasible), and accel-only (no gyro) suffices for tilt
+compensation provided it's oversampled/averaged rather than read at a flat 10 Hz. Full numbers:
+[`docs/calibration/wp3_results.md`](docs/calibration/wp3_results.md).
+
 **Plan**: four staged levels — (1) magnitude-based health metrics, free and no new hardware;
 (2) 3-axis calibration; (3) accelerometer tilt compensation; (4) τ-per-zoom smoothing. Gyro is
-deferred, not rejected. Nothing gets built before a field trip supplies the thresholds.
+rejected — WP-3's shake-spectrum analysis found no need for it. WP-4 (health metrics) is next.
 
 **Resolved along the way**: `HEADING_SMOOTHING` went 0.8@1Hz → 0.3@10Hz, which did **not** preserve
 the time constant (0.62 s → 0.28 s). Restored to α = 0.15 (τ ≈ 0.62 s) and **verified on a walk** —

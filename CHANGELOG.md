@@ -79,6 +79,34 @@ the latter only while a `shake-100hz` sample records).
 `highRateTask`), `src/gpx/gpx_server.cpp` (`logs_list_handler`).
 Plan and field protocol: [`docs/compass_calibration_foundation.md`](docs/compass_calibration_foundation.md) §8, §12.
 
+**Compass calibration field trip + analysis (WP-2/WP-3) — go decision for tilt compensation**
+
+The field trip ran 2026-08-01/02: 18 samples (`cal_006`–`cal_023`), all 9 planned labels plus two
+unplanned rotate-left/rotate-right variants. Zero dropped rows across every file; 10Hz sampling held
+σ≈0.11ms, the 100Hz high-rate mode held σ≈0.03–0.07ms with 0–1 I2C failures out of thousands of ops.
+
+Offline analysis (pandas/numpy script, [`docs/calibration/analyze.py`](docs/calibration/analyze.py))
+answered every question in §10 of the foundation doc that this trip was scoped to answer. The headline
+result: **tilt-induced heading error is heading-dependent, not a fixed bias** — at ~46–50° tilt, error
+vs GPS course was −135° walking north and +4° walking south from otherwise similar tilt angles. A 2-axis
+compass (`atan2(cy, cx)`) at LA's ~59.7° magnetic inclination doesn't have one tilt error to correct,
+it has one *per heading* — ruling out any lookup-table fix and confirming Level 3 (real
+accelerometer-based tilt compensation) is required, not optional. Flat holding remains accurate in
+every direction tested. Also answered: `H₀` ≈ 3000 (raw units, ~1% repeatable); a 60s freeform tumble
+covers the full sphere (3-D calibration is feasible, unblocking WP-5); and accel-only suffices for
+tilt compensation with no gyro needed, provided it's oversampled and averaged rather than read at a
+flat 10Hz (the shake spectrum peaks at ~2Hz/~4Hz — walking cadence and its harmonic — with ~40% of
+energy above a 10Hz sample's 5Hz Nyquist limit).
+
+Two samples flagged "discard, unsure of hold orientation" in the field (021, 022) were recovered
+instead of dropped — their accelerometer `az`/`ay` split matches the flat-hold and phone-style
+signatures from the samples that weren't in doubt.
+
+**Full numbers, tables, and the reproducible script**: [`docs/calibration/wp3_results.md`](docs/calibration/wp3_results.md),
+[`docs/calibration/README.md`](docs/calibration/README.md) (per-sample manifest with field annotations),
+[`docs/calibration/analyze.py`](docs/calibration/analyze.py). Results also folded back into §10 of
+`docs/compass_calibration_foundation.md`.
+
 ### Fixed
 
 **Field Log pre-flight checklist found three bugs before the trip, not during it (WP-1

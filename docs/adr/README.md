@@ -48,11 +48,12 @@ date — sort on that for chronology, not on the filename.
 | [0015](0015-body-shadow-direction-finding-not-aoa.md) | Body-shadow direction finding instead of BT 5.1 Angle-of-Arrival | 2026-07-31 | **Proposed** |
 | [0016](0016-freertos-multitask-architecture.md) | FreeRTOS multi-task architecture instead of a single Arduino loop | 2025-10 | Accepted |
 | [0017](0017-compass-sole-heading-source.md) | Compass as the sole heading source, replacing GPS heading fusion | 2026-03-20 | Accepted |
+| [0018](0018-tilt-compensation-required-gyro-deferred.md) | Real tilt compensation required (not a lookup table); gyro fusion deferred, not adopted | 2026-08-02 | Accepted |
 
 ## Status
 
 - **Going forward**: new architectural decisions get an ADR at the time they're made (see CLAUDE.md
-  → Documentation Standards). Next free number: **0018**.
+  → Documentation Standards). Next free number: **0019**.
 - **Historical backfill**: ✅ complete (2026-08-01). ADRs 0004–0017 were reconstructed from
   CHANGELOG.md, ROADMAP.md, `docs/performance_optimization_backlog.md`, the component docs and git
   history, following [`BACKFILL_PLAN.md`](BACKFILL_PLAN.md). They carry

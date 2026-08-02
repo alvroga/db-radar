@@ -622,20 +622,20 @@ isn't rediscovered later.
 
 | Question | Sample | Currently |
 |---|---|---|
-| `H₀` and its stability | 1, 3 | unknown |
-| Tilt threshold on \|H − H₀\|/H₀ | 1 vs 2 | unknown |
-| Stale-calibration ripple threshold | 1, 3 | unknown |
-| Actual tilt bias while walking | 4 vs 5 | **unknown — this decides Level 3** |
-| Is soft iron significant here? | 1 (axis ratio) | assumed minor, untested |
-| Accel gravity-estimate τ | 4 | unknown |
-| τ-per-zoom smoothing table | 4, 6 | unknown |
-| Can a figure-8 recover 3-D calibration on this hardware? | 8 | unknown |
+| `H₀` and its stability | 1, 3 | **answered: ≈3000 (raw LSB), repeatable to ~1%** between samples 006/008. See [`calibration/wp3_results.md`](calibration/wp3_results.md) |
+| Tilt threshold on \|H − H₀\|/H₀ | 1 vs 2 | **answered: ≈+0.23 (23% higher, not lower) at ~45–50° tilt** — the vertical field component leaks into the horizontal read as tilt grows, inflating `h_mag` rather than shrinking it |
+| Stale-calibration ripple threshold | 1, 3 | **answered: 2–4% circle-fit residual, axis ratio ~1.06–1.07 on flat data is the healthy band.** Must be gated on known-flat data — tilt alone pushes residual to 11–20% and axis ratio to 1.5–1.9, which would otherwise look like a bad calibration |
+| Actual tilt bias while walking | 4 vs 5 | **answered — go for Level 3.** Not a fixed bias: two samples at ~46–50° tilt gave −135° (walking N) and +4° (walking S) heading error vs GPS course, while both flat samples stayed under 8° mean / 11–16° std regardless of direction. A 2-axis compass's tilt error is heading-dependent (interacts with ~59.7° local inclination) — no lookup-table correction works, real tilt compensation is required. Full numbers: [`calibration/wp3_results.md`](calibration/wp3_results.md) |
+| Is soft iron significant here? | 1 (axis ratio) | **answered: minor when flat** — axis ratio 1.06–1.17 on flat360. (Confounded by tilt on non-flat samples, see ripple threshold row) |
+| Accel gravity-estimate τ | 4 | **partially answered**: shake spectrum (sample 9) peaks at ~2 Hz/~4 Hz with ~40% of energy above 5 Hz — the gravity EMA needs a τ long enough to average out 1–4 Hz walking shake; exact τ not yet fit, see wp3_results.md §"Shake spectrum" |
+| τ-per-zoom smoothing table | 4, 6 | **not yet built** — inputs now available (noise floor 1.5–2.5°, flat-walk heading residual 4.81° with no shake leakage), but the table itself is still WP-7 |
+| Can a figure-8 recover 3-D calibration on this hardware? | 8 | **answered: yes, feasible.** Freeform sample swept elevation −87.6°..+82.5° and full 360° azimuth in ~60 s — near-total sphere coverage |
 | WMM n=1..3 intensity accuracy | — | uncharacterised; verify against a reference model |
 | Mag↔**device** frame sense | — | **answered** by the vertical-inversion observation (§3.3): X rotates toward *up* |
 | Mag↔**accel** frame rotation | — | **unknown; needs a dedicated bench procedure, not a field sample** |
 | Is the vertical heading really confined to 180° ± 31.5°? | 2 | **structurally confirmed** at 4 azimuths (§3.3) — N and S land on 180° exactly, as predicted with no free parameters. Arc *width and sign per azimuth* still need sample 2 |
-| Does accel-only suffice, or is a gyro needed — and at what rate? | 9 | unknown (§6A.2) |
-| Gyro power draw | — | **unknown; datasheet check required before committing** |
+| Does accel-only suffice, or is a gyro needed — and at what rate? | 9 | **answered: accel-only suffices**, no gyro needed. But it must be oversampled (e.g. 50–100 Hz) and averaged down, not read at a flat 10 Hz — ~40% of the shake spectrum sits above a 10 Hz sample's 5 Hz Nyquist and would alias into the gravity estimate |
+| Gyro power draw | — | moot — gyro not needed per the row above |
 | Does α = 0.15 fix the bounce? | — | **answered: yes.** Verified on a walk 2026-08-01 — "way better". Confirms the τ regression in §9.1a was the cause |
 
 ---
@@ -767,12 +767,29 @@ files will **not appear** on the `/logs` page. Extend the filter to accept `.csv
 
 Run §8.3 samples 1–9 in order. Nothing to implement.
 
+**Status: ✅ done 2026-08-01/02.** 18 samples captured (`cal_006`–`cal_023`, numbering continues from
+the WP-1 acceptance test which used 001–005). Two rotate-left/rotate-right variants were added in the
+field beyond the planned 9; sample 8 was mislabeled at capture and corrected in the filename; samples
+21/22 were flagged in the field for possible discard (operator unsure of hold orientation) but were
+**recovered, not discarded** — WP-3 classified them from the accelerometer instead (021 flat, 022
+phone-style). Full sample-by-sample mapping, direction-of-travel notes, and these deviations are in
+[`docs/calibration/README.md`](calibration/README.md).
+
 ### WP-3 — Analysis (offline, on a computer)
 
-Produce, from the CSVs: `H₀` and its stability; the tilt threshold; the ripple threshold; the
-axis ratio; the shake spectrum; the tilt bias from samples 4 vs 5; and a verdict on accel-only vs gyro
-from sample 9. Confirm or refute the §3.3 prediction (vertical heading confined to 180° ± 31.5°).
-Record the results back into §10 of this document.
+**Status: ✅ done 2026-08-02.** Produced `H₀` and its stability; the tilt threshold; the ripple
+threshold; the axis ratio; the shake spectrum; the tilt bias from samples 4 vs 5 (plus the
+accel-reclassified 21/22 as a second N/S pair); and a verdict on accel-only vs gyro from samples 9.
+Results recorded into §10 above; full numbers, tables and the reproducible script are in
+[`docs/calibration/wp3_results.md`](calibration/wp3_results.md) and
+[`docs/calibration/analyze.py`](calibration/analyze.py). Data quality was good throughout (zero
+dropped rows across all 18 files, metronomic 10 Hz/100 Hz timing) — **no retake needed.**
+
+**Go/no-go for WP-6: go.** The tilt bias is large and heading-dependent (−135° walking N vs +4°
+walking S at similar ~46–50° tilt) — not a fixed offset a lookup table could correct. Real
+accelerometer-based tilt compensation is required for phone-style holding to ever be reliable.
+Decision record, including why the gyro is deferred rather than folded in now:
+[`docs/adr/0018-tilt-compensation-required-gyro-deferred.md`](adr/0018-tilt-compensation-required-gyro-deferred.md).
 
 ### WP-4 — Level 1: health metrics *(needs WP-3)*
 
