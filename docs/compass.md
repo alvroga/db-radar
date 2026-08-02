@@ -46,7 +46,7 @@ This gives **magnetic heading**. Magnetic declination is then added (see below) 
 
 ## Hard-Iron Calibration
 
-Hard-iron offsets compensate for static magnetic fields from the device's own components (battery, metal chassis, etc.). They are determined by a 360° rotation calibration procedure.
+Hard-iron offsets compensate for static magnetic fields from the device's own components (battery, metal chassis, etc.). They are determined by a two-step calibration procedure (WP-5, `docs/compass_calibration_foundation.md` §12).
 
 **Calibration values** are stored in NVS (`cal_cx`, `cal_cy`, `cal_cz`) and loaded at boot via `compass_qmc5883l::setCalibration()`.
 
@@ -57,7 +57,11 @@ compass read      — single X/Y/Z reading + heading
 compass stream N  — stream for N seconds (default 5s)
 ```
 
-**Calibration procedure**: Slowly rotate device through 360° on a flat surface. The calibration code records min/max per axis and computes offsets as `(max + min) / 2`.
+**Calibration procedure**:
+- **Step 1 (flat spin)**: slowly rotate the device through 360° on a flat surface. Records min/max on X/Y and computes `cal_x`/`cal_y = (max+min)/2`, plus the `H0`/residual/axis-ratio metrics below. A flat spin alone cannot calibrate Z — the axis never changes what it points at, so `min ≈ max` — which is why there's a second step.
+- **Step 2 (tumble)**: tumble the device through all orientations — flip it end over end, figure-8 motion. Records min/max on Z the same way, and gates the Save button on 3-D coverage: elevation span, azimuth sector count (8×45°), and Z span must all clear an OK/GOOD threshold before saving is allowed, so a tumble that only rocks side-to-side doesn't pass by accident. Coverage is scored from the magnetometer alone (elevation/azimuth of the corrected vector in sensor frame) — no accelerometer needed. See [ADR-0019](adr/0019-3-axis-tumble-calibration-not-ellipsoid-fit.md) for why this is min/max-per-axis rather than a full ellipsoid/soft-iron fit.
+
+`cal_z` is applied by `read()` but not yet consumed by the heading formula, which stays 2-axis (`atan2f(cy, cx)`) until Level 3 tilt compensation (WP-6).
 
 ---
 

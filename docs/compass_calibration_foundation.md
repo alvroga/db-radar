@@ -41,11 +41,12 @@ it feels (§3.2). Three distinct gaps follow from it:
 | Aspect | Current state | Reference |
 |---|---|---|
 | Heading formula | 2-axis `atan2f(cy, cx)` — no tilt compensation | `compass_qmc5883l.cpp:120` |
-| Hard-iron correction | X and Y only | `compass_qmc5883l.cpp:113-114` |
-| Z axis | Read into `z_raw`, offset **stored but never applied** | `compass_qmc5883l.cpp:106, 128-132` |
-| Calibration procedure | 360° spin, **flat on a surface**, min/max per axis, offset = (max+min)/2 | `settings_screen.cpp:120-121, 161-190` |
-| Z offset at save time | Hardcoded `0` | `settings_screen.cpp:186-187` |
-| Calibration quality | Coverage span **plus** `H0`/circle-fit residual/axis ratio (WP-4) | `settings_screen.cpp` calibration overlay |
+| Hard-iron correction | X, Y, **and Z** (WP-5) — Z unused by the heading formula, which stays 2-axis | `compass_qmc5883l.cpp:133-135` |
+| Z axis | Read into `z_raw`, offset applied (`cz`), **real value since WP-5** | `compass_qmc5883l.cpp:106, 133-135` |
+| Calibration procedure | **Two-phase (WP-5)**: Step 1 flat 360° spin (X/Y, unchanged) → Step 2 tumble/figure-8 (Z, min/max per axis, offset = (max+min)/2) | `settings_screen.cpp` calibration overlay |
+| Z offset at save time | Real value from Step 2's min/max, no longer hardcoded 0 | `settings_screen.cpp` Save/Next button callback |
+| 3-D coverage scoring | Elevation span + azimuth sector count of the corrected vector in **sensor frame** (no accelerometer needed) — Step 2 gates on all three of Z span/elevation span/azimuth sectors | `settings_screen.cpp` `calTimerCb()` TUMBLE branch |
+| Calibration quality | Coverage span **plus** `H0`/circle-fit residual/axis ratio (WP-4) — still Step-1-only, see §12 WP-5 | `settings_screen.cpp` calibration overlay |
 | Runtime health check | `compass_qmc5883l::classifyHealth()` — magnitude vs. `H0`, EMA+hysteresis (WP-4) | `compass_qmc5883l.h/.cpp`, `navigation.cpp` HUD label |
 | Field magnitude | Computed implicitly, **discarded** | `compass_qmc5883l.cpp:117-120` |
 | Declination | WMM2020 (n=1..3), once per session at first fix, NVS-cached | `wmm_declination.cpp`, `task_manager.cpp:1537-1541` |
@@ -832,8 +833,31 @@ indicator (WP-4)" and its same-day correction entry.
 
 ### WP-5 — Level 2: 3-axis calibration *(needs WP-4)*
 
-New calibration motion with 3-D coverage scoring, real `cal_z_offset`, updated overlay copy and
-instructions. Feasibility comes from sample 8.
+**Status: ✅ done 2026-08-02.** The calibration overlay is now two-phase rather than a new motion
+replacing the old one: **Step 1** is the original flat 360° spin, unchanged, and still produces
+`cal_x`/`cal_y` plus `H0`/residual/axis-ratio (WP-4) exactly as before — Level 1's runtime tilt
+detector needs a baseline captured while flat, which a tumble deliberately is not, so splitting kept
+that baseline honest rather than trying to extract it from a non-flat sweep. **Step 2** is new: a
+tumble/figure-8 motion recovers `cal_z_offset` via the same min/max-per-axis approach already used for
+X/Y (no ellipsoid/soft-iron fit — WP-3 found soft iron minor when flat, and a full fit was never the
+plan; see the ADR below), gated on 3-D coverage rather than a timer alone.
+
+**3-D coverage scoring** needs no accelerometer: elevation (`asin(cz/|m|)`) and azimuth
+(`atan2(cy,cx)`) of the corrected vector are computed in **sensor frame**, and a tumble that sweeps
+them across their range demonstrably covers the sphere on this hardware — field sample 8 reached
+elevation −87.6°..+82.5°, azimuth the full −180°..180° in ~60s (`docs/calibration/wp3_results.md`).
+Step 2 gates its Save/Next unlock on three independent thresholds — Z span, elevation span, azimuth
+sector count (8 sectors of 45°) — each with the same OK/GOOD tiers X/Y already used, so a tumble that
+only rocks side-to-side (good Z span, poor elevation/azimuth spread) doesn't pass by accident.
+
+The X/Y offset computation, health-metric math, and the 2-axis heading formula are all byte-for-byte
+unchanged — `cal_z_offset` was already read and applied by `compass_qmc5883l::read()` since WP-1
+(`compass_qmc5883l.cpp:133-135`), just always 0 until now, so this WP only had to make it real.
+
+Build impact: +376 bytes RAM (`settings_screen.cpp` calibration overlay state — phase enum, Z/coverage
+tracking, one extra label pointer). Not built: an ellipsoid/soft-iron fit (deliberately out of
+scope — see the ADR); persisting the tumble's coverage stats to NVS (diagnostic-only, not needed after
+Save succeeds). Full writeup: CHANGELOG.md "Compass Level 2 3-axis calibration (WP-5)".
 
 ### WP-6 — Level 3: tilt compensation *(needs WP-5, and a go/no-go from WP-3)*
 
@@ -854,10 +878,12 @@ expired premise stated. Gyro go/no-go from sample 9 (§6A.2).
 `docs/compass_i2c_constraint.md` → ADR-0013, ADR-0014, ADR-0017. Then `CLAUDE.md` for build and
 documentation standards.
 
-**Start at WP-5 (Level 2: 3-axis calibration) if continuing this work.** WP-0 through WP-4 are done —
-field data collected and analyzed (WP-2/WP-3), Level 1 health metrics built (WP-4, this section). WP-5
-onward still need care: nothing whose constants are unmeasured gets built, though WP-5/6's inputs
-(feasibility from sample 8, the tilt go/no-go from WP-3) already exist.
+**Start at WP-6 (Level 3: tilt compensation) if continuing this work.** WP-0 through WP-5 are done —
+field data collected and analyzed (WP-2/WP-3), Level 1 health metrics built (WP-4), Level 2 3-axis
+calibration built (WP-5, this section). WP-6 needs care: it requires the mag↔accel frame rotation,
+which is an **unknown needing a dedicated bench procedure**, not something the existing field data
+answers (§10). WP-7 (τ-per-zoom smoothing, gyro decision) is independent and can be done in either
+order relative to WP-6.
 
 **Invariants that will bite:**
 - **LVGL is not thread-safe.** After the tasks start, only the UI Task may call LVGL.

@@ -122,14 +122,11 @@ bool read(CompassData& out) {
     // Check overflow
     out.overflow = (status & STATUS_OVL) != 0;
 
-    // Apply hard-iron calibration offsets.
-    // Z is included for the first time here. It changes nothing today because a
-    // flat 360 spin cannot calibrate Z (the axis keeps pointing at the same part
-    // of the sky, so min ~= max) and cal_z_offset is therefore hardcoded 0 at
-    // save time -- but the heading formula stays 2-axis, so a real Z offset from
-    // a future tumble calibration cannot perturb the heading either. This makes
-    // the code correct ahead of that work rather than silently ignoring a stored
-    // value. See docs/compass_calibration_foundation.md 3.4.
+    // Apply hard-iron calibration offsets. cal_z_offset comes from the calibration overlay's
+    // tumble/figure-8 step (WP-5) -- a flat 360 spin alone cannot calibrate Z, since the axis never
+    // changes what it points at (min ~= max). The heading formula below stays 2-axis regardless, so
+    // a real Z offset cannot perturb the heading -- consuming cz is Level 3 (WP-6, tilt
+    // compensation). See docs/compass_calibration_foundation.md 3.4.
     out.cx = out.x_raw - cal_x_offset;
     out.cy = out.y_raw - cal_y_offset;
     out.cz = out.z_raw - cal_z_offset;

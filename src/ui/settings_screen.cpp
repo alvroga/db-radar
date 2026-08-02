@@ -21,30 +21,60 @@
 // ============================================================================
 // COMPASS CALIBRATION OVERLAY STATE
 // ============================================================================
+// Two-phase flow (WP-5, docs/compass_calibration_foundation.md §12): a flat 360 spin alone cannot
+// calibrate Z -- the axis never changes what it points at, so min == max and the offset is
+// unrecoverable (see compass_qmc5883l.h). Phase 1 (FLAT) is the original flow, unchanged, and
+// produces cal_x/cal_y plus H0/residual/axis-ratio. Phase 2 (TUMBLE) is new: a figure-8/tumble
+// motion recovers cal_z and is scored on 3-D sphere coverage (elevation + azimuth of the corrected
+// vector in SENSOR frame -- not device tilt, so it needs no accelerometer). Feasibility and the
+// coverage a real tumble reaches on this hardware were confirmed by field sample 8: elevation swept
+// -87.6..+82.5 deg, azimuth the full -180..180 in ~60s (docs/calibration/wp3_results.md).
+enum class CalPhase { IDLE, FLAT, TUMBLE };
+static CalPhase g_cal_phase = CalPhase::IDLE;
+
 static lv_obj_t*   g_cal_overlay      = nullptr;
+static lv_obj_t*   g_cal_instr_lbl    = nullptr;
 static lv_obj_t*   g_cal_heading_lbl  = nullptr;
 static lv_obj_t*   g_cal_coverage_lbl = nullptr;
 static lv_obj_t*   g_cal_status_lbl   = nullptr;
 static lv_obj_t*   g_cal_save_btn     = nullptr;
+static lv_obj_t*   g_cal_save_lbl     = nullptr;   // text toggles "Next" (end of phase 1) / "Save" (end of phase 2)
 static lv_timer_t* g_cal_timer        = nullptr;
 static int16_t g_cal_min_x, g_cal_max_x, g_cal_min_y, g_cal_max_y;
+static int16_t g_cal_min_z, g_cal_max_z;
 static uint32_t g_cal_start_ms = 0;
-static bool g_cal_good_coverage = false;
+static bool g_cal_good_coverage = false;   // phase 1 (flat) sufficient
+static bool g_cal_tumble_good   = false;   // phase 2 (tumble) sufficient
 
 // Level 1 health metrics (WP-4, docs/compass_calibration_foundation.md §5): raw x/y sums across the
-// sweep let the circle-fit residual be computed exactly from the FINAL offsets at Save time, rather
-// than approximated with a running offset estimate that would be biased in the first few seconds.
+// PHASE 1 sweep let the circle-fit residual be computed exactly from the FINAL offsets at Save time,
+// rather than approximated with a running offset estimate that would be biased in the first few
+// seconds. Not touched during phase 2 -- H0/residual/axis-ratio stay a flat-only measurement,
+// because Level 1's runtime tilt detection (classifyHealth()) needs a baseline captured while flat.
 static double   g_cal_sum_x = 0.0, g_cal_sum_y = 0.0;
 static double   g_cal_sum_x2 = 0.0, g_cal_sum_y2 = 0.0;
 static uint32_t g_cal_sample_count = 0;
 static uint32_t g_cal_last_sample_ms = 0;
 
-static constexpr uint32_t CAL_DURATION_MS  = 60000;  // 60-second rotation window
-static constexpr int16_t  CAL_SPAN_OK      = 3000;   // Minimum span for OK coverage
-static constexpr int16_t  CAL_SPAN_GOOD    = 5000;   // Span for GOOD coverage (needs full rotation)
+// Phase 2 (tumble) 3-D coverage tracking. Elevation/azimuth of the corrected vector in SENSOR
+// frame -- a tumble sweeping them across their full range demonstrably covers the sphere on this
+// hardware (see comment block above). ox/oy are fixed from phase 1; oz is the running phase-2
+// estimate, same live-estimate pattern phase 1 already uses for H0 -- fine for a coverage metric,
+// which only needs the SHAPE of the sweep, not the final calibrated values.
+static float    g_cal_elev_min = 0.0f, g_cal_elev_max = 0.0f;
+static uint16_t g_cal_az_sector_mask = 0;   // bit i set => 45 deg azimuth sector i seen
 
-// Circle-fit RMS residual as % of H0, from raw x/y sums, using the given (final) offset. Exact
-// (no running-estimate bias) because it expands (x-ox)^2+(y-oy)^2 algebraically instead of
+static constexpr uint32_t CAL_DURATION_MS      = 60000;  // 60-second window, each phase
+static constexpr int16_t  CAL_SPAN_OK          = 3000;   // Minimum per-axis span for OK coverage
+static constexpr int16_t  CAL_SPAN_GOOD        = 5000;   // Per-axis span for GOOD (needs full rotation/tumble)
+static constexpr float    CAL_ELEV_SPAN_OK     = 60.0f;  // degrees; freeform field sample reached ~170
+static constexpr float    CAL_ELEV_SPAN_GOOD   = 100.0f;
+static constexpr int      CAL_AZ_SECTORS       = 8;      // 45 deg each
+static constexpr int      CAL_AZ_SECTORS_OK    = 6;
+static constexpr int      CAL_AZ_SECTORS_GOOD  = 8;
+
+// Circle-fit RMS residual as % of H0, from PHASE 1 raw x/y sums, using the given (final) offset.
+// Exact (no running-estimate bias) because it expands (x-ox)^2+(y-oy)^2 algebraically instead of
 // accumulating per-sample corrected magnitudes. See docs/calibration/wp3_results.md for the
 // healthy-band numbers (2-4%) this is meant to reproduce on-device.
 static float calResidualPct(float ox, float oy, float h0) {
@@ -57,29 +87,144 @@ static float calResidualPct(float ox, float oy, float h0) {
     return (float)(sqrt(variance) / h0 * 100.0);
 }
 
+// Enter phase 2. X/Y min/max/sums from phase 1 are left untouched (frozen for the eventual Save).
+static void beginTumblePhase() {
+    g_cal_phase = CalPhase::TUMBLE;
+    g_cal_min_z = INT16_MAX; g_cal_max_z = INT16_MIN;
+    g_cal_elev_min = 90.0f; g_cal_elev_max = -90.0f;
+    g_cal_az_sector_mask = 0;
+    g_cal_tumble_good = false;
+    g_cal_start_ms = millis();
+    g_cal_last_sample_ms = 0;
+    lv_label_set_text(g_cal_instr_lbl,
+        "Step 2/2: Tumble through all orientations -- flip end over end, figure-8 motion.\n"
+        "Finds the vertical (Z) offset a flat spin can't reach.");
+    lv_label_set_text(g_cal_status_lbl, "Keep tumbling...");
+    lv_obj_set_style_text_color(g_cal_status_lbl, lv_color_white(), 0);
+    lv_label_set_text(g_cal_save_lbl, "Save");
+    lv_obj_add_state(g_cal_save_btn, LV_STATE_DISABLED);
+    // g_cal_timer keeps running across the phase change -- it was created once by the Start button
+    // and calTimerCb branches on g_cal_phase, so there's nothing to recreate here.
+}
+
 static void calTimerCb(lv_timer_t*) {
     const CompassData& cd = device_manager::getDeviceState().last_compass_data;
     if (cd.last_update_ms == 0) return;
     if (cd.last_update_ms == g_cal_last_sample_ms) return;  // no new sample since last tick
     g_cal_last_sample_ms = cd.last_update_ms;
 
-    // Track raw min/max for hard-iron offset computation
-    if (cd.x_raw < g_cal_min_x) g_cal_min_x = cd.x_raw;
-    if (cd.x_raw > g_cal_max_x) g_cal_max_x = cd.x_raw;
-    if (cd.y_raw < g_cal_min_y) g_cal_min_y = cd.y_raw;
-    if (cd.y_raw > g_cal_max_y) g_cal_max_y = cd.y_raw;
+    char buf[64];
 
-    g_cal_sum_x  += cd.x_raw;
-    g_cal_sum_y  += cd.y_raw;
-    g_cal_sum_x2 += (double)cd.x_raw * cd.x_raw;
-    g_cal_sum_y2 += (double)cd.y_raw * cd.y_raw;
-    g_cal_sample_count++;
+    if (g_cal_phase == CalPhase::FLAT) {
+        // Track raw min/max for hard-iron offset computation
+        if (cd.x_raw < g_cal_min_x) g_cal_min_x = cd.x_raw;
+        if (cd.x_raw > g_cal_max_x) g_cal_max_x = cd.x_raw;
+        if (cd.y_raw < g_cal_min_y) g_cal_min_y = cd.y_raw;
+        if (cd.y_raw > g_cal_max_y) g_cal_max_y = cd.y_raw;
 
-    int32_t span_x = (g_cal_max_x > g_cal_min_x) ? ((int32_t)g_cal_max_x - g_cal_min_x) : 0;
-    int32_t span_y = (g_cal_max_y > g_cal_min_y) ? ((int32_t)g_cal_max_y - g_cal_min_y) : 0;
+        g_cal_sum_x  += cd.x_raw;
+        g_cal_sum_y  += cd.y_raw;
+        g_cal_sum_x2 += (double)cd.x_raw * cd.x_raw;
+        g_cal_sum_y2 += (double)cd.y_raw * cd.y_raw;
+        g_cal_sample_count++;
 
-    // Live heading display
-    char buf[48];
+        int32_t span_x = (g_cal_max_x > g_cal_min_x) ? ((int32_t)g_cal_max_x - g_cal_min_x) : 0;
+        int32_t span_y = (g_cal_max_y > g_cal_min_y) ? ((int32_t)g_cal_max_y - g_cal_min_y) : 0;
+
+        // Live heading display
+        if (!isnan(cd.heading)) {
+            snprintf(buf, sizeof(buf), "%.1f deg", cd.heading);
+        } else {
+            snprintf(buf, sizeof(buf), "--- deg");
+        }
+        lv_label_set_text(g_cal_heading_lbl, buf);
+
+        // Coverage display: spans show how much of the magnetic circle was captured
+        const char* quality;
+        lv_color_t qual_color;
+        if (span_x >= CAL_SPAN_GOOD && span_y >= CAL_SPAN_GOOD) {
+            quality = "GOOD";
+            qual_color = lv_color_hex(0x00FF00);
+        } else if (span_x >= CAL_SPAN_OK && span_y >= CAL_SPAN_OK) {
+            quality = "OK";
+            qual_color = lv_color_hex(0xFFAA00);
+        } else {
+            quality = "LOW";
+            qual_color = lv_color_hex(0xFF4444);
+        }
+
+        // Live H0 + circle-fit residual (Level 1 health metrics, WP-4) — the natural thing to show
+        // instead of coverage alone, per docs/compass_calibration_foundation.md §5.3. Uses the
+        // CURRENT (not-yet-final) min/max as the offset estimate; only meaningful once there's some
+        // span, so fall back to the plain span display until then.
+        if (span_x > 0 && span_y > 0) {
+            float ox = (g_cal_max_x + g_cal_min_x) / 2.0f;
+            float oy = (g_cal_max_y + g_cal_min_y) / 2.0f;
+            float h0 = ((float)span_x + (float)span_y) / 4.0f;
+            float residual_pct = calResidualPct(ox, oy, h0);
+            snprintf(buf, sizeof(buf), "H0:%.0f  R:%.1f%%  [%s]", h0, residual_pct, quality);
+        } else {
+            snprintf(buf, sizeof(buf), "X:%d  Y:%d  [%s]", span_x, span_y, quality);
+        }
+        lv_label_set_text(g_cal_coverage_lbl, buf);
+        lv_obj_set_style_text_color(g_cal_coverage_lbl, qual_color, 0);
+
+        // Unlock Next early once coverage is sufficient (both spans OK)
+        bool sufficient = (span_x >= CAL_SPAN_OK && span_y >= CAL_SPAN_OK);
+        if (sufficient && !g_cal_good_coverage) {
+            g_cal_good_coverage = true;
+            lv_obj_clear_state(g_cal_save_btn, LV_STATE_DISABLED);
+        }
+
+        uint32_t elapsed = millis() - g_cal_start_ms;
+        if (elapsed >= CAL_DURATION_MS) {
+            if (sufficient) {
+                beginTumblePhase();
+            } else {
+                lv_label_set_text(g_cal_status_lbl, "Coverage low -- tap Start to retry Step 1.");
+                lv_timer_del(g_cal_timer);
+                g_cal_timer = nullptr;
+            }
+        } else {
+            uint32_t remaining = (CAL_DURATION_MS - elapsed) / 1000 + 1;
+            if (g_cal_good_coverage) {
+                snprintf(buf, sizeof(buf), "Coverage OK! Tap Next or keep rotating (%lus)", remaining);
+            } else {
+                snprintf(buf, sizeof(buf), "Keep rotating slowly... %lus", remaining);
+            }
+            lv_label_set_text(g_cal_status_lbl, buf);
+        }
+        return;
+    }
+
+    // g_cal_phase == CalPhase::TUMBLE
+    if (cd.z_raw < g_cal_min_z) g_cal_min_z = cd.z_raw;
+    if (cd.z_raw > g_cal_max_z) g_cal_max_z = cd.z_raw;
+    int32_t span_z = (g_cal_max_z > g_cal_min_z) ? ((int32_t)g_cal_max_z - g_cal_min_z) : 0;
+
+    if (span_z > 0) {
+        float ox = (g_cal_max_x + g_cal_min_x) / 2.0f;   // frozen from phase 1
+        float oy = (g_cal_max_y + g_cal_min_y) / 2.0f;
+        float oz_live = (g_cal_max_z + g_cal_min_z) / 2.0f;
+        float cx = cd.x_raw - ox;
+        float cy = cd.y_raw - oy;
+        float cz = cd.z_raw - oz_live;
+        float r3 = sqrtf(cx * cx + cy * cy + cz * cz);
+        if (r3 > 0.0f) {
+            float elev = asinf(cz / r3) * 180.0f / (float)M_PI;
+            float az   = atan2f(cy, cx) * 180.0f / (float)M_PI;
+            if (elev < g_cal_elev_min) g_cal_elev_min = elev;
+            if (elev > g_cal_elev_max) g_cal_elev_max = elev;
+            int sector = (int)((az + 180.0f) / (360.0f / CAL_AZ_SECTORS));
+            if (sector < 0) sector = 0;
+            if (sector >= CAL_AZ_SECTORS) sector = CAL_AZ_SECTORS - 1;
+            g_cal_az_sector_mask |= (1u << sector);
+        }
+    }
+
+    int az_sectors_hit = __builtin_popcount((unsigned)g_cal_az_sector_mask);
+    float elev_span = (g_cal_elev_max > g_cal_elev_min) ? (g_cal_elev_max - g_cal_elev_min) : 0.0f;
+
     if (!isnan(cd.heading)) {
         snprintf(buf, sizeof(buf), "%.1f deg", cd.heading);
     } else {
@@ -87,13 +232,19 @@ static void calTimerCb(lv_timer_t*) {
     }
     lv_label_set_text(g_cal_heading_lbl, buf);
 
-    // Coverage display: spans show how much of the magnetic circle was captured
+    bool z_good    = span_z >= CAL_SPAN_GOOD;
+    bool elev_good = elev_span >= CAL_ELEV_SPAN_GOOD;
+    bool az_good   = az_sectors_hit >= CAL_AZ_SECTORS_GOOD;
+    bool z_ok      = span_z >= CAL_SPAN_OK;
+    bool elev_ok   = elev_span >= CAL_ELEV_SPAN_OK;
+    bool az_ok     = az_sectors_hit >= CAL_AZ_SECTORS_OK;
+
     const char* quality;
     lv_color_t qual_color;
-    if (span_x >= CAL_SPAN_GOOD && span_y >= CAL_SPAN_GOOD) {
+    if (z_good && elev_good && az_good) {
         quality = "GOOD";
         qual_color = lv_color_hex(0x00FF00);
-    } else if (span_x >= CAL_SPAN_OK && span_y >= CAL_SPAN_OK) {
+    } else if (z_ok && elev_ok && az_ok) {
         quality = "OK";
         qual_color = lv_color_hex(0xFFAA00);
     } else {
@@ -101,40 +252,29 @@ static void calTimerCb(lv_timer_t*) {
         qual_color = lv_color_hex(0xFF4444);
     }
 
-    // Live H0 + circle-fit residual (Level 1 health metrics, WP-4) — the natural thing to show
-    // instead of coverage alone, per docs/compass_calibration_foundation.md §5.3. Uses the CURRENT
-    // (not-yet-final) min/max as the offset estimate; only meaningful once there's some span, so
-    // fall back to the plain span display until then.
-    if (span_x > 0 && span_y > 0) {
-        float ox = (g_cal_max_x + g_cal_min_x) / 2.0f;
-        float oy = (g_cal_max_y + g_cal_min_y) / 2.0f;
-        float h0 = ((float)span_x + (float)span_y) / 4.0f;
-        float residual_pct = calResidualPct(ox, oy, h0);
-        snprintf(buf, sizeof(buf), "H0:%.0f  R:%.1f%%  [%s]", h0, residual_pct, quality);
-    } else {
-        snprintf(buf, sizeof(buf), "X:%d  Y:%d  [%s]", span_x, span_y, quality);
-    }
+    snprintf(buf, sizeof(buf), "Z:%ld  Elev:%.0f  Az:%d/%d  [%s]",
+             (long)span_z, elev_span, az_sectors_hit, CAL_AZ_SECTORS, quality);
     lv_label_set_text(g_cal_coverage_lbl, buf);
     lv_obj_set_style_text_color(g_cal_coverage_lbl, qual_color, 0);
 
-    // Unlock Save early once coverage is sufficient (both spans OK)
-    bool sufficient = (span_x >= CAL_SPAN_OK && span_y >= CAL_SPAN_OK);
-    if (sufficient && !g_cal_good_coverage) {
-        g_cal_good_coverage = true;
+    bool sufficient = z_ok && elev_ok && az_ok;
+    if (sufficient && !g_cal_tumble_good) {
+        g_cal_tumble_good = true;
         lv_obj_clear_state(g_cal_save_btn, LV_STATE_DISABLED);
     }
 
     uint32_t elapsed = millis() - g_cal_start_ms;
     if (elapsed >= CAL_DURATION_MS) {
-        lv_label_set_text(g_cal_status_lbl, sufficient ? "Done! Tap Save." : "Done — coverage low, try again.");
+        lv_label_set_text(g_cal_status_lbl,
+            sufficient ? "Done! Tap Save." : "Coverage low -- tap Start to retry from Step 1.");
         lv_timer_del(g_cal_timer);
         g_cal_timer = nullptr;
     } else {
         uint32_t remaining = (CAL_DURATION_MS - elapsed) / 1000 + 1;
-        if (g_cal_good_coverage) {
-            snprintf(buf, sizeof(buf), "Coverage OK! Save or keep rotating (%lus)", remaining);
+        if (g_cal_tumble_good) {
+            snprintf(buf, sizeof(buf), "Coverage OK! Save or keep tumbling (%lus)", remaining);
         } else {
-            snprintf(buf, sizeof(buf), "Keep rotating slowly... %lus", remaining);
+            snprintf(buf, sizeof(buf), "Keep tumbling... %lus", remaining);
         }
         lv_label_set_text(g_cal_status_lbl, buf);
     }
@@ -159,14 +299,14 @@ static void openCalibrationOverlay() {
     lv_obj_set_style_text_font(title, &iosevka_16, 0);
     lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 30);
 
-    // Instruction
-    lv_obj_t* instr = lv_label_create(g_cal_overlay);
-    lv_label_set_text(instr, "Flat on a surface. Rotate slowly 2 full circles.\nSave when coverage shows GOOD.");
-    lv_obj_set_style_text_color(instr, lv_color_white(), 0);
-    lv_obj_set_style_text_font(instr, &iosevka_16, 0);
-    lv_label_set_long_mode(instr, LV_LABEL_LONG_WRAP);
-    lv_obj_set_width(instr, 340);
-    lv_obj_align(instr, LV_ALIGN_TOP_MID, 0, 65);
+    // Instruction (text swaps between phases -- see beginTumblePhase() and the Start callback below)
+    g_cal_instr_lbl = lv_label_create(g_cal_overlay);
+    lv_label_set_text(g_cal_instr_lbl, "Step 1/2: Flat on a surface. Rotate slowly 2 full circles.");
+    lv_obj_set_style_text_color(g_cal_instr_lbl, lv_color_white(), 0);
+    lv_obj_set_style_text_font(g_cal_instr_lbl, &iosevka_16, 0);
+    lv_label_set_long_mode(g_cal_instr_lbl, LV_LABEL_LONG_WRAP);
+    lv_obj_set_width(g_cal_instr_lbl, 340);
+    lv_obj_align(g_cal_instr_lbl, LV_ALIGN_TOP_MID, 0, 65);
 
     // Live heading
     g_cal_heading_lbl = lv_label_create(g_cal_overlay);
@@ -201,7 +341,8 @@ static void openCalibrationOverlay() {
     lv_obj_center(start_lbl);
     lv_obj_add_event_cb(start_btn, [](lv_event_t* e) {
         if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
-        // Init min/max trackers
+        // (Re)start from Step 1 -- also the path back in after a low-coverage Step 1 or Step 2.
+        g_cal_phase = CalPhase::FLAT;
         g_cal_min_x = INT16_MAX; g_cal_max_x = INT16_MIN;
         g_cal_min_y = INT16_MAX; g_cal_max_y = INT16_MIN;
         g_cal_sum_x = 0.0; g_cal_sum_y = 0.0;
@@ -210,42 +351,56 @@ static void openCalibrationOverlay() {
         g_cal_last_sample_ms = 0;
         g_cal_start_ms = millis();
         g_cal_good_coverage = false;
+        g_cal_tumble_good = false;
         lv_obj_add_state(g_cal_save_btn, LV_STATE_DISABLED);
+        lv_label_set_text(g_cal_save_lbl, "Next");
+        lv_label_set_text(g_cal_instr_lbl, "Step 1/2: Flat on a surface. Rotate slowly 2 full circles.");
         lv_label_set_text(g_cal_status_lbl, "Keep rotating...");
         lv_obj_set_style_text_color(g_cal_status_lbl, lv_color_white(), 0);
         if (g_cal_timer) { lv_timer_del(g_cal_timer); }
         g_cal_timer = lv_timer_create(calTimerCb, 200, nullptr);
     }, LV_EVENT_CLICKED, nullptr);
 
-    // Save button (disabled until calibration completes)
+    // Next/Save button: "Next" advances Step 1 -> Step 2 once flat coverage is sufficient; "Save"
+    // (Step 2, WP-5) commits X/Y from the frozen phase-1 sweep and Z from the tumble sweep.
     g_cal_save_btn = lv_btn_create(g_cal_overlay);
     lv_obj_set_size(g_cal_save_btn, 120, 45);
     lv_obj_align(g_cal_save_btn, LV_ALIGN_BOTTOM_MID, 70, -60);
     lv_obj_set_style_bg_color(g_cal_save_btn, lv_color_hex(0x003366), 0);
     lv_obj_add_state(g_cal_save_btn, LV_STATE_DISABLED);
-    lv_obj_t* save_lbl = lv_label_create(g_cal_save_btn);
-    lv_label_set_text(save_lbl, "Save");
-    lv_obj_center(save_lbl);
+    g_cal_save_lbl = lv_label_create(g_cal_save_btn);
+    lv_label_set_text(g_cal_save_lbl, "Next");
+    lv_obj_center(g_cal_save_lbl);
     lv_obj_add_event_cb(g_cal_save_btn, [](lv_event_t* e) {
         if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
+
+        if (g_cal_phase == CalPhase::FLAT) {
+            beginTumblePhase();
+            return;
+        }
+
+        // g_cal_phase == CalPhase::TUMBLE -- finalize and save
         int16_t ox = (g_cal_max_x + g_cal_min_x) / 2;
         int16_t oy = (g_cal_max_y + g_cal_min_y) / 2;
-        compass_qmc5883l::setCalibration(ox, oy, 0);
+        int16_t oz = (g_cal_max_z + g_cal_min_z) / 2;
+        compass_qmc5883l::setCalibration(ox, oy, oz);
 
-        // Level 1 health metrics captured from this same sweep (WP-4,
-        // docs/compass_calibration_foundation.md §5.2-5.3).
+        // Level 1 health metrics, unchanged from WP-4: computed from the PHASE 1 (flat) sweep only
+        // (docs/compass_calibration_foundation.md §5.2-5.3) -- classifyHealth()'s tilt detector
+        // needs a baseline captured while flat, which the tumble phase deliberately is not.
         int32_t span_x = g_cal_max_x - g_cal_min_x;
         int32_t span_y = g_cal_max_y - g_cal_min_y;
         float h0 = ((float)span_x + (float)span_y) / 4.0f;
         float axis_ratio = (span_y > 0) ? (float)span_x / (float)span_y : 1.0f;
         float residual_pct = calResidualPct((float)ox, (float)oy, h0);
 
-        settings_manager::saveCompassCalibration(ox, oy, 0, h0, residual_pct, axis_ratio);
-        Serial.printf("[CAL] Compass calibrated: X offset=%d, Y offset=%d, H0=%.1f, residual=%.1f%%, axis_ratio=%.3f\n",
-                      ox, oy, h0, residual_pct, axis_ratio);
+        settings_manager::saveCompassCalibration(ox, oy, oz, h0, residual_pct, axis_ratio);
+        Serial.printf("[CAL] Compass calibrated: X=%d Y=%d Z=%d H0=%.1f residual=%.1f%% axis_ratio=%.3f\n",
+                      ox, oy, oz, h0, residual_pct, axis_ratio);
         if (g_cal_timer) { lv_timer_del(g_cal_timer); g_cal_timer = nullptr; }
         lv_obj_del(g_cal_overlay);
         g_cal_overlay = nullptr;
+        g_cal_phase = CalPhase::IDLE;
     }, LV_EVENT_CLICKED, nullptr);
 
     // Cancel button
@@ -261,6 +416,7 @@ static void openCalibrationOverlay() {
         if (g_cal_timer) { lv_timer_del(g_cal_timer); g_cal_timer = nullptr; }
         lv_obj_del(g_cal_overlay);
         g_cal_overlay = nullptr;
+        g_cal_phase = CalPhase::IDLE;
     }, LV_EVENT_CLICKED, nullptr);
 }
 
@@ -427,10 +583,13 @@ void create() {
     // Calibration overlay — also null any running timer
     if (g_cal_timer) { lv_timer_del(g_cal_timer); g_cal_timer = nullptr; }
     g_cal_overlay      = nullptr;
+    g_cal_instr_lbl    = nullptr;
     g_cal_heading_lbl  = nullptr;
     g_cal_coverage_lbl = nullptr;
     g_cal_status_lbl   = nullptr;
     g_cal_save_btn     = nullptr;
+    g_cal_save_lbl     = nullptr;
+    g_cal_phase        = CalPhase::IDLE;
 
     // Create main screen with dark background
     ui.screen_settings = lv_obj_create(NULL);

@@ -156,6 +156,39 @@ Files: `include/hardware/sensors/compass_qmc5883l.h`/`.cpp`, `include/settings_m
 (`updateRadarDisplay()`), `src/utils/diagnostics.cpp` (`compass cal`/`compass cal set`).
 Design: [`docs/compass_calibration_foundation.md`](docs/compass_calibration_foundation.md) §5, §12 (WP-4).
 
+**Compass Level 2: 3-axis calibration (WP-5)**
+
+A flat 360° spin cannot calibrate Z — the axis never changes what it points at during the spin, so
+`min ≈ max` and the offset is unrecoverable. Field sample 8 (`freeform`,
+`docs/calibration/wp3_results.md`) had already shown a tumble/figure-8 motion covers the sphere on
+this hardware (elevation −87.6°..+82.5°, azimuth the full −180°..180° in ~60s); this build turns that
+feasibility result into a real `cal_z_offset`.
+
+- **Calibration overlay is now two-phase.** Step 1 is the original flat 360° spin, byte-for-byte
+  unchanged — same X/Y min/max, same `H0`/circle-fit residual/axis ratio (WP-4). Step 2 is new: a
+  tumble/figure-8 instruction, min/max on Z, gated on **3-D coverage** rather than a timer alone. The
+  Next/Save button relabels itself between the two roles instead of a separate control.
+- **3-D coverage needs no accelerometer.** Elevation (`asin(cz/|m|)`) and azimuth (`atan2(cy,cx)`) are
+  computed from the corrected magnetometer vector in **sensor frame** — the same quantities WP-3's
+  offline analysis used to confirm sample 8's coverage. Step 2 unlocks Save only once Z span,
+  elevation span, and azimuth sector count (8 sectors of 45°) all clear their OK/GOOD thresholds,
+  mirroring the tiers X/Y already used — a tumble that only rocks side-to-side won't pass on Z span
+  alone.
+- **Min/max per axis, not an ellipsoid fit.** WP-3's own flat-sample axis ratios (1.06–1.17) said soft
+  iron is minor on this hardware; a 3×3 soft-iron matrix would be new, unvalidated math for a
+  correction the field data says is secondary. See ADR-0019 for the full reasoning, including why the
+  flat-spin baseline stays a separate step rather than being derived from the tumble.
+- **`compass_qmc5883l::read()` needed no change** — it has applied `cal_z_offset` since WP-1
+  (`compass_qmc5883l.cpp`), always 0 until now. The 2-axis heading formula is unchanged; consuming
+  `cz` is Level 3 (WP-6).
+- **Build impact (measured)**: RAM 132,728 → 132,760 bytes (+32, 40.5%), flash 1,627,955 → 1,629,399
+  bytes (+1,444, 77.7%).
+
+Files: `src/ui/settings_screen.cpp` (calibration overlay — phase state machine, tumble tracking, Save
+callback), `include/hardware/sensors/compass_qmc5883l.h`/`.cpp` (comments only — code already
+supported a real Z offset). Design: `docs/compass_calibration_foundation.md` §12 (WP-5).
+Decision record: [ADR-0019](docs/adr/0019-3-axis-tumble-calibration-not-ellipsoid-fit.md).
+
 ### Fixed
 
 **Field Log pre-flight checklist found three bugs before the trip, not during it (WP-1

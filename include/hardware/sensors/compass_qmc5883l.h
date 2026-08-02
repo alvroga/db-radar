@@ -4,11 +4,13 @@
 struct CompassData {
     int16_t x_raw = 0, y_raw = 0, z_raw = 0;
 
-    // Hard-iron-corrected vector (raw minus the stored offsets). cz is only
-    // meaningful once a 3-axis calibration exists -- a flat 360 spin cannot
-    // calibrate Z at all (the axis never changes what it points at), so
-    // cal_z_offset is 0 today and cz == z_raw. See
-    // docs/compass_calibration_foundation.md 3.4.
+    // Hard-iron-corrected vector (raw minus the stored offsets). A flat 360 spin cannot calibrate
+    // Z at all -- the axis never changes what it points at, so min == max and the offset is
+    // unrecoverable -- which is why the calibration overlay's tumble/figure-8 step (WP-5,
+    // docs/compass_calibration_foundation.md 3.4/12) exists specifically to set cal_z_offset.
+    // cz is a real hard-iron-corrected value once that step has run. It is still unused by the
+    // heading formula below (2-axis atan2, unchanged) -- consuming it is Level 3 (WP-6, tilt
+    // compensation), which also needs the accelerometer.
     int16_t cx = 0, cy = 0, cz = 0;
 
     // Horizontal field magnitude, sqrt(cx^2 + cy^2), in raw LSB (120 LSB/uT at
