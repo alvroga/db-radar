@@ -865,6 +865,28 @@ Gravity estimate with a τ-EMA on the accel vector; the mag↔accel frame rotati
 procedure (§10); the standard tilt-compensated heading. Signs and axis conventions fixed empirically on
 hardware, not on paper.
 
+**Status: implemented and field-confirmed, 2026-08-02.** The bench protocol
+([`docs/compass_tilt_bench.md`](compass_tilt_bench.md), `tiltbench_001.csv`, 2 passes × 6 poses) fixed
+the mag↔accel frame rotation as a signed permutation: `device_x = cy, device_y = cx, device_z = cz`,
+no extra negation. The heading formula is a coordinate-convention-agnostic vector one, not the textbook
+roll/pitch decomposition (which fit the bench data poorly, ~69° circular std) — normalize the
+gravity τ-EMA to "down", cross with the device Y axis to build an "east/north" horizontal basis,
+project the frame-rotated mag vector onto it, `atan2`. See
+[ADR-0020](adr/0020-tilt-compensation-formula-and-sign-from-bench-data.md) for why both the textbook
+formula and the first-principles sign argument were tried and rejected in favor of bench
+self-consistency. Both the permutation and its sign were confirmed in live hand-held use (flat/
+nose-up/recovery held the correct heading, no steady ~180° offset).
+
+The gravity EMA time constant (`GRAVITY_EMA_TAU_S`, `src/navigation/tilt_compensation.cpp`) was never
+fit to a walking-shake sample — it started at 1.0s and was lowered to 0.5s after a field test showed a
+~30° transient heading bounce during a fast flat→nose-up tilt (the EMA lagging the near-instantaneous
+mag reading mid-transition, recovering within ~1s). This is the accel-only limitation ADR-0018 already
+flagged as the gyro-fusion trigger; the response was to tighten the EMA rather than add a gyro, since
+the bounce is bounded and fast-recovering — see ADR-0018's 2026-08-02 update. Code:
+`include/navigation/tilt_compensation.h`, `src/navigation/tilt_compensation.cpp`, wired into
+`task_manager.cpp`'s compass pipeline; `compass tilt` / `compass tilt on|off` /
+`compass tilt sign +1|-1` diagnostic commands in `diagnostics.cpp`.
+
 ### WP-7 — τ-per-zoom smoothing, and the gyro decision *(needs WP-3)*
 
 τ in seconds per zoom level (§9.1), baselined on the §9.1a number. Reopen ROADMAP FT-02 with its

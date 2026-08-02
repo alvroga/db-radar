@@ -6,6 +6,7 @@
 #include "system_logger.h"
 #include "ntp_sync.h"
 #include "ui/field_log_screen.h"
+#include "ui/tilt_bench_screen.h"
 #include "core/arduino_compat.h"
 
 namespace dev_screen {
@@ -39,6 +40,12 @@ static void logging_toggle_event(lv_event_t* e) {
 static void field_log_button_event(lv_event_t* e) {
     if (lv_event_get_code(e) == LV_EVENT_CLICKED) {
         field_log_screen::open();
+    }
+}
+
+static void tilt_bench_button_event(lv_event_t* e) {
+    if (lv_event_get_code(e) == LV_EVENT_CLICKED) {
+        tilt_bench_screen::open();
     }
 }
 
@@ -302,6 +309,26 @@ void createDevTab(lv_obj_t* parent) {
     lv_obj_set_style_text_font(flog_lbl, &iosevka_16, 0);
     lv_obj_set_style_text_color(flog_lbl, lv_color_white(), 0);
     lv_obj_center(flog_lbl);
+
+    y_offset += 60;
+
+    // === TILT BENCH (WP-6 mag<->accel frame rotation bench procedure) ===
+    // docs/compass_tilt_bench.md. Same USB-off rationale as Field Log above --
+    // holding NOSE-UP/DOWN and EDGE-DOWN poses with a cable attached is awkward and
+    // the cable is itself a plausible field source next to the magnetometer.
+    lv_obj_t* tbench_btn = lv_btn_create(parent);
+    lv_obj_set_size(tbench_btn, 200, 48);
+    lv_obj_align(tbench_btn, LV_ALIGN_TOP_LEFT, 0, y_offset);
+    lv_obj_set_style_bg_color(tbench_btn, lv_color_hex(0x006688), 0);
+    lv_obj_set_style_border_width(tbench_btn, 0, 0);
+    lv_obj_set_style_radius(tbench_btn, 8, 0);
+    lv_obj_add_event_cb(tbench_btn, tilt_bench_button_event, LV_EVENT_CLICKED, nullptr);
+
+    lv_obj_t* tbench_lbl = lv_label_create(tbench_btn);
+    lv_label_set_text(tbench_lbl, "Tilt Bench >");
+    lv_obj_set_style_text_font(tbench_lbl, &iosevka_16, 0);
+    lv_obj_set_style_text_color(tbench_lbl, lv_color_white(), 0);
+    lv_obj_center(tbench_lbl);
 
     y_offset += 60;
 

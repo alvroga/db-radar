@@ -19,6 +19,7 @@
 #include "hardware/connectivity/beacon_proximity.h"
 #include "hardware/sensors/compass_qmc5883l.h"
 #include "hardware/sensors/accel_qmi8658.h"
+#include "navigation/tilt_compensation.h"
 #include "field_log.h"
 #include "core/arduino_compat.h"
 #include "esp_core_dump.h"
@@ -773,6 +774,8 @@ void printAvailableCommands() {
     Serial.println("  compass init         - Initialize sensor (continuous mode)");
     Serial.println("  compass read         - Read raw X/Y/Z and compute heading");
     Serial.println("  compass stream [s]   - Stream readings for N seconds");
+    Serial.println("  compass tiltbench    - One-shot accel+mag readout (WP-6 bench procedure)");
+    Serial.println("  compass tilt         - WP-6 tilt-compensated heading status + live reading");
     Serial.println("");
     Serial.println("Developer Commands:");
     Serial.println("  dev on|off           - Enable/disable dev mode (persists)");
@@ -1909,6 +1912,90 @@ void handleCompassCommand(const char* args) {
 
         Serial.printf("[COMPASS] Done: %lu samples in %lu ms\n", samples, millis() - start);
     }
+    else if (strncmp(args, "tiltbench", 9) == 0) {
+        // WP-6 bench procedure (docs/compass_calibration_foundation.md WP-6, §10: "Mag<->accel
+        // frame rotation -- unknown, needs a dedicated bench procedure, not a field sample").
+        // Single-shot, run once per held pose -- see docs/compass_tilt_bench.md for the pose list.
+        AccelData ad;
+        bool accel_ok = accel_qmi8658::read(ad);
+        CompassData cd;
+        bool mag_ok = compass_qmc5883l::read(cd);
+
+        if (!accel_ok || !mag_ok) {
+            Serial.println("[TILTBENCH] Read failed -- one or both sensors not ready:");
+            Serial.printf("  accel: %s (enabled=%s init=%s)\n", accel_ok ? "OK" : "FAIL",
+                          accel_qmi8658::isEnabled() ? "yes" : "no",
+                          accel_qmi8658::isInitialized() ? "yes" : "no");
+            Serial.printf("  mag:   %s (try 'compass init' or wait for data-ready)\n",
+                          mag_ok ? "OK" : "FAIL");
+            return;
+        }
+
+        Serial.println("==== TILTBENCH ====");
+        Serial.printf("accel_g  ax=%+.3f ay=%+.3f az=%+.3f\n", ad.ax_g, ad.ay_g, ad.az_g);
+        Serial.printf("mag_lsb  cx=%+6d cy=%+6d cz=%+6d\n", cd.cx, cd.cy, cd.cz);
+        Serial.printf("heading(2-axis, uncompensated) = %.1f deg\n", cd.heading);
+        Serial.println("====================");
+    }
+    else if (strncmp(args, "tilt", 4) == 0) {
+        // Runtime control for WP-6 tilt compensation (navigation/tilt_compensation.h).
+        // Session-only, not NVS-persisted -- lets a bad reading in the field be
+        // reverted or resigned without a reflash (same reasoning as `accel on|off`).
+        const char* sub = args + 4;
+        while (*sub == ' ') sub++;
+
+        if (strncmp(sub, "on", 2) == 0) {
+            tilt_compensation::setEnabled(true);
+            Serial.println("[TILT] Enabled");
+        } else if (strncmp(sub, "off", 3) == 0) {
+            tilt_compensation::setEnabled(false);
+            Serial.println("[TILT] Disabled -- falling back to 2-axis heading");
+        } else if (strncmp(sub, "sign", 4) == 0) {
+            const char* v = sub + 4;
+            while (*v == ' ') v++;
+            if (*v == '+' || *v == '-') {
+                tilt_compensation::setSign(atoi(v));
+                Serial.printf("[TILT] Sign set to %+d\n", tilt_compensation::getSign());
+            } else {
+                Serial.printf("[TILT] Current sign: %+d\n", tilt_compensation::getSign());
+                Serial.println("Usage: compass tilt sign +1 | compass tilt sign -1");
+            }
+        } else {
+            // Live status + one-shot compensated reading, for field sign verification:
+            // point the device at a known heading, tilt it through nose/edge poses, and
+            // confirm the reading stays put (see docs/compass_tilt_bench.md). A ~180 deg
+            // offset that stays otherwise stable means the sign is flipped -- fix with
+            // `compass tilt sign -1` (or +1) rather than trusting the paper derivation.
+            AccelData ad;
+            bool accel_ok = accel_qmi8658::read(ad);
+            CompassData cd;
+            bool mag_ok = compass_qmc5883l::read(cd);
+
+            Serial.println("==== TILT COMPENSATION (WP-6) ====");
+            Serial.printf("enabled=%s sign=%+d gravity_valid=%s\n",
+                          tilt_compensation::isEnabled() ? "yes" : "no",
+                          tilt_compensation::getSign(),
+                          tilt_compensation::isGravityValid() ? "yes" : "no");
+            if (mag_ok) {
+                tilt_compensation::Result tc =
+                    tilt_compensation::computeHeading(cd.cx, cd.cy, cd.cz);
+                Serial.printf("2-axis heading        = %.1f deg\n", cd.heading);
+                if (tc.valid) {
+                    Serial.printf("tilt-compensated       = %.1f deg\n", tc.heading_deg);
+                } else {
+                    Serial.println("tilt-compensated       = n/a (gravity not seeded, or "
+                                    "device near straight up/down)");
+                }
+            } else {
+                Serial.println("mag read failed");
+            }
+            if (accel_ok) {
+                Serial.printf("accel_g  ax=%+.3f ay=%+.3f az=%+.3f\n", ad.ax_g, ad.ay_g, ad.az_g);
+            }
+            Serial.println("Usage: compass tilt on|off | compass tilt sign +1|-1");
+            Serial.println("===================================");
+        }
+    }
     else {
         Serial.println("Available compass commands (QMC5883L on BH-880):");
         Serial.println("  compass [status]     - Show chip ID and configuration");
@@ -1917,6 +2004,10 @@ void handleCompassCommand(const char* args) {
         Serial.println("  compass stream [s]   - Stream readings for N seconds (default 5)");
         Serial.println("  compass cal          - Show saved calibration offsets and quality");
         Serial.println("  compass cal set X Y  - Manually set hard-iron offsets and save to NVS");
+        Serial.println("  compass tiltbench    - One-shot accel+mag readout for the WP-6 bench procedure");
+        Serial.println("  compass tilt         - WP-6 tilt-compensated heading: status + live reading");
+        Serial.println("  compass tilt on|off  - Enable/disable tilt compensation (session-only)");
+        Serial.println("  compass tilt sign +1|-1 - Flip the bench-derived global sign (session-only)");
     }
 }
 

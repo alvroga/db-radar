@@ -16,6 +16,7 @@
 #include "gps_bh880.h"
 #include "compass_qmc5883l.h"
 #include "navigation/gps_quality.h"
+#include "navigation/tilt_compensation.h"
 #include "hardware/sensors/battery.h"
 #include "standby_manager.h"
 #include "utils/watchdog.h"
@@ -1633,8 +1634,22 @@ static void updateStatusLabels() {
                         mutable_state.last_compass_data = compass_data;
 
                         if (compass_data.valid) {
+                            // WP-6: tilt-compensated heading when the gravity estimate is
+                            // seeded and the device isn't near the reference-axis
+                            // singularity (device pointed ~straight up/down) -- falls back
+                            // to the proven 2-axis heading otherwise, via Result::valid.
+                            // Uses the PREVIOUS tick's gravity estimate (accel is read later
+                            // in this same tick, below) -- a ~20ms lag on a tau=1s EMA is
+                            // immaterial. See include/navigation/tilt_compensation.h.
+                            float magnetic_heading = compass_data.heading;
+                            if (tilt_compensation::isEnabled()) {
+                                tilt_compensation::Result tc = tilt_compensation::computeHeading(
+                                    compass_data.cx, compass_data.cy, compass_data.cz);
+                                if (tc.valid) magnetic_heading = tc.heading_deg;
+                            }
+
                             // Apply magnetic declination (WMM) to convert magnetic → true heading
-                            float true_heading = compass_data.heading;
+                            float true_heading = magnetic_heading;
                             const auto& decl_settings = settings_manager::getSettings();
                             if (decl_settings.compass_declination_valid) {
                                 true_heading += decl_settings.compass_declination_deg;
@@ -1690,6 +1705,8 @@ static void updateStatusLabels() {
                             device_manager::DeviceState& acc_state =
                                 const_cast<device_manager::DeviceState&>(compass_dev_state);
                             acc_state.last_accel_data = accel_data;
+                            tilt_compensation::updateGravity(
+                                accel_data.ax_g, accel_data.ay_g, accel_data.az_g, compass_now);
                         } else if (++s_accel_fail_count >= 5) {
                             Serial.println("[ACCEL] 5 consecutive failures — attempting re-init");
                             s_accel_fail_count = 0;

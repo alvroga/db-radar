@@ -189,6 +189,77 @@ callback), `include/hardware/sensors/compass_qmc5883l.h`/`.cpp` (comments only �
 supported a real Z offset). Design: `docs/compass_calibration_foundation.md` §12 (WP-5).
 Decision record: [ADR-0019](docs/adr/0019-3-axis-tumble-calibration-not-ellipsoid-fit.md).
 
+**Compass Level 3 groundwork: Tilt Bench capture screen (WP-6, in progress)**
+
+WP-6 needs the fixed rotation between the magnetometer's and accelerometer's sensor frames — they sit
+on different PCBs, so this is a hardware fact, not something derivable from the mag-only field data
+already collected. Rather than guess it (the exact "un-instrumented constant" mistake this project has
+made before — see `memory/feedback_residual_attribution.md`), added the tooling to measure it directly
+on the 6-pose bench protocol in [`docs/compass_tilt_bench.md`](docs/compass_tilt_bench.md).
+
+- **New `tilt_bench` module + Settings > DEV > Tilt Bench screen** — Start Session opens a CSV on the
+  SD card, CAPTURE takes one synchronized accel+mag reading and appends it tagged with the current
+  pose (auto-advancing through the 6-pose list), End Session closes the file. Retrieved over WiFi from
+  `/logs` afterward, same as `field_log`.
+  **Deliberately not the serial `compass tiltbench` command this started as**: USB is required for
+  serial, but it makes the NOSE-UP/DOWN and EDGE-DOWN poses awkward to hold cleanly, and a
+  cable/charger is itself a plausible local magnetic-field source right next to the magnetometer —
+  the same contamination risk `field_log` was built to avoid (§8.1). The serial command still exists
+  as a quick desk-side sanity check with USB already attached, but is not the tool for the actual
+  protocol.
+- **Unlike `field_log`, no ring buffer/writer task** — captures are user-triggered and rare (a
+  handful per session), so a direct `fopen`/`fwrite`/`fflush` from the UI Task on the CAPTURE tap is
+  the same class of occasional blocking write already accepted elsewhere (e.g. the calibration
+  overlay's NVS save).
+- **Build impact (measured)**: RAM 132,760 → 132,872 bytes (+112, 40.5%), flash 1,630,259 →
+  1,634,035 bytes (+3,776, 77.9%).
+
+Not yet run on hardware; no heading-formula change yet. Files: `include/utils/tilt_bench.h`,
+`src/utils/tilt_bench.cpp`, `include/ui/tilt_bench_screen.h`, `src/ui/tilt_bench_screen.cpp`,
+`src/ui/dev_screen.cpp` (entry point).
+
+**Compass Level 3 tilt compensation implemented (WP-6)**
+
+Bench data came back (`docs/calibration/tiltbench_001.csv`, 2 passes × 6 poses) and was analyzed to
+derive the mag↔accel frame rotation and a working heading formula — see
+[ADR-0020](docs/adr/0020-tilt-compensation-formula-and-sign-from-bench-data.md) for why the textbook
+roll/pitch formula and the first-principles sign guess were both tried and rejected in favor of a
+vector cross-product formula and a bench-derived sign.
+
+- **New `tilt_compensation` module** (`include/navigation/tilt_compensation.h`,
+  `src/navigation/tilt_compensation.cpp`): a τ-EMA gravity estimate from the accelerometer, and
+  `computeHeading()` — normalizes gravity to "down", builds an "east/north" horizontal basis via
+  cross products against the device's Y axis (physical top of screen), projects the frame-rotated mag
+  vector onto it, `atan2`. Derived signed permutation: `device_x = cy, device_y = cx, device_z = cz`,
+  no extra negation. Returns invalid (falls back to the existing 2-axis heading) when the device is
+  pointed close to straight up/down — the reference axis is then parallel to gravity, a genuine
+  singularity of this formula, not a data or calibration defect.
+- **Wired into the System Task's compass pipeline** (`src/utils/task_manager.cpp`): tilt-compensated
+  heading feeds into the existing declination/smoothing pipeline in place of the 2-axis heading
+  whenever it's valid and enabled, so nothing downstream (WMM declination, the heading EMA) needed to
+  change.
+- **New `compass tilt` diagnostic commands** (`src/utils/diagnostics.cpp`): `compass tilt` (live status
+  — enabled/sign/gravity validity/both headings side by side), `compass tilt on|off` (kill switch),
+  `compass tilt sign +1|-1` (runtime sign flip) — all session-only, not NVS-persisted, so the sign can
+  be corrected in the field without a reflash if a live check ever shows a steady ~180° offset from a
+  known heading.
+- **Field test (2026-08-02): gravity EMA tau lowered 1.0s → 0.5s.** A fast flat→nose-up tilt showed a
+  real, ~30°, fast-recovering transient heading bounce during the transition itself — the gravity
+  estimate lagging the near-instantaneous mag reading while still converging on the new orientation.
+  This is the accel-only tilt compensation limitation [ADR-0018](docs/adr/0018-tilt-compensation-required-gyro-deferred.md)
+  already flagged as the gyro trigger condition; the response here was to tighten the EMA rather than
+  add gyro fusion, since the bounce is bounded and recovers within about a second — see ADR-0018's
+  2026-08-02 update. `GRAVITY_EMA_TAU_S` was never fit to a walking-shake sample in the first place
+  (comment in `tilt_compensation.cpp`), so 0.5s is confirmed-by-field-test, not a final answer either.
+- **Build impact (measured)**: RAM 132,872 → 132,888 bytes (+16, 40.6%), flash 1,634,035 → 1,636,495
+  bytes (+2,460, 78.0%).
+
+**Sign confirmed in live use (2026-08-02)**: hand-held testing (flat, nose-up, recovery) showed the
+heading settling back to the correct value each time, not a steady ~180° offset — the bench-derived
+sign (`+1`, no extra negation) is correct as shipped. `compass tilt sign +1|-1` stays available as a
+runtime revert path regardless, per this project's standing rule of keeping empirically-fixed signs
+field-adjustable.
+
 ### Fixed
 
 **Field Log pre-flight checklist found three bugs before the trip, not during it (WP-1

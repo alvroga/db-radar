@@ -44,6 +44,42 @@ bug, likely a dangling LVGL object pointer. Not fixed by the above.
 
 ---
 
+### FT-07: UI Freeze Regression — PRIORITY, needs full investigation
+**Severity**: Critical — full interface freeze
+**Status**: reported 2026-08-02, on the firmware built at commit `9ae6368` (WP-5, compass Level 2
+3-axis calibration) — **not** the WP-6 tilt-bench build, which had not been flashed yet at the time of
+the report. User's own words: *"the interface is frozen again... this was not happening before."*
+
+**Repro detail from the user**: device was **idle on Settings > DEV tab, nothing was being done** —
+no touch input, no calibration in progress, no visible overlay. This is a meaningful constraint: it
+rules out anything that requires an active user action or a visibly-open modal, and points at
+something that can freeze the UI Task with **zero interaction**.
+
+**Leading candidate given that constraint: [[FT-06]] recurring**, not a new bug. Touch and button
+polling run on the **UI Task** itself (`memory/MEMORY.md` Task Architecture), guarded by the shared
+I2C bus mutex. If the bus is wedged (FT-06's mechanism — a slave left mid-transaction holding SDA low),
+a touch-poll call blocking on that mutex would freeze the *entire* UI Task loop, including rendering —
+which looks exactly like "idle, frozen, nothing was being done," and needs no calibration UI, no
+overlay, no specific tab. This fits the reported symptom better than the alternative below.
+
+**Investigated and demoted**: WP-5's calibration overlay (`g_cal_timer`, `g_cal_overlay` — created as
+a child of `lv_scr_act()`, `src/ui/settings_screen.cpp:287`) staying alive across a screen rebuild.
+Read `navigation.cpp`'s `goToSettingsScreen()` looking for exactly this — it does call
+`lv_obj_del(old_screen)` without going through the overlay's own Cancel/Save cleanup, **but** nothing
+between that delete and `settings_screen::create()`'s own timer cleanup (line 584) calls
+`lv_timer_handler()`, and LVGL only advances timers when that function runs — so the two calls are
+synchronous with no window for `g_cal_timer` to fire on freed objects via this path. Also: an open
+overlay would be visibly on screen (parented to the whole settings screen, not a single tab), which
+contradicts "nothing was being done." Not ruled out entirely (there may be another way to strand the
+overlay open that wasn't checked), but it no longer fits this specific report as well as FT-06 does.
+
+**Not yet confirmed. No serial/crash log, no confirmation of whether it self-cleared or needed a power
+cycle.** Do not treat FT-06 as confirmed either — this is the better-fitting hypothesis given the repro
+detail, not proven. Get that missing information (self-cleared vs. power cycle, duration, any serial
+output) before writing recovery code aimed at FT-06 specifically.
+
+---
+
 ### FT-03: Zoom Levels Not Progressive
 **Severity**: Medium — navigation confusion
 
@@ -135,8 +171,16 @@ stays sharp).
 in the calibration overlay, runtime `classifyHealth()`, HUD trust indicator) shipped 2026-08-02. WP-5
 (Level 2: 3-axis calibration — a second, tumble/figure-8 calibration step that recovers a real
 `cal_z_offset` via 3-D coverage scoring) shipped 2026-08-02 — see CHANGELOG.md and ADR-0019. WP-6
-(accelerometer tilt compensation) is next; it needs the mag↔accel frame rotation, an open bench-only
-unknown (§10 of the design doc).
+(accelerometer tilt compensation) **shipped 2026-08-02** — see CHANGELOG.md and
+[ADR-0020](docs/adr/0020-tilt-compensation-formula-and-sign-from-bench-data.md). The mag↔accel frame
+rotation was measured via the Settings > DEV > Tilt Bench protocol
+([`docs/compass_tilt_bench.md`](docs/compass_tilt_bench.md)), a vector cross-product formula (not the
+textbook roll/pitch one, which fit poorly) and a bench-derived sign were implemented in
+`navigation/tilt_compensation`, and both were confirmed in live hand-held use. The one open item is
+cosmetic, not a defect: a fast flat→nose-up tilt shows a ~30° transient heading bounce that recovers
+within ~1s, caused by the gravity EMA lagging the tilt change mid-motion — expected for an accel-only
+(no gyro, [ADR-0018](docs/adr/0018-tilt-compensation-required-gyro-deferred.md)) approach, and already
+tightened once (τ 1.0s → 0.5s) in response.
 
 **Symptom** (field-confirmed): facing north held **flat**, N points to the top — correct. Facing north
 held **vertical**, N points to the **bottom**. The heading formula is 2-axis (`atan2(cy, cx)`), so the

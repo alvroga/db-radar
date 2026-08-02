@@ -52,6 +52,19 @@ directions: heading error vs GPS course was **−135° walking north** and **+4�
    Tilt (pitch/roll) has gravity as a permanent, driftless reference, so a gyro there is bounded and
    self-correcting in a way it structurally cannot be for yaw.
 
+## Update (2026-08-02, post-implementation)
+
+The predicted trigger fired, in a narrow form: a field test of the finished Level 3 formula
+([[ADR-0020]]) showed a real ~30° transient heading bounce during a fast flat→nose-up tilt, caused by
+the gravity τ-EMA lagging the near-instantaneous mag reading mid-transition — recovering correctly
+within roughly a second once the motion stopped. This is exactly "does the accel-only tilt estimate
+lag in practice," but the response was to lower `GRAVITY_EMA_TAU_S` 1.0s → 0.5s
+(`src/navigation/tilt_compensation.cpp`) rather than build gyro fusion — the bounce is bounded, fast,
+self-correcting, and only shows up during a deliberate fast re-tilt, not the kind of persistent lag
+this ADR treated as the actual gyro trigger. Gyro fusion remains deferred; the trigger condition is
+now a known, observed behavior rather than a hypothetical, and a future occurrence worse than "recovers
+within ~1s" is the thing that would actually reopen this decision.
+
 ## Consequences
 
 **Easier**: the go/no-go question that gated WP-6 is resolved with field evidence rather than
