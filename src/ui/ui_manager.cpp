@@ -286,6 +286,14 @@ void createRadarScreen() {
     lv_obj_set_style_text_font(g_ui_state.gps_quality_label, &iosevka_16, 0);
     lv_label_set_text(g_ui_state.gps_quality_label, "");  // Hidden until GPS fix
     lv_obj_align(g_ui_state.gps_quality_label, LV_ALIGN_BOTTOM_MID, 0, -35);
+
+    // Compass trust indicator (Level 1 health metrics, WP-4). Empty text = healthy, matching the
+    // gps_quality_label pattern above — showHUD()/hideHUD() manage visibility, this only sets text.
+    g_ui_state.compass_health_label = lv_label_create(stage);
+    lv_obj_set_style_text_color(g_ui_state.compass_health_label, lv_color_white(), 0);
+    lv_obj_set_style_text_font(g_ui_state.compass_health_label, &iosevka_16, 0);
+    lv_label_set_text(g_ui_state.compass_health_label, "");
+    lv_obj_align(g_ui_state.compass_health_label, LV_ALIGN_BOTTOM_MID, 0, -15);
     Serial.println("[RADAR] GPS quality label created");
 
     // Add battery status indicator (top-right, safe margin)
@@ -451,6 +459,8 @@ void showHUD() {
             lv_obj_clear_flag(g_ui_state.gps_status_label, LV_OBJ_FLAG_HIDDEN);
         if (g_ui_state.gps_quality_label)
             lv_obj_clear_flag(g_ui_state.gps_quality_label, LV_OBJ_FLAG_HIDDEN);
+        if (g_ui_state.compass_health_label)
+            lv_obj_clear_flag(g_ui_state.compass_health_label, LV_OBJ_FLAG_HIDDEN);
         if (g_ui_state.battery_label)
             lv_obj_clear_flag(g_ui_state.battery_label, LV_OBJ_FLAG_HIDDEN);
         if (g_ui_state.zoom_label)
@@ -472,6 +482,8 @@ void hideHUD() {
             lv_obj_add_flag(g_ui_state.gps_status_label, LV_OBJ_FLAG_HIDDEN);
         if (g_ui_state.gps_quality_label)
             lv_obj_add_flag(g_ui_state.gps_quality_label, LV_OBJ_FLAG_HIDDEN);
+        if (g_ui_state.compass_health_label)
+            lv_obj_add_flag(g_ui_state.compass_health_label, LV_OBJ_FLAG_HIDDEN);
         if (g_ui_state.battery_label)
             lv_obj_add_flag(g_ui_state.battery_label, LV_OBJ_FLAG_HIDDEN);
         if (g_ui_state.zoom_label)

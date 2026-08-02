@@ -1799,7 +1799,13 @@ void handleCompassCommand(const char* args) {
         while (*p == ' ') p++;
         int x_val = 0, y_val = 0;
         if (sscanf(p, "%d %d", &x_val, &y_val) == 2) {
-            if (settings_manager::saveCompassCalibration((int16_t)x_val, (int16_t)y_val, 0)) {
+            // Manual offset override, not a sweep -- there's no new H0/residual/axis-ratio to
+            // compute here, so carry the existing quality metrics through unchanged rather than
+            // inventing values or silently zeroing them (that would read as "excellent" quality
+            // for an override that was never actually scored).
+            const auto& prior = settings_manager::getSettings();
+            if (settings_manager::saveCompassCalibration((int16_t)x_val, (int16_t)y_val, 0,
+                    prior.compass_cal_h0, prior.compass_cal_residual_pct, prior.compass_cal_axis_ratio)) {
                 compass_qmc5883l::setCalibration((int16_t)x_val, (int16_t)y_val, 0);
                 Serial.printf("[COMPASS] Calibration manually set: X=%d Y=%d Z=0\n", x_val, y_val);
                 Serial.println("[COMPASS] Saved to NVS. Run 'compass stream' to verify.");
@@ -1828,6 +1834,23 @@ void handleCompassCommand(const char* args) {
             else if (mag < 2000)  Serial.println("Quality: GOOD");
             else if (mag < 5000)  Serial.println("Quality: FAIR (significant hard iron - normal for enclosure)");
             else                  Serial.println("Quality: POOR - consider recalibrating in open area");
+        }
+
+        // Level 1 health metrics (WP-4, docs/compass_calibration_foundation.md §5) -- captured from
+        // the calibration sweep itself, distinct from the offset-magnitude heuristic above.
+        if (settings.compass_cal_h0 > 0.0f) {
+            Serial.printf("H0 (baseline):    %.1f LSB (%.1f uT)\n", settings.compass_cal_h0, settings.compass_cal_h0 / 120.0f);
+            Serial.printf("Circle-fit resid: %.1f%% (healthy band: 2-4%%)\n", settings.compass_cal_residual_pct);
+            Serial.printf("Axis ratio:       %.3f (healthy band: ~1.06-1.07)\n", settings.compass_cal_axis_ratio);
+
+            CompassData cd;
+            if (compass_qmc5883l::read(cd) && cd.valid) {
+                auto health = compass_qmc5883l::classifyHealth(cd, settings.compass_cal_h0);
+                Serial.printf("Live health:      %s (h_mag=%.0f, ratio=%.2f)\n",
+                              compass_qmc5883l::healthToString(health), cd.h_mag, cd.h_mag / settings.compass_cal_h0);
+            }
+        } else {
+            Serial.println("H0 (baseline):    not captured -- recalibrate to get Level 1 health metrics");
         }
         Serial.println("Tip: run 'compass stream' after calibration to verify 0-360 heading range");
         Serial.println("=============================");

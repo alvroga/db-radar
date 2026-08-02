@@ -24,6 +24,13 @@ namespace {
     int16_t cal_z_offset = 0;
 
     bool initialized = false;
+
+    // Level 1 health classification state (docs/compass_calibration_foundation.md §5).
+    // Single instance -- there is exactly one compass on this board.
+    float    health_h_mag_ema  = 0.0f;
+    bool     health_ema_init   = false;
+    uint32_t health_last_ms    = 0;
+    compass_qmc5883l::CompassHealth health_state = compass_qmc5883l::CompassHealth::UNCALIBRATED;
 }
 
 namespace compass_qmc5883l {
@@ -157,6 +164,76 @@ void getCalibration(int16_t& x_offset, int16_t& y_offset, int16_t& z_offset) {
     x_offset = cal_x_offset;
     y_offset = cal_y_offset;
     z_offset = cal_z_offset;
+}
+
+const char* healthToString(CompassHealth health) {
+    switch (health) {
+        case CompassHealth::UNCALIBRATED: return "Uncalibrated";
+        case CompassHealth::HEALTHY:      return "Healthy";
+        case CompassHealth::TILTED:       return "Tilted";
+        case CompassHealth::DISTURBANCE:  return "Interference";
+    }
+    return "Unknown";
+}
+
+CompassHealth classifyHealth(const CompassData& data, float h0) {
+    if (h0 <= 0.0f) {
+        health_state = CompassHealth::UNCALIBRATED;
+        return health_state;
+    }
+
+    if (data.overflow) {
+        health_state = CompassHealth::DISTURBANCE;
+        return health_state;
+    }
+
+    // dt-based EMA so the smoothing doesn't depend on the caller's exact call rate.
+    uint32_t now = data.last_update_ms ? data.last_update_ms : millis();
+    if (!health_ema_init) {
+        health_h_mag_ema = data.h_mag;
+        health_ema_init = true;
+        health_last_ms = now;
+    } else {
+        float dt_s = (now - health_last_ms) / 1000.0f;
+        health_last_ms = now;
+        if (dt_s > 0.0f && dt_s < 5.0f) {
+            constexpr float TAU_S = 1.0f;  // smooths the ~3% noise floor without much lag
+            float alpha = 1.0f - expf(-dt_s / TAU_S);
+            health_h_mag_ema += alpha * (data.h_mag - health_h_mag_ema);
+        } else {
+            // Large/negative gap (standby wake, first sample after reinit) -- a stale EMA would
+            // lie, so snap to the fresh reading instead of smoothing across the gap.
+            health_h_mag_ema = data.h_mag;
+        }
+    }
+
+    float ratio = health_h_mag_ema / h0;
+
+    // Hysteresis bands, informed by docs/calibration/wp3_results.md: noise floor is ~2.5-3.3%
+    // relative, tilt inflates h_mag by ~23% at 45-50 deg. Entry sits well above the noise floor;
+    // exit sits below entry so the state doesn't chatter at the boundary -- same shape as the
+    // beacon proximity zone hysteresis (+-3 dBm).
+    constexpr float TILT_ENTER = 1.12f, TILT_EXIT = 1.08f;
+    constexpr float DIST_ENTER_LOW = 0.85f, DIST_EXIT_LOW = 0.90f;
+
+    if (health_state == CompassHealth::UNCALIBRATED) {
+        // Just gained a baseline -- classify fresh rather than latching onto UNCALIBRATED forever.
+        if (ratio > TILT_ENTER) health_state = CompassHealth::TILTED;
+        else if (ratio < DIST_ENTER_LOW) health_state = CompassHealth::DISTURBANCE;
+        else health_state = CompassHealth::HEALTHY;
+        return health_state;
+    }
+
+    if (ratio > TILT_ENTER) {
+        health_state = CompassHealth::TILTED;
+    } else if (ratio < DIST_ENTER_LOW) {
+        health_state = CompassHealth::DISTURBANCE;
+    } else if (ratio >= DIST_EXIT_LOW && ratio <= TILT_EXIT) {
+        health_state = CompassHealth::HEALTHY;
+    }
+    // else: ratio sits in a hysteresis gap -- keep the current state.
+
+    return health_state;
 }
 
 } // namespace compass_qmc5883l

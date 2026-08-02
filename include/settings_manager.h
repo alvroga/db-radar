@@ -72,6 +72,16 @@ struct RadarSettings {
     int16_t compass_cal_z = 0;
     bool compass_calibrated = false;
 
+    // Calibration quality metrics (Level 1 health metrics, WP-4). H0 is the mean horizontal-field
+    // semi-axis radius from the calibration sweep (raw LSB) -- the baseline that
+    // compass_qmc5883l::classifyHealth() compares live readings against. Residual and axis ratio are
+    // the calibration's own goodness-of-fit, captured once at save time from the same sweep.
+    // 0.0f / 1.0f defaults mean "calibrated before this field existed" -- there is no baseline yet.
+    // See docs/compass_calibration_foundation.md §5 and docs/calibration/wp3_results.md.
+    float compass_cal_h0 = 0.0f;             // Raw LSB. 0 = no baseline captured yet
+    float compass_cal_residual_pct = 0.0f;   // Circle-fit RMS residual, % of H0. Healthy band: 2-4%
+    float compass_cal_axis_ratio = 1.0f;     // span_x/span_y. Healthy band: ~1.06-1.07
+
     // Magnetic declination (auto-computed from WMM at GPS fix, cached in NVS)
     // Apply: true_heading = magnetic_heading + compass_declination_deg
     // (positive = East). The sign was verified empirically on hardware — this
@@ -229,7 +239,7 @@ bool saveDeclination(float declination_deg);
 /**
  * @brief Beacon proximity settings
  */
-bool saveCompassCalibration(int16_t x, int16_t y, int16_t z);
+bool saveCompassCalibration(int16_t x, int16_t y, int16_t z, float h0, float residual_pct, float axis_ratio);
 
 bool saveAccelEnabled(bool enabled);
 bool saveBeaconProximityEnabled(bool enabled);

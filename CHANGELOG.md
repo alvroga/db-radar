@@ -107,6 +107,47 @@ signatures from the samples that weren't in doubt.
 [`docs/calibration/analyze.py`](docs/calibration/analyze.py). Results also folded back into §10 of
 `docs/compass_calibration_foundation.md`.
 
+**Compass Level 1 health metrics + trust indicator (WP-4)**
+
+Runtime detection of a bad compass reading, using only data already read and previously discarded —
+no new hardware, no bus cost. Built on the WP-3 field numbers (`H₀` ≈ 3000, healthy circle-fit band
+2–4% residual / ~1.06–1.07 axis ratio, tilt inflates `h_mag` by ~23% at 45–50°).
+
+- **Calibration overlay now captures three quality metrics from the same 360° sweep it already runs**:
+  `H₀` (mean horizontal-field semi-axis radius), a circle-fit RMS residual (%), and the axis ratio.
+  The residual is computed exactly from the aggregate raw x/y sums using the *final* offset — not a
+  running per-tick approximation, which would bias early samples. Shown live during the sweep
+  (`H0:.. R:..%  [GOOD/OK/LOW]`) in place of the old coverage-only readout, and persisted to NVS
+  alongside the existing hard-iron offsets.
+- **`compass_qmc5883l::classifyHealth()`** — a new runtime classifier: `UNCALIBRATED` (no `H₀` yet),
+  `HEALTHY`, `TILTED` (h_mag elevated — tilt only ever inflates it, per the field data), or
+  `DISTURBANCE` (h_mag depressed, or sensor overflow). Smooths `h_mag` with a ~1s EMA and applies
+  hysteresis around the transition ratios (enter/exit at 1.12/1.08 and 0.85/0.90) so the state
+  doesn't chatter at the ~3% noise floor — the same shape as the beacon proximity zone classifier.
+  **This detects; it does not correct** — recovering true heading from a tilted reading needs the
+  tilt axis, which is Level 3 (WP-6), not this.
+- **Radar HUD trust indicator** — a new HUD label, hidden when healthy, that surfaces "Compass: hold
+  flat" / "Compass: interference" / "Compass: recalibrate?" / "Compass: not calibrated". The
+  recalibrate prompt comes from the *stored* calibration's own quality score (residual > 5% or axis
+  ratio outside ~0.83–1.20), not from live dynamics — distinguishing a genuinely stale calibration
+  from a momentary tilt from a single live reading isn't something the field data supports doing
+  reliably, so Level 1 doesn't try.
+- **`compass cal` serial command** now prints `H₀`, residual, axis ratio, and the live classification
+  alongside the pre-existing offset-magnitude quality heuristic. `compass cal set X Y` (manual offset
+  override) carries the existing quality metrics through unchanged rather than resetting them, since
+  a manual override isn't a scored sweep.
+- **Build impact**: +344 bytes RAM (132,384 → 132,728, 40.5%), flash 77.6%.
+- **⚠️ One-time migration note**: a calibration saved before this feature existed has no `H0`
+  baseline (`compass_cal_h0 == 0` in NVS), so the HUD shows "Compass: recalibrate?" once after
+  updating, even though the existing offsets still work. Recalibrating once (Settings > Display)
+  clears it and populates `H0`/residual/axis-ratio. See `docs/compass.md` "When to recalibrate".
+
+Files: `include/hardware/sensors/compass_qmc5883l.h`/`.cpp`, `include/settings_manager.h` +
+`src/utils/settings_manager.cpp` (three new NVS-backed fields), `src/ui/settings_screen.cpp`
+(calibration overlay), `include/ui/ui_manager.h` + `src/ui/ui_manager.cpp` (HUD label), `src/ui/navigation.cpp`
+(`updateRadarDisplay()`), `src/utils/diagnostics.cpp` (`compass cal`/`compass cal set`).
+Design: [`docs/compass_calibration_foundation.md`](docs/compass_calibration_foundation.md) §5, §12 (WP-4).
+
 ### Fixed
 
 **Field Log pre-flight checklist found three bugs before the trip, not during it (WP-1

@@ -61,6 +61,70 @@ compass stream N  — stream for N seconds (default 5s)
 
 ---
 
+## Level 1 Health Metrics (WP-4)
+
+The same 360° sweep that computes hard-iron offsets also captures three quality metrics, stored in
+NVS alongside them (`cal_h0`, `cal_resid`, `cal_axr`):
+
+- **`H0`** — mean horizontal-field semi-axis radius, `((max_x-min_x)+(max_y-min_y))/4`. Roughly
+  constant for a given location (≈3000 raw LSB in LA) — the baseline live readings are compared
+  against.
+- **Circle-fit residual** — RMS deviation of the sweep's magnitude from `H0`, as a percentage.
+  Healthy band: 2–4%.
+- **Axis ratio** — `span_x/span_y`. Should be ≈1.0 for a circular locus; healthy band ~1.06–1.07.
+  A persistent departure indicates soft iron or per-axis scale error.
+
+`compass_qmc5883l::classifyHealth(data, h0)` uses `H0` at runtime: it smooths `h_mag` with a ~1s EMA
+and applies hysteresis (enter/exit 1.12/1.08 for tilt, 0.85/0.90 for disturbance) to classify each
+reading as `HEALTHY`, `TILTED` (h_mag elevated — tilt only ever inflates it), `DISTURBANCE` (h_mag
+depressed, or sensor overflow), or `UNCALIBRATED` (no `H0` yet). **This detects, it does not
+correct** — the radar HUD shows a "Compass: hold flat" / "Compass: interference" /
+"Compass: recalibrate?" indicator, hidden when healthy, but the heading itself is unchanged (that's
+Level 3 tilt compensation, WP-6, which needs the accelerometer).
+
+The "recalibrate?" case comes from the **stored** calibration's own residual/axis-ratio score, not
+from live dynamics — telling a stale calibration apart from a momentary tilt using a single live
+reading isn't something the field data supports doing reliably.
+
+**Serial command**: `compass cal` now prints `H0`, residual, axis ratio, and the live classification
+alongside the pre-existing offset-magnitude heuristic.
+
+**Full derivation and field numbers**: [`compass_calibration_foundation.md`](compass_calibration_foundation.md) §5,
+[`calibration/wp3_results.md`](calibration/wp3_results.md).
+
+### When to recalibrate
+
+Hard-iron calibration is a **fixed geometric correction** — it nulls out a magnetic bias from
+components that travel with the sensor (nearby ferrous/magnetized material, internal wiring
+position). It does not drift with time, temperature, or location on its own, so under normal use one
+calibration lasts indefinitely. Re-run it when:
+
+- **The enclosure is opened** — even just the faceplate. Disassembly/reassembly can shift internal
+  wiring enough to change the bias (project memory `compass_recal_after_case_open.md`: this produced
+  non-90° cardinal deltas and a field magnitude that varied noticeably with heading — fixed by
+  recalibrating).
+- **Anything magnetized/ferrous is added, moved, or removed** near the board — a new mount, a
+  magnetic case clasp, a different battery.
+- **Physical shock or damage** that could shift internal components.
+- **The HUD's "Compass: recalibrate?" indicator lights up** — driven by the *stored* calibration's
+  own residual/axis-ratio score (§ above), not live dynamics.
+
+**Not a reason to recalibrate**: changing location. That's magnetic declination (WMM, below), which
+is computed automatically every session from the GPS fix — no user action needed.
+
+**Gap to be aware of**: the live classifier (`TILTED`/`DISTURBANCE`) cannot fully distinguish "the
+calibration has gone stale" from "you're just holding it at an angle" from a single reading — §5.1 of
+the foundation doc explains why that distinction needs data this project doesn't have. If the device
+reads `TILTED`/interference while held flat and away from obvious magnetic sources, treat that as a
+recalibration hint too, even without a case-open event.
+
+**One-time migration note**: a calibration saved *before* this feature existed has no `H0` baseline
+(`compass_cal_h0 == 0` in NVS), so the HUD will show "Compass: recalibrate?" once after updating to
+this firmware even though the existing offsets still work fine. Recalibrating once clears it and
+populates `H0`/residual/axis-ratio going forward.
+
+---
+
 ## Magnetic Declination (WMM)
 
 After hard-iron calibration, a consistent residual offset (~12° in LA) remains. This is **magnetic declination** — the difference between magnetic north and true geographic north.

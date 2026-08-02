@@ -130,8 +130,10 @@ stays sharp).
 
 ### Compass Calibration & Tilt — heading is only valid held flat
 **Severity**: High — the compass is the sole heading source, and it inverts when the device is tilted
-**Status**: WP-0 through WP-3 done. Field trip (WP-2) and offline analysis (WP-3) both complete
-2026-08-01/02 — **go decision for Level 3 tilt compensation**, WP-4 onward not yet built.
+**Status**: WP-0 through WP-4 done. Field trip (WP-2) and offline analysis (WP-3) complete 2026-08-01/02
+— **go decision for Level 3 tilt compensation**. WP-4 (Level 1 health metrics: `H0`/residual/axis-ratio
+in the calibration overlay, runtime `classifyHealth()`, HUD trust indicator) shipped 2026-08-02 — see
+CHANGELOG.md. WP-5 (3-axis calibration) is next.
 
 **Symptom** (field-confirmed): facing north held **flat**, N points to the top — correct. Facing north
 held **vertical**, N points to the **bottom**. The heading formula is 2-axis (`atan2(cy, cx)`), so the
@@ -147,9 +149,9 @@ covers the full sphere (3-D calibration is feasible), and accel-only (no gyro) s
 compensation provided it's oversampled/averaged rather than read at a flat 10 Hz. Full numbers:
 [`docs/calibration/wp3_results.md`](docs/calibration/wp3_results.md).
 
-**Plan**: four staged levels — (1) magnitude-based health metrics, free and no new hardware;
+**Plan**: four staged levels — (1) magnitude-based health metrics ✅ done, free and no new hardware;
 (2) 3-axis calibration; (3) accelerometer tilt compensation; (4) τ-per-zoom smoothing. Gyro is
-rejected — WP-3's shake-spectrum analysis found no need for it. WP-4 (health metrics) is next.
+rejected — WP-3's shake-spectrum analysis found no need for it. WP-5 (3-axis calibration) is next.
 
 **Resolved along the way**: `HEADING_SMOOTHING` went 0.8@1Hz → 0.3@10Hz, which did **not** preserve
 the time constant (0.62 s → 0.28 s). Restored to α = 0.15 (τ ≈ 0.62 s) and **verified on a walk** —

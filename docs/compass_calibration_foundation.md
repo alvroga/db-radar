@@ -45,8 +45,8 @@ it feels (§3.2). Three distinct gaps follow from it:
 | Z axis | Read into `z_raw`, offset **stored but never applied** | `compass_qmc5883l.cpp:106, 128-132` |
 | Calibration procedure | 360° spin, **flat on a surface**, min/max per axis, offset = (max+min)/2 | `settings_screen.cpp:120-121, 161-190` |
 | Z offset at save time | Hardcoded `0` | `settings_screen.cpp:186-187` |
-| Calibration quality | Coverage check only (X/Y span) — no fit-quality score | `settings_screen.cpp:136-140` |
-| Runtime health check | **None** | — |
+| Calibration quality | Coverage span **plus** `H0`/circle-fit residual/axis ratio (WP-4) | `settings_screen.cpp` calibration overlay |
+| Runtime health check | `compass_qmc5883l::classifyHealth()` — magnitude vs. `H0`, EMA+hysteresis (WP-4) | `compass_qmc5883l.h/.cpp`, `navigation.cpp` HUD label |
 | Field magnitude | Computed implicitly, **discarded** | `compass_qmc5883l.cpp:117-120` |
 | Declination | WMM2020 (n=1..3), once per session at first fix, NVS-cached | `wmm_declination.cpp`, `task_manager.cpp:1537-1541` |
 | Sensor config | 2 G range, 200 Hz ODR, 512 OSR, continuous | `compass_qmc5883l.cpp:48-50` |
@@ -793,9 +793,29 @@ Decision record, including why the gyro is deferred rather than folded in now:
 
 ### WP-4 — Level 1: health metrics *(needs WP-3)*
 
-`H₀` capture in the calibration overlay (§5.2), circle-fit residual and axis ratio as quality scores
-(§5.3), runtime classification per the §5.1 table, and a trust indicator in the UI. Optionally the WMM
-absolute cross-check (§5.4) — verify the truncation error first.
+**Status: ✅ done 2026-08-02.** `H₀` capture in the calibration overlay (§5.2) and circle-fit residual
++ axis ratio as quality scores (§5.3) are computed from the same sweep, exactly (via the aggregate
+raw x/y sums and the *final* offset, not a running approximation) and shown live during calibration.
+Runtime classification (`compass_qmc5883l::classifyHealth()`) implements the magnitude half of the
+§5.1 table — `HEALTHY`/`TILTED`/`DISTURBANCE`/`UNCALIBRATED` — with a ~1s EMA and hysteresis around
+the transition ratios (1.12/1.08 tilt, 0.85/0.90 disturbance) sized off the ~3% noise floor and the
+~23% tilt inflation from WP-3. A HUD trust indicator surfaces it, hidden when healthy.
+
+**Deliberately not attempted**: distinguishing a *stale calibration* from a *momentary tilt* using
+live single-reading dynamics, per §5.1's caveat that the ripple threshold "must be gated on known-flat
+data... not usable standalone as a tilt detector." Instead, "recalibrate?" is driven by the **stored**
+calibration's own residual/axis-ratio score from save time (thresholds: residual > 5% or axis ratio
+outside ~0.83–1.20 — comfortably between the healthy band and the confirmed-bad phone360 numbers), not
+by anything computed live. This is an honest Level 1 output, not a gap: correcting the confusion
+between stale-cal and tilt from live dynamics alone was never claimed as feasible with the data in
+hand.
+
+Not built (optional, not required for WP-5/6 to proceed): the WMM absolute cross-check (§5.4) —
+`wmm_declination.cpp` still only computes horizontal X/Y, and the intensity accuracy of the n=1..3
+truncation is unverified.
+
+Build impact: +344 bytes RAM. Full writeup: CHANGELOG.md "Compass Level 1 health metrics + trust
+indicator (WP-4)".
 
 ### WP-5 — Level 2: 3-axis calibration *(needs WP-4)*
 
@@ -821,8 +841,10 @@ expired premise stated. Gyro go/no-go from sample 9 (§6A.2).
 `docs/compass_i2c_constraint.md` → ADR-0013, ADR-0014, ADR-0017. Then `CLAUDE.md` for build and
 documentation standards.
 
-**Start at WP-0, then WP-1.** WP-4 onward are blocked on field data that does not exist yet; if asked
-to implement them first, say so rather than inventing thresholds.
+**Start at WP-5 (Level 2: 3-axis calibration) if continuing this work.** WP-0 through WP-4 are done —
+field data collected and analyzed (WP-2/WP-3), Level 1 health metrics built (WP-4, this section). WP-5
+onward still need care: nothing whose constants are unmeasured gets built, though WP-5/6's inputs
+(feasibility from sample 8, the tilt go/no-go from WP-3) already exist.
 
 **Invariants that will bite:**
 - **LVGL is not thread-safe.** After the tasks start, only the UI Task may call LVGL.

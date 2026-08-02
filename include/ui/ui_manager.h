@@ -134,6 +134,7 @@ struct UIState {
     lv_obj_t* wifi_mode_label = nullptr;   // WiFi mode overlay (shown when radar is disabled)
     lv_obj_t* waypoint_distance_label = nullptr;  // Distance to fixed waypoint (LVGL overlay, not canvas draw)
     lv_obj_t* beacon_found_canvas = nullptr;       // Beacon-found indicator (circle + star, shown when isFound())
+    lv_obj_t* compass_health_label = nullptr;      // Compass trust indicator (Level 1 health metrics, WP-4) — hidden when healthy
 
     // Settings elements
     lv_obj_t* settings_tabview = nullptr;

@@ -31,19 +31,49 @@ static int16_t g_cal_min_x, g_cal_max_x, g_cal_min_y, g_cal_max_y;
 static uint32_t g_cal_start_ms = 0;
 static bool g_cal_good_coverage = false;
 
+// Level 1 health metrics (WP-4, docs/compass_calibration_foundation.md §5): raw x/y sums across the
+// sweep let the circle-fit residual be computed exactly from the FINAL offsets at Save time, rather
+// than approximated with a running offset estimate that would be biased in the first few seconds.
+static double   g_cal_sum_x = 0.0, g_cal_sum_y = 0.0;
+static double   g_cal_sum_x2 = 0.0, g_cal_sum_y2 = 0.0;
+static uint32_t g_cal_sample_count = 0;
+static uint32_t g_cal_last_sample_ms = 0;
+
 static constexpr uint32_t CAL_DURATION_MS  = 60000;  // 60-second rotation window
 static constexpr int16_t  CAL_SPAN_OK      = 3000;   // Minimum span for OK coverage
 static constexpr int16_t  CAL_SPAN_GOOD    = 5000;   // Span for GOOD coverage (needs full rotation)
 
+// Circle-fit RMS residual as % of H0, from raw x/y sums, using the given (final) offset. Exact
+// (no running-estimate bias) because it expands (x-ox)^2+(y-oy)^2 algebraically instead of
+// accumulating per-sample corrected magnitudes. See docs/calibration/wp3_results.md for the
+// healthy-band numbers (2-4%) this is meant to reproduce on-device.
+static float calResidualPct(float ox, float oy, float h0) {
+    if (g_cal_sample_count == 0 || h0 <= 0.0f) return 0.0f;
+    double sum_h2 = g_cal_sum_x2 + g_cal_sum_y2
+                  - 2.0 * ox * g_cal_sum_x - 2.0 * oy * g_cal_sum_y
+                  + (double)g_cal_sample_count * ((double)ox * ox + (double)oy * oy);
+    double variance = sum_h2 / g_cal_sample_count - (double)h0 * h0;
+    if (variance < 0.0) variance = 0.0;  // guard tiny negative from float error
+    return (float)(sqrt(variance) / h0 * 100.0);
+}
+
 static void calTimerCb(lv_timer_t*) {
     const CompassData& cd = device_manager::getDeviceState().last_compass_data;
     if (cd.last_update_ms == 0) return;
+    if (cd.last_update_ms == g_cal_last_sample_ms) return;  // no new sample since last tick
+    g_cal_last_sample_ms = cd.last_update_ms;
 
     // Track raw min/max for hard-iron offset computation
     if (cd.x_raw < g_cal_min_x) g_cal_min_x = cd.x_raw;
     if (cd.x_raw > g_cal_max_x) g_cal_max_x = cd.x_raw;
     if (cd.y_raw < g_cal_min_y) g_cal_min_y = cd.y_raw;
     if (cd.y_raw > g_cal_max_y) g_cal_max_y = cd.y_raw;
+
+    g_cal_sum_x  += cd.x_raw;
+    g_cal_sum_y  += cd.y_raw;
+    g_cal_sum_x2 += (double)cd.x_raw * cd.x_raw;
+    g_cal_sum_y2 += (double)cd.y_raw * cd.y_raw;
+    g_cal_sample_count++;
 
     int32_t span_x = (g_cal_max_x > g_cal_min_x) ? ((int32_t)g_cal_max_x - g_cal_min_x) : 0;
     int32_t span_y = (g_cal_max_y > g_cal_min_y) ? ((int32_t)g_cal_max_y - g_cal_min_y) : 0;
@@ -70,7 +100,20 @@ static void calTimerCb(lv_timer_t*) {
         quality = "LOW";
         qual_color = lv_color_hex(0xFF4444);
     }
-    snprintf(buf, sizeof(buf), "X:%d  Y:%d  [%s]", span_x, span_y, quality);
+
+    // Live H0 + circle-fit residual (Level 1 health metrics, WP-4) — the natural thing to show
+    // instead of coverage alone, per docs/compass_calibration_foundation.md §5.3. Uses the CURRENT
+    // (not-yet-final) min/max as the offset estimate; only meaningful once there's some span, so
+    // fall back to the plain span display until then.
+    if (span_x > 0 && span_y > 0) {
+        float ox = (g_cal_max_x + g_cal_min_x) / 2.0f;
+        float oy = (g_cal_max_y + g_cal_min_y) / 2.0f;
+        float h0 = ((float)span_x + (float)span_y) / 4.0f;
+        float residual_pct = calResidualPct(ox, oy, h0);
+        snprintf(buf, sizeof(buf), "H0:%.0f  R:%.1f%%  [%s]", h0, residual_pct, quality);
+    } else {
+        snprintf(buf, sizeof(buf), "X:%d  Y:%d  [%s]", span_x, span_y, quality);
+    }
     lv_label_set_text(g_cal_coverage_lbl, buf);
     lv_obj_set_style_text_color(g_cal_coverage_lbl, qual_color, 0);
 
@@ -161,6 +204,10 @@ static void openCalibrationOverlay() {
         // Init min/max trackers
         g_cal_min_x = INT16_MAX; g_cal_max_x = INT16_MIN;
         g_cal_min_y = INT16_MAX; g_cal_max_y = INT16_MIN;
+        g_cal_sum_x = 0.0; g_cal_sum_y = 0.0;
+        g_cal_sum_x2 = 0.0; g_cal_sum_y2 = 0.0;
+        g_cal_sample_count = 0;
+        g_cal_last_sample_ms = 0;
         g_cal_start_ms = millis();
         g_cal_good_coverage = false;
         lv_obj_add_state(g_cal_save_btn, LV_STATE_DISABLED);
@@ -184,8 +231,18 @@ static void openCalibrationOverlay() {
         int16_t ox = (g_cal_max_x + g_cal_min_x) / 2;
         int16_t oy = (g_cal_max_y + g_cal_min_y) / 2;
         compass_qmc5883l::setCalibration(ox, oy, 0);
-        settings_manager::saveCompassCalibration(ox, oy, 0);
-        Serial.printf("[CAL] Compass calibrated: X offset=%d, Y offset=%d\n", ox, oy);
+
+        // Level 1 health metrics captured from this same sweep (WP-4,
+        // docs/compass_calibration_foundation.md §5.2-5.3).
+        int32_t span_x = g_cal_max_x - g_cal_min_x;
+        int32_t span_y = g_cal_max_y - g_cal_min_y;
+        float h0 = ((float)span_x + (float)span_y) / 4.0f;
+        float axis_ratio = (span_y > 0) ? (float)span_x / (float)span_y : 1.0f;
+        float residual_pct = calResidualPct((float)ox, (float)oy, h0);
+
+        settings_manager::saveCompassCalibration(ox, oy, 0, h0, residual_pct, axis_ratio);
+        Serial.printf("[CAL] Compass calibrated: X offset=%d, Y offset=%d, H0=%.1f, residual=%.1f%%, axis_ratio=%.3f\n",
+                      ox, oy, h0, residual_pct, axis_ratio);
         if (g_cal_timer) { lv_timer_del(g_cal_timer); g_cal_timer = nullptr; }
         lv_obj_del(g_cal_overlay);
         g_cal_overlay = nullptr;

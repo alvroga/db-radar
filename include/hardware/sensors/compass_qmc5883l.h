@@ -35,4 +35,26 @@ namespace compass_qmc5883l {
     void setCalibration(int16_t x_offset, int16_t y_offset, int16_t z_offset);
     void getCalibration(int16_t& x_offset, int16_t& y_offset, int16_t& z_offset);
 
+    // Level 1 health classification (docs/compass_calibration_foundation.md §5). h_mag is constant
+    // vs. heading when the device is flat and calibrated; every failure mode perturbs it
+    // distinguishably from a baseline H0 captured at calibration time. This DETECTS -- it does not
+    // correct. Recovering true heading from a tilted reading needs the tilt axis, which a
+    // magnetometer alone can't supply (that's Level 3, needs the accelerometer).
+    enum class CompassHealth {
+        UNCALIBRATED,  // h0 <= 0 -- no baseline to compare against
+        HEALTHY,       // h_mag within tolerance of H0
+        TILTED,        // h_mag elevated well above H0 -- field-confirmed: tilt INFLATES h_mag
+                       // (+23% at ~45-50 deg tilt, docs/calibration/wp3_results.md), never reduces it
+        DISTURBANCE,   // h_mag depressed well below H0, or sensor overflow -- a local magnetic
+                       // source, not tilt
+    };
+
+    const char* healthToString(CompassHealth health);
+
+    // Smooths h_mag with a short EMA (tau ~1s) and applies hysteresis around the transition ratios
+    // so the classification doesn't flicker at the noise floor (~3% relative, wp3_results.md) --
+    // same pattern as the beacon proximity zone classifier. Call once per compass reading; EMA/state
+    // persist internally (there is exactly one compass on this board).
+    CompassHealth classifyHealth(const CompassData& data, float h0);
+
 }

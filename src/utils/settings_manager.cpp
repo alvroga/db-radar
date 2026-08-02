@@ -48,6 +48,9 @@ static const char* KEY_COMPASS_CAL_Y  = "cal_cy";
 static const char* KEY_COMPASS_CAL_Z  = "cal_cz";
 static const char* KEY_ACCEL_EN       = "accel_en";
 static const char* KEY_COMPASS_CALED  = "cal_done";
+static const char* KEY_COMPASS_CAL_H0    = "cal_h0";
+static const char* KEY_COMPASS_CAL_RESID = "cal_resid";
+static const char* KEY_COMPASS_CAL_AXR   = "cal_axr";
 static const char* KEY_DECL_DEG   = "decl_deg";
 static const char* KEY_DECL_VALID = "decl_valid";
 static const char* KEY_WIFI_AP_EN  = "wifi_ap_en";
@@ -270,6 +273,9 @@ bool loadSettings(RadarSettings& settings) {
     settings.compass_cal_y               = nvs_geti16(h, KEY_COMPASS_CAL_Y, 0);
     settings.compass_cal_z               = nvs_geti16(h, KEY_COMPASS_CAL_Z, 0);
     settings.compass_calibrated          = nvs_getbool(h, KEY_COMPASS_CALED, false);
+    settings.compass_cal_h0              = nvs_getfloat(h, KEY_COMPASS_CAL_H0, 0.0f);
+    settings.compass_cal_residual_pct    = nvs_getfloat(h, KEY_COMPASS_CAL_RESID, 0.0f);
+    settings.compass_cal_axis_ratio      = nvs_getfloat(h, KEY_COMPASS_CAL_AXR, 1.0f);
     settings.compass_declination_deg     = nvs_getfloat(h, KEY_DECL_DEG, 0.0f);
     settings.compass_declination_valid   = nvs_getbool(h, KEY_DECL_VALID, false);
     settings.accel_enabled               = nvs_getbool(h, KEY_ACCEL_EN, true);
@@ -741,19 +747,26 @@ bool saveBeaconFound(bool found) {
     Serial.printf("[SETTINGS] Beacon found state saved: %s\n", found ? "FOUND" : "MISSING");
     return true; }
 
-bool saveCompassCalibration(int16_t x, int16_t y, int16_t z) {
+bool saveCompassCalibration(int16_t x, int16_t y, int16_t z, float h0, float residual_pct, float axis_ratio) {
     if (!is_initialized) return false;
     nvs_handle_t h = nvs_open_ns(NAMESPACE_SETTINGS, false); if (!h) return false;
     nvs_set_i16(h, KEY_COMPASS_CAL_X, x);
     nvs_set_i16(h, KEY_COMPASS_CAL_Y, y);
     nvs_set_i16(h, KEY_COMPASS_CAL_Z, z);
     nvs_setbool(h, KEY_COMPASS_CALED, true);
+    nvs_setfloat(h, KEY_COMPASS_CAL_H0, h0);
+    nvs_setfloat(h, KEY_COMPASS_CAL_RESID, residual_pct);
+    nvs_setfloat(h, KEY_COMPASS_CAL_AXR, axis_ratio);
     nvs_close_ns(h, true);
     g_cached_settings.compass_cal_x = x;
     g_cached_settings.compass_cal_y = y;
     g_cached_settings.compass_cal_z = z;
     g_cached_settings.compass_calibrated = true;
-    Serial.printf("[SETTINGS] Compass calibration saved: X=%d Y=%d Z=%d\n", x, y, z);
+    g_cached_settings.compass_cal_h0 = h0;
+    g_cached_settings.compass_cal_residual_pct = residual_pct;
+    g_cached_settings.compass_cal_axis_ratio = axis_ratio;
+    Serial.printf("[SETTINGS] Compass calibration saved: X=%d Y=%d Z=%d H0=%.1f residual=%.1f%% axis_ratio=%.3f\n",
+                  x, y, z, h0, residual_pct, axis_ratio);
     return true; }
 
 bool saveDeclination(float declination_deg) {

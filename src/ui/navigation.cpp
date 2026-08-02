@@ -13,6 +13,7 @@
 #include "ui/waypoint_screen.h"
 #include "hardware/connectivity/beacon_proximity.h"
 #include "hardware/buzzer.h"
+#include "hardware/sensors/compass_qmc5883l.h"
 #include "core/arduino_compat.h"
 #include <cfloat>
 #include <cmath>
@@ -1196,6 +1197,46 @@ void updateRadarDisplay() {
             }
         } else {
             lv_label_set_text(ui.gps_quality_label, "");  // Hide when no fix
+        }
+    }
+
+    // Compass trust indicator (Level 1 health metrics, WP-4,
+    // docs/compass_calibration_foundation.md §5). Two independent signals: a live magnitude check
+    // against the stored H0 baseline (compass_qmc5883l::classifyHealth — detects tilt/interference),
+    // and the calibration's own quality score captured once at save time (residual/axis ratio,
+    // §5.3) — the live check can't tell a stale calibration from a tilt, but a poor score at save
+    // time is its own standing warning regardless of what the live reading says.
+    if (ui.compass_health_label && lv_obj_is_valid(ui.compass_health_label)) {
+        const settings_manager::RadarSettings& settings = settings_manager::getSettings();
+        bool has_baseline = settings.compass_calibrated && settings.compass_cal_h0 > 0.0f;
+        bool quality_poor = has_baseline &&
+            (settings.compass_cal_residual_pct > 5.0f ||
+             settings.compass_cal_axis_ratio > 1.20f ||
+             settings.compass_cal_axis_ratio < 0.83f);
+
+        const char* text = nullptr;
+        uint32_t color = 0x888888;
+        if (has_baseline) {
+            auto health = compass_qmc5883l::classifyHealth(dev.last_compass_data, settings.compass_cal_h0);
+            if (health == compass_qmc5883l::CompassHealth::DISTURBANCE) {
+                text = "Compass: interference"; color = 0xFF4444;
+            } else if (health == compass_qmc5883l::CompassHealth::TILTED) {
+                text = "Compass: hold flat"; color = 0xFFAA00;
+            } else if (quality_poor) {
+                text = "Compass: recalibrate?"; color = 0xFFAA00;
+            }
+            // else HEALTHY with a good calibration -- text stays null, label hides.
+        } else if (settings.compass_calibrated) {
+            text = "Compass: recalibrate?";  // calibrated before H0 tracking existed -- no baseline
+        } else {
+            text = "Compass: not calibrated";
+        }
+
+        static const char* s_last_text = "";  // pointer compare -- all values above are literals
+        if (text != s_last_text) {
+            lv_label_set_text(ui.compass_health_label, text ? text : "");
+            if (text) lv_obj_set_style_text_color(ui.compass_health_label, lv_color_hex(color), 0);
+            s_last_text = text;
         }
     }
 
