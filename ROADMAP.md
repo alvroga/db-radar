@@ -214,6 +214,22 @@ the heading bounce is gone. See CHANGELOG.md.
 
 ## Resolved
 
+### GPX Manager Name Display + Logs Bulk Delete — Resolved (2026-08-04)
+**Was**: uploaded GPX filenames on the web upload page are bare geocache codes (e.g. `GC38EVJ.gpx`),
+giving no clue which cache is which without opening the file. Separately, the `/logs` page could only
+delete one log file at a time — tedious when clearing a card full of field-session logs.
+
+**Resolution**: `/list` now returns each file's `<groundspeak:name>` (or the waypoint's own `<name>`
+GC code as a fallback) alongside the filename; the upload page shows it as the primary label with the
+code underneath. `/logs` gained a "Select all" checkbox and a "Delete Selected" button, built on the
+existing per-file delete endpoint rather than a new bulk one. Built while FT-06 field-verification is
+pending — no hardware dependency, `pio run` build passes clean (+672 B RAM). Not yet browser-tested on
+device.
+
+**Full detail**: [CHANGELOG.md](CHANGELOG.md) → Unreleased → Added
+
+---
+
 ### Waypoint desc/hint moved to PSRAM — Resolved (2026-07-31)
 **Was**: `g_ui_state` was the largest firmware symbol (70,992 B, ~37% of static RAM), almost entirely `desc[1024]`/`hint[256]` × 50 waypoints, read in exactly one place (the detail screen, one waypoint at a time) but resident for all 50 permanently.
 

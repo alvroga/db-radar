@@ -107,7 +107,9 @@ static const char UPLOAD_HTML[] = R"rawliteral(
             justify-content: space-between;
             align-items: center;
         }
+        .file-label { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
         .file-name { color: #e0e0e0; font-size: 0.9em; }
+        .file-code { color: #666; font-size: 0.75em; }
         .download-btn {
             color: #00ff00;
             text-decoration: none;
@@ -266,13 +268,18 @@ static const char UPLOAD_HTML[] = R"rawliteral(
 
                 fileList.innerHTML = '';
                 if (data.files && data.files.length > 0) {
-                    data.files.forEach(file => {
+                    data.files.forEach(entry => {
+                        const file = entry.file;
                         const item = document.createElement('div');
                         item.className = 'file-item';
+                        const nameHtml = entry.name
+                            ? `<span class="file-name">${escapeHtml(entry.name)}</span>
+                               <span class="file-code">${escapeHtml(file)}</span>`
+                            : `<span class="file-name">${escapeHtml(file)}</span>`;
                         item.innerHTML = `
-                            <span class="file-name">${file}</span>
+                            <div class="file-label">${nameHtml}</div>
                             <div>
-                              <a class="download-btn" href="/download/gpx/${file}" download="${file}">Download</a>
+                              <a class="download-btn" href="/download/gpx/${encodeURIComponent(file)}" download="${file}">Download</a>
                               <button class="delete-btn" onclick="deleteFile('${file}')">Delete</button>
                             </div>
                         `;
@@ -284,11 +291,17 @@ static const char UPLOAD_HTML[] = R"rawliteral(
             }
         }
 
+        function escapeHtml(s) {
+            const div = document.createElement('div');
+            div.textContent = s;
+            return div.innerHTML;
+        }
+
         async function deleteFile(filename) {
             if (!confirm(`Delete ${filename}?`)) return;
 
             try {
-                const response = await fetch(`/delete/${filename}`, {
+                const response = await fetch(`/delete/${encodeURIComponent(filename)}`, {
                     method: 'DELETE'
                 });
 
@@ -404,6 +417,43 @@ static const char LOGS_HTML[] = R"rawliteral(
             display: flex;
             gap: 10px;
         }
+        .log-checkbox {
+            width: 18px;
+            height: 18px;
+            margin-right: 15px;
+            flex-shrink: 0;
+        }
+        .bulk-actions {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin-bottom: 10px;
+        }
+        .select-all-label {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            color: #333;
+            font-size: 14px;
+            cursor: pointer;
+        }
+        .delete-selected-btn {
+            background: #ff4757;
+            color: white;
+            border: none;
+            padding: 8px 16px;
+            border-radius: 6px;
+            cursor: pointer;
+            font-size: 14px;
+            transition: background 0.2s;
+        }
+        .delete-selected-btn:hover {
+            background: #ff3838;
+        }
+        .delete-selected-btn:disabled {
+            background: #ccc;
+            cursor: default;
+        }
         .download-btn {
             background: #2196F3;
             color: white;
@@ -472,6 +522,14 @@ static const char LOGS_HTML[] = R"rawliteral(
 
         <div class="status" id="status"></div>
 
+        <div class="bulk-actions" id="bulkActions" style="display:none;">
+            <label class="select-all-label">
+                <input type="checkbox" id="selectAll" class="log-checkbox" onchange="toggleSelectAll()">
+                Select all
+            </label>
+            <button class="delete-selected-btn" id="deleteSelectedBtn" disabled onclick="deleteSelected()">Delete Selected</button>
+        </div>
+
         <div class="log-list" id="logList">
             <div class="empty-state">Loading...</div>
         </div>
@@ -484,6 +542,9 @@ static const char LOGS_HTML[] = R"rawliteral(
     <script>
         const status = document.getElementById('status');
         const logList = document.getElementById('logList');
+        const bulkActions = document.getElementById('bulkActions');
+        const selectAllBox = document.getElementById('selectAll');
+        const deleteSelectedBtn = document.getElementById('deleteSelectedBtn');
 
         // Load log files on page load
         loadLogList();
@@ -495,10 +556,12 @@ static const char LOGS_HTML[] = R"rawliteral(
 
                 logList.innerHTML = '';
                 if (data.files && data.files.length > 0) {
+                    bulkActions.style.display = 'flex';
                     data.files.forEach(file => {
                         const item = document.createElement('div');
                         item.className = 'log-item';
                         item.innerHTML = `
+                            <input type="checkbox" class="log-checkbox item-checkbox" value="${file.name}" onchange="updateBulkUI()">
                             <div class="log-info">
                                 <div class="log-name">${file.name}</div>
                                 <div class="log-size">${formatBytes(file.size)}</div>
@@ -511,12 +574,33 @@ static const char LOGS_HTML[] = R"rawliteral(
                         logList.appendChild(item);
                     });
                 } else {
+                    bulkActions.style.display = 'none';
                     logList.innerHTML = '<div class="empty-state">No log files found</div>';
                 }
+                selectAllBox.checked = false;
+                updateBulkUI();
             } catch (error) {
                 console.error('Failed to load log list:', error);
                 logList.innerHTML = '<div class="empty-state">Error loading logs</div>';
             }
+        }
+
+        function itemCheckboxes() {
+            return Array.from(document.querySelectorAll('.item-checkbox'));
+        }
+
+        function updateBulkUI() {
+            const boxes = itemCheckboxes();
+            const checkedCount = boxes.filter(b => b.checked).length;
+            deleteSelectedBtn.disabled = checkedCount === 0;
+            deleteSelectedBtn.textContent = checkedCount > 0
+                ? `Delete Selected (${checkedCount})` : 'Delete Selected';
+            selectAllBox.checked = boxes.length > 0 && checkedCount === boxes.length;
+        }
+
+        function toggleSelectAll() {
+            itemCheckboxes().forEach(b => { b.checked = selectAllBox.checked; });
+            updateBulkUI();
         }
 
         function downloadLog(filename) {
@@ -540,6 +624,29 @@ static const char LOGS_HTML[] = R"rawliteral(
             } catch (error) {
                 showStatus(`✗ Delete error: ${error.message}`, 'error');
             }
+        }
+
+        async function deleteSelected() {
+            const filenames = itemCheckboxes().filter(b => b.checked).map(b => b.value);
+            if (filenames.length === 0) return;
+            if (!confirm(`Delete ${filenames.length} selected log file(s)?`)) return;
+
+            let failed = 0;
+            for (const filename of filenames) {
+                try {
+                    const response = await fetch(`/delete/logs/${filename}`, { method: 'DELETE' });
+                    if (!response.ok) failed++;
+                } catch (error) {
+                    failed++;
+                }
+            }
+
+            if (failed === 0) {
+                showStatus(`✓ ${filenames.length} log file(s) deleted`, 'success');
+            } else {
+                showStatus(`✗ ${failed} of ${filenames.length} deletions failed`, 'error');
+            }
+            loadLogList();
         }
 
         function formatBytes(bytes) {
@@ -645,6 +752,87 @@ static bool is_safe_filename(const char* name) {
     if (strstr(name, "..") != nullptr) return false;
     if (strchr(name, '/') != nullptr) return false;
     return true;
+}
+
+// Appends src to dst (which must already be null-terminated) with JSON string
+// escaping. Used for the GPX friendly name below, which is freeform text pulled
+// out of the file, not a filename — control chars and quotes are possible.
+static void json_escape_append(char* dst, size_t dst_size, const char* src) {
+    size_t di = strlen(dst);
+    for (const char* p = src; *p && di + 2 < dst_size; p++) {
+        unsigned char c = (unsigned char)*p;
+        if (c == '"' || c == '\\') {
+            if (di + 3 >= dst_size) break;
+            dst[di++] = '\\';
+            dst[di++] = (char)c;
+        } else if (c < 0x20) {
+            dst[di++] = ' ';  // collapse control chars rather than emit invalid JSON
+        } else {
+            dst[di++] = (char)c;
+        }
+    }
+    dst[di] = '\0';
+}
+
+// Pulls the human-friendly cache name out of a GPX file for display next to the
+// filename, which is normally just a bare geocache code (e.g. "GC38EVJ.gpx") and
+// tells the user nothing about which cache it is. One geocache per file: prefers
+// <groundspeak:name> (the real title), falls back to the waypoint's own <name>
+// (the GC code itself) if there's no groundspeak extension block. Line-scoped like
+// gpx_loader's parser, but deliberately simpler/standalone — this only needs the
+// name, not the full waypoint commit machinery.
+static void extractGpxName(const char* filepath, char* out, size_t out_size) {
+    out[0] = '\0';
+    FILE* f = fopen(filepath, "r");
+    if (!f) return;
+
+    char line[256];
+    char plain_name[64] = {0};
+    bool in_wpt = false;
+    bool found_groundspeak = false;
+
+    // Name tags appear near the top of a single-waypoint geocaching GPX file —
+    // cap the scan so a large description/log text doesn't cost a full read.
+    for (int i = 0; i < 200 && !found_groundspeak; i++) {
+        if (!fgets(line, sizeof(line), f)) break;
+
+        if (!in_wpt) {
+            if (strstr(line, "<wpt") && strstr(line, "lat=")) in_wpt = true;
+            continue;
+        }
+
+        const char* gs_start = strstr(line, "<groundspeak:name>");
+        if (gs_start) {
+            gs_start += 19;
+            const char* gs_end = strstr(gs_start, "</groundspeak:name>");
+            if (gs_end) {
+                size_t len = (size_t)(gs_end - gs_start);
+                if (len >= out_size) len = out_size - 1;
+                strncpy(out, gs_start, len);
+                out[len] = '\0';
+                found_groundspeak = true;
+            }
+            continue;
+        }
+
+        if (plain_name[0] == '\0' && strstr(line, "<name>") && !strstr(line, "groundspeak")) {
+            const char* n_start = strstr(line, "<name>");
+            n_start += 6;
+            const char* n_end = strstr(n_start, "</name>");
+            if (n_end) {
+                size_t len = (size_t)(n_end - n_start);
+                if (len >= sizeof(plain_name)) len = sizeof(plain_name) - 1;
+                strncpy(plain_name, n_start, len);
+                plain_name[len] = '\0';
+            }
+        }
+    }
+    fclose(f);
+
+    if (!found_groundspeak && plain_name[0] != '\0') {
+        strncpy(out, plain_name, out_size - 1);
+        out[out_size - 1] = '\0';
+    }
 }
 
 // ============================================================================
@@ -846,9 +1034,18 @@ static esp_err_t list_handler(httpd_req_t* req) {
         const char* name = entry->d_name;
         size_t nl = strlen(name);
         if (nl >= 4 && strcasecmp(name + nl - 4, ".gpx") == 0) {
-            char item[192];
-            int written = snprintf(item, sizeof(item), "%s\"%s\"", first ? "" : ",", name);
-            httpd_resp_send_chunk(req, item, (ssize_t)written);
+            char filepath[256];
+            snprintf(filepath, sizeof(filepath), "%s/%s", GPX_FOLDER, name);
+            char cache_name[96];
+            extractGpxName(filepath, cache_name, sizeof(cache_name));
+
+            char item[384];
+            int written = snprintf(item, sizeof(item), "%s{\"file\":\"%s\",\"name\":\"",
+                                    first ? "" : ",", name);
+            json_escape_append(item, sizeof(item), cache_name);
+            written = strlen(item);
+            written += snprintf(item + written, sizeof(item) - written, "\"}");
+            httpd_resp_send_chunk(req, item, (ssize_t)strlen(item));
             first = false;
         }
     }

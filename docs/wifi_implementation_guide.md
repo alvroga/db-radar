@@ -123,20 +123,23 @@ Standard WiFi — radar stays active, WiFi runs alongside it. Used for GPX uploa
 
 ## GPX Web Portal
 
-HTTP server (`esp_http_server`) with four endpoints:
+HTTP server (`esp_http_server`) with the following endpoints:
 
 | Endpoint | Method | Description |
 |---|---|---|
 | `/` | GET | GPX upload page (dark theme, drag-and-drop) |
 | `/upload` | POST | Upload a `.gpx` file (`?filename=` query param, raw body) |
-| `/list` | GET | JSON array of files in `/gpx/` |
+| `/list` | GET | JSON array of `{file, name}` — `name` is the cache's `<groundspeak:name>` (or its `<name>` GC code as fallback), pulled from the file so the upload page can show something more useful than the filename |
 | `/download/gpx/<file>` | GET | Download a specific GPX file |
 | `/delete/<file>` | DELETE | Delete a GPX file |
-| `/logs` | GET | System log viewer |
+| `/logs` | GET | System log viewer — "Select all" + "Delete Selected" bulk-delete via looped calls to `/delete/logs/<file>` |
+| `/logs-list` | GET | JSON array of `{name, size}` for files in `/logs/` |
+| `/delete/logs/<file>` | DELETE | Delete a log/CSV file |
 | `/update` | GET | OTA firmware update page |
 | `/update` | POST | Flash new firmware binary |
 
-**File storage:** FFat filesystem, `/gpx/` folder. All `.gpx` files in this folder are auto-loaded on boot.
+**File storage:** physical SD card at `/sdcard/gpx` (not the FFat partition — see
+`memory/storage_is_sd_not_ffat.md`). All `.gpx` files in this folder are auto-loaded on boot.
 
 **Implementation:** `src/gpx/gpx_server.cpp`
 

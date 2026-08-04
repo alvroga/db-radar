@@ -11,6 +11,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+**GPX manager shows the cache's friendly name; logs page gets select-all + bulk delete**
+
+`src/gpx/gpx_server.cpp`: uploaded GPX filenames are normally bare geocache codes (e.g.
+`GC38EVJ.gpx`), which tells the user nothing about which cache it is. `/list`'s JSON changed from a
+bare array of filenames to `{"file":..., "name":...}` objects; a new `extractGpxName()` scans each
+file (line-scoped, capped at 200 lines) for `<groundspeak:name>` inside the first `<wpt>` block,
+falling back to the waypoint's own `<name>` (the GC code) if there's no groundspeak extension block —
+matches the same tag preference `gpx_loader.cpp` already uses for `display_name`. The upload page now
+shows the friendly name with the code as a small secondary line underneath. Separately, the logs page
+(`/logs`) had no way to clear more than one file at a time; added a "Select all" checkbox and a
+"Delete Selected" button that loops the existing per-file `DELETE /delete/logs/<filename>` endpoint
+over the checked set — no new delete endpoint needed. Build impact: +672 bytes RAM (0.2 pts),
+negligible flash.
+
+---
+
 **Field data logging: accelerometer driver + CSV sample capture (WP-1)** — ✅ *verified on hardware,
 2026-08-02 — field-test pre-flight checklist run, full START/STOP/back navigation chain exercised
 repeatedly including auto-standby, no crash or hang*
