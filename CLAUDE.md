@@ -388,12 +388,10 @@ src/
 │   ├── backlight.cpp         # PWM backlight control
 │   ├── rtc_pcf85063.cpp      # Real-time clock
 │   ├── gps_bh880.cpp         # GPS UBX parsing (BH-880 module)
-│   └── gyro_qmi8658.cpp      # Raw vendor driver (unused, hardware on board)
-├── i2c infrastructure/       # ✅ PRIORITY 1.2 COMPLETE
-│   ├── i2c_manager.cpp       # Unified I2C operations with retry logic
-│   └── I2C_Driver.cpp        # Legacy compatibility layer
-└── vendor/
-    └── Gyro_QMI8658.cpp      # Raw vendor driver (needs C++ refactor)
+│   └── accel_qmi8658.cpp     # QMI8658 accelerometer, self-contained (own register constants, routes through i2c_manager)
+└── i2c infrastructure/       # ✅ PRIORITY 1.2 COMPLETE
+    ├── i2c_manager.cpp       # Unified I2C operations with retry logic
+    └── I2C_Driver.cpp        # Legacy compatibility layer
 ```
 
 ### **LVGL Integration**
@@ -465,6 +463,11 @@ if (millis() - last_read >= 5000) {  // 5 second intervals
     last_read = millis();
 }
 ```
+
+### **✅ Cross-Task Shared State**
+Single-word globals (bool, pointer, uint32_t — atomic on Xtensa) may be shared across tasks
+unsynchronized, read/written directly; struct-valued shared state needs a mutex, a critical section,
+or a documented exception.
 
 ### **✅ Display Performance**
 ```cpp

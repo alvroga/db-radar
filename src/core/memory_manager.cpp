@@ -375,15 +375,6 @@ void cleanupPools() {
 // Cleanup utilities
 namespace cleanup {
 
-// Simple cleanup scheduler for deferred object cleanup
-struct CleanupItem {
-    void* obj;
-    void (*cleanup_fn)(void*);
-    CleanupItem* next;
-};
-
-static CleanupItem* g_cleanup_list = nullptr;
-
 void cleanupLVGLObjects() {
     // This function can be called to clean up any dangling LVGL objects
     // LVGL 8.x has automatic garbage collection, but we can help it
@@ -412,18 +403,6 @@ void cleanupLVGLObjects() {
 
     Serial.printf("[MEMORY] LVGL cleanup: %u -> %u bytes (freed: %d)\n",
                   mem_before, mem_after, (int)(mem_before - mem_after));
-}
-
-void scheduleCleanup(void* obj, void (*cleanup_fn)(void*)) {
-    if (!obj || !cleanup_fn) return;
-
-    CleanupItem* item = (CleanupItem*)malloc(sizeof(CleanupItem));
-    if (!item) return;
-
-    item->obj = obj;
-    item->cleanup_fn = cleanup_fn;
-    item->next = g_cleanup_list;
-    g_cleanup_list = item;
 }
 
 void startLeakDetection() {

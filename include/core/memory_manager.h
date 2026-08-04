@@ -79,7 +79,6 @@ namespace pools {
 namespace cleanup {
     // LVGL object cleanup
     void cleanupLVGLObjects();
-    void scheduleCleanup(void* obj, void (*cleanup_fn)(void*));
 
     // Memory leak detection
     void startLeakDetection();

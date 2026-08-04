@@ -3,12 +3,12 @@
 #include <math.h>
 
 // Register map taken from include/hardware/sensors/gyro_qmi8658.h (the vendor
-// header). The vendor *driver* is deliberately not reused: it enables accel and
-// gyro together (CTRL7 = 0x43), keeps state in file-scope globals, and is flagged
-// in CLAUDE.md as needing a C++ refactor. It also has no callers and is not in the
-// build. What it does get right -- routing through i2c_driver.h, which forwards to
-// i2c_manager and so inherits the bus mutex and retry logic -- is preserved here by
-// calling i2c_manager directly.
+// header, since removed). The vendor *driver* was deliberately not reused: it
+// enabled accel and gyro together (CTRL7 = 0x43), kept state in file-scope
+// globals, and had no callers and was not in the build — it and its header were
+// deleted 2026-08-04 (superseded by this file). What it got right -- routing
+// through i2c_driver.h, which forwards to i2c_manager and so inherits the bus
+// mutex and retry logic -- is preserved here by calling i2c_manager directly.
 
 namespace {
     constexpr uint8_t REG_WHO_AM_I  = 0x00;

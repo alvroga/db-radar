@@ -1079,7 +1079,7 @@ bool start() {
         esp_wifi_start();
 
         snprintf(g_server_ip, sizeof(g_server_ip), "192.168.4.1");
-        Serial.printf("[GPX_SERVER] AP Password: %s\n", ap_pass);
+        Serial.println("[GPX_SERVER] AP Password: ******** (see Settings screen)");
     }
 
     httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();

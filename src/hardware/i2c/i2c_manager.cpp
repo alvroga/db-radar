@@ -240,9 +240,15 @@ bool reinit(const Config& config) {
 
     // Acquire bus mutex — blocks any in-flight read()/write() from other tasks
     // until reinit completes. Mutex is recursive so init() → ping() inside here
-    // can re-acquire without deadlocking.
+    // can re-acquire without deadlocking. Bounded (not portMAX_DELAY): this is
+    // called from the bus-health watchdog's own recovery arm, so a mutex holder
+    // stuck in the exact hang this recovery exists to clear (e.g. the IDF NACK
+    // busy-wait) must not be able to block recovery forever.
     if (g_bus_mutex != nullptr) {
-        xSemaphoreTakeRecursive(g_bus_mutex, portMAX_DELAY);
+        if (xSemaphoreTakeRecursive(g_bus_mutex, pdMS_TO_TICKS(1000)) != pdTRUE) {
+            Serial.println("[I2C] reinit: bus mutex not acquired in 1000ms — skipping, will retry");
+            return false;
+        }
     }
 
     // Clock recovery: send 9 SCL pulses to release any peripheral holding SDA low.

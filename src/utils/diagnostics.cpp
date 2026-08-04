@@ -1432,7 +1432,7 @@ void handleBeaconCommand(const char* args) {
         while (*args == ' ') args++;
         if (strlen(args) > 0) {
             int power = atoi(args);
-            if (power < -100 && power > 0) {
+            if (power > 0) {
                 // Likely negative value entered without minus
                 power = -power;
             }
