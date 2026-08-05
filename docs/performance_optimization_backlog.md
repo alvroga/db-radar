@@ -102,10 +102,9 @@ each other, so anything further built before this session lands on an unverified
       frame become 1. UBX state machine untouched. +88 B flash, +256 B System Task stack, ±0 static
       RAM. **Verify**: still acquires a fix, sat count normal, heading tracks. Add to the next field
       session — it's independent of §0's audio/beacon checks, so a regression is still attributable.
-- [ ] **§3.6 recompute less per frame** — hoist `cos`/`sin`, equirectangular instead of Haversine.
-      Also the prerequisite for raising `MAX_WAYPOINTS` past 50: read `wpt_us` off the `perf` HUD
-      first, since the per-waypoint Haversine is soft-float `double` on a single-precision FPU. The
-      PSRAM move freed the headroom but did **not** raise the cap.
+- [x] **§3.6 recompute less per frame (Haversine → equirectangular)** — ✅ **done 2026-08-05**, and
+      `MAX_WAYPOINTS` raised to 500 in the same change. See [ADR-0022](adr/0022-waypoint-cap-raised-to-500-not-700.md).
+      `rotatePoint()`'s per-waypoint `cos`/`sin` hoist and `getColorScheme()` caching remain open, see §3.6 below.
 - [ ] **§8.2 decouple touch polling** *(M)* — ~11.7 Hz, fine for taps, coarse for drags. **Weakest
       claim in the audit — justify by actual annoyance before paying for it.**
 - [ ] **§8.1c buzzer EXIO read-modify-write** — 2 transactions per edge. Only worth it if the tick
@@ -1959,16 +1958,17 @@ remains a manual override.
 
 Minor next to the above, but nearly free:
 
-- `rotatePoint()` calls `cos()`/`sin()` (double-precision) **per waypoint per frame** with the same
-  angle. Hoist `cos_a`/`sin_a` out of the loop and use `cosf`/`sinf`.
-- `latLonToScreen()` does a full double-precision Haversine plus `atan2`, `sqrt`, four `sin/cos` per
-  call. `drawWaypoints()` already hoists `cos_lat1`/`sin_lat1` — `handleTapAt()` does not, and calls
-  `latLonToScreen()` per waypoint on every tap.
-- At radar scales (≤ 1 km) the equirectangular approximation
-  (`dx = R·Δlon·cos(lat)`, `dy = R·Δlat`) is accurate to well under a pixel and costs two multiplies.
-  Haversine is overkill here.
-- `getColorScheme()` is called 4–6 times per frame; each call re-checks `millis()` and reaches into
-  settings. Fetch it once per `updateRadarDisplay()` and pass it down.
+- ✅ **Done (2026-08-05), as part of raising `MAX_WAYPOINTS` — see [ADR-0022](adr/0022-waypoint-cap-raised-to-500-not-700.md).**
+  `latLonToScreen()` and `drawWaypoints()` did a full double-precision Haversine plus `atan2`, `sqrt`,
+  multiple `sin`/`cos` per waypoint per call. Both now use the equirectangular approximation
+  (`dx = R·Δlon·cos(lat)`, `dy = R·Δlat`, accurate to well under a pixel at radar scale) — 2 multiplies
+  + 1 `sqrtf`, plus `atan2f` only for waypoints that end up off-screen. This was the blocking risk for
+  raising the waypoint cap (10 double transcendentals × N waypoints), not just frame-time hygiene.
+  `handleTapAt()` inherits the fix for free since it calls the same `latLonToScreen()`.
+- **Still open**: `rotatePoint()` calls `cos()`/`sin()` (double-precision) **per waypoint per frame**
+  with the same angle. Hoist `cos_a`/`sin_a` out of the loop and use `cosf`/`sinf`.
+- **Still open**: `getColorScheme()` is called 4–6 times per frame; each call re-checks `millis()` and
+  reaches into settings. Fetch it once per `updateRadarDisplay()` and pass it down.
 
 ---
 
@@ -2061,8 +2061,8 @@ of the time is in stage 3.
 | 9b | **Transpose tuning: `IRAM_ATTR` + SRAM scratch tile (→ C6)** | S | 64.1 → 55.7 ms rotation | Low | ✅ done `311ca3c` |
 | 9 | **`num_fbs = 2`, transpose into the back FB (§2.3 → C7)** | M | **flush 34 → 0.02 ms, frame 145 → 94 ms** | Medium | ✅ done `311ca3c` |
 | 10 | Re-test higher PCLK (§2.4) | S | ~~High (60 Hz)~~ **may be negative** — see §2.4 re-assessment | **Medium-high** | open, deprioritized |
-| 11 | Waypoint memory (see ROADMAP) | M | Raises the 50-waypoint cap | Low | open |
-| 12 | Serial flush / recompute-per-frame (§3.5–3.6) | S | Low–medium | Low | open |
+| 11 | Waypoint memory (see ROADMAP) | M | Raises the 50-waypoint cap | Low | ✅ done — cap now 500, see ADR-0022 |
+| 12 | Serial flush / recompute-per-frame (§3.5–3.6) | S | Low–medium | Low | ✅ done — §3.5 via step 26, §3.6 via step 11 |
 | 13 | Doc reconciliation (§4.1) | S | — | — | open |
 | **14** | **Waypoint sonar hysteresis (§8.1d)** | XS | **stops audible tempo flicker** | Very low | ✅ verified, then **superseded by 19** |
 | **15** | **Phase-lock the sonar grid (§8.1a)** | XS | **removes 8 % beat jitter + 4 % flat tempo** | Very low | ✅ verified on hardware |

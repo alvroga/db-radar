@@ -44,9 +44,9 @@ float zoom_radius = ui_manager::RadarConfig::ZOOM_CONFIGS[zoom_idx].radius_meter
 float max_indicator_distance = zoom_radius * ui_manager::RadarConfig::DISTANCE_FILTER_MULTIPLIER;
 ```
 
-**Filtering Logic** (`src/ui/navigation.cpp:340-344`):
+**Filtering Logic** (`src/ui/navigation.cpp:672-678`):
 ```cpp
-// Calculate distance using Haversine formula (lines 333-338)
+// Distance from the equirectangular approximation (see below), not Haversine
 if (distance > max_indicator_distance) {
     continue;  // Too far away, not relevant to current navigation
 }
@@ -127,7 +127,8 @@ if (distance < sectors[sector].closest_distance) {
 }
 ```
 
-**Result**: Maximum 8 off-screen indicators, even if 50 waypoints are beyond screen bounds.
+**Result**: Maximum 8 off-screen indicators, even if hundreds of waypoints are beyond screen bounds
+(`MAX_WAYPOINTS` is 500 as of 2026-08-05, see [ADR-0022](adr/0022-waypoint-cap-raised-to-500-not-700.md)).
 
 ---
 
@@ -184,28 +185,31 @@ points[0].y = edge_y - (tri_size * 0.8) * cos(bearing);
    ↓
 2. FOR each waypoint (0 to waypoint_count):
    ↓
-3. Calculate distance to waypoint (Haversine formula)
+3. Convert lat/lon delta to dx/dy meters (equirectangular approximation) and
+   derive distance = sqrtf(dx² + dy²) — screen x/y fall out of the same dx/dy,
+   no separate "convert to screen coordinates" step
    ↓
 4. STRATEGY 1: Distance filtering
    IF distance > max_indicator_distance:
        SKIP waypoint (too far away)
    ↓
-5. Calculate bearing (direction from user to waypoint)
-   ↓
-6. Convert to screen coordinates (lat/lon → x/y pixels)
-   ↓
-7. Check if on-screen or off-screen:
+5. Check if on-screen or off-screen:
    ↓
    ├─ ON-SCREEN (x,y within bounds):
-   │  └─ Draw yellow circle immediately
+   │  └─ Draw yellow circle immediately (bearing never computed)
    ↓
    └─ OFF-SCREEN:
-      └─ STRATEGY 2: Sector clustering
-         ├─ Convert bearing to sector (0-7)
-         └─ Keep if closest in sector
+      └─ Calculate bearing (atan2f, only reached for off-screen waypoints)
+         └─ STRATEGY 2: Sector clustering
+            ├─ Convert bearing to sector (0-7)
+            └─ Keep if closest in sector
    ↓
-8. Draw off-screen indicators (max 8 triangles)
+6. Draw off-screen indicators (max 8 triangles)
 ```
+
+**Note**: as of the 2026-08-05 rewrite, bearing (`atan2f`) is computed only for waypoints that end up
+off-screen — on-screen waypoints never need it. This is a change from the diagram's earlier "always
+compute bearing" step. See [ADR-0022](adr/0022-waypoint-cap-raised-to-500-not-700.md).
 
 ### Example Execution
 
@@ -235,15 +239,20 @@ points[0].y = edge_y - (tri_size * 0.8) * cos(bearing);
 ### Computational Complexity
 - **Time Complexity**: O(n) where n = waypoint count
 - **Single pass**: Each waypoint processed once
-- **Operations per waypoint**:
-  - 1× Haversine distance calculation (~20 floating-point ops)
-  - 1× bearing calculation (~10 floating-point ops)
-  - 1× screen coordinate conversion (~5 floating-point ops)
-  - 1× sector assignment (integer division)
+- **Operations per waypoint** (as of the 2026-08-05 Haversine → equirectangular rewrite,
+  [ADR-0022](adr/0022-waypoint-cap-raised-to-500-not-700.md)):
+  - 1× equirectangular dx/dy conversion (`dx = R·Δlon·cos(lat)`, `dy = R·Δlat`) + `sqrtf` for
+    distance — 2 multiplies + 1 sqrt, no double-precision transcendentals, replacing the prior
+    Haversine's 10 double `sin`/`cos`/`atan2`/`sqrt` calls/waypoint
+  - 1× bearing calculation (`atan2f`) — **only for waypoints that end up off-screen**; on-screen
+    waypoints skip it entirely
+  - 1× sector assignment (integer division) — off-screen waypoints only
 
-**Total**: ~35 floating-point ops per waypoint
-
-**At 50 waypoints**: ~1,750 floating-point operations (negligible for ESP32-S3 @ 240MHz)
+**At the current `MAX_WAYPOINTS = 500`** this is the change that made raising the cap from 50 safe —
+the old per-waypoint cost was unconditional double-precision transcendentals on an ESP32-S3 FPU that's
+single-precision only, so it would have scaled 10× worse at the new cap. Field-verified on hardware at
+the current real-world waypoint count; a synthetic 500-waypoint `wpt_us` measurement is still open
+(see ADR-0022).
 
 ### Memory Usage
 - **Sector storage**: 8 × `SectorWaypoint` structs
@@ -257,11 +266,14 @@ points[0].y = edge_y - (tri_size * 0.8) * cos(bearing);
 - **Total**: 8 × 16 bytes = **128 bytes** (stack allocation)
 
 ### Rendering Performance
-- **On-screen waypoints**: Direct draw (no limit beyond 50 total)
+- **On-screen waypoints**: Direct draw (no limit beyond `MAX_WAYPOINTS` total)
 - **Off-screen indicators**: Maximum 8 draws (fixed)
 - **Canvas operations**: Simple polygon fills (GPU-accelerated)
 
-**Frame time impact**: <2ms for 50 waypoints at 60 FPS
+**Frame time impact**: the often-quoted "<2ms for 50 waypoints" figure was never actually measured —
+see CLAUDE.md's Waypoint Filtering section. Waypoint drawing measures ~5ms in the instrumented frame
+breakdown at the old 50-waypoint cap. Read `wpt_us` off the `perf` HUD for the current figure rather
+than trusting either number, especially at the new 500-waypoint cap.
 
 ---
 
@@ -318,7 +330,8 @@ int sector = (int)((bearing_deg + 11.25f) / 22.5f) % NUM_SECTORS;
 ### GPX Loader
 - Filtering operates on `ui.waypoints[]` array
 - GPX loader populates array via `gpx_loader::loadAllGPXFiles()`
-- Maximum 50 waypoints (`ui_manager::RadarConfig::MAX_WAYPOINTS`)
+- Maximum 500 waypoints (`ui_manager::RadarConfig::MAX_WAYPOINTS`, raised from 50 on 2026-08-05 —
+  see [ADR-0022](adr/0022-waypoint-cap-raised-to-500-not-700.md))
 
 ### Radar Display
 - Called by `navigation::updateRadarDisplay()` every frame
@@ -339,7 +352,7 @@ int sector = (int)((bearing_deg + 11.25f) / 22.5f) % NUM_SECTORS;
 ```cpp
 // include/ui/ui_manager.h
 struct RadarConfig {
-    static constexpr int MAX_WAYPOINTS = 50;
+    static constexpr int MAX_WAYPOINTS = 500;  // raised from 50, 2026-08-05, see ADR-0022
     static constexpr int WAYPOINT_SIZE = 25;  // On-screen circle size
     static constexpr int MAX_OFFSCREEN_INDICATORS = 8;
     static constexpr float DISTANCE_FILTER_MULTIPLIER = 10.0f;
@@ -362,9 +375,12 @@ struct RadarConfig {
 6. **Touch interaction**: Tap indicator to center map on that direction
 
 ### Performance Optimizations
-1. **Spatial indexing**: Use quadtree for O(log n) distance queries (only beneficial >200 waypoints)
+1. **Spatial indexing**: Use quadtree for O(log n) distance queries (beneficial well before the
+   current 500-waypoint cap, unlike when this was written against a 50-waypoint cap)
 2. **Dirty flag**: Only recalculate when waypoints change or user moves significantly
-3. **GPU acceleration**: Offload Haversine calculations to hardware floating-point unit
+3. ~~GPU acceleration: Offload Haversine calculations to hardware floating-point unit~~ — moot;
+   Haversine was replaced by the equirectangular approximation (2026-08-05), which is already cheap
+   enough on the single-precision FPU that no further offload is being considered
 
 ---
 
@@ -378,10 +394,10 @@ The GPS Radar waypoint filtering system provides:
 ✅ **Flexibility** - Easy to tune via compile-time constants
 ✅ **User experience** - See what's outside current zoom for navigation planning
 
-This dual-strategy approach balances **situational awareness** (knowing what's beyond screen) with **visual clarity** (not overwhelming the user with 50 indicators).
+This dual-strategy approach balances **situational awareness** (knowing what's beyond screen) with **visual clarity** (not overwhelming the user with hundreds of indicators).
 
 ---
 
-**Last Updated**: 2025-10-18
+**Last Updated**: 2026-08-05 (`MAX_WAYPOINTS` raised 50 → 500; Haversine replaced with equirectangular approximation — see [ADR-0022](adr/0022-waypoint-cap-raised-to-500-not-700.md))
 **Author**: GPS Radar Development Team
 **Related Documentation**: `README.md`, `CLAUDE.md`, `docs/gps_settings_simplification.md`

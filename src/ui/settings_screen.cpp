@@ -2018,19 +2018,21 @@ static void updateWaypointCountLabel() {
     int current_count = gpx_loader::getWaypointCount();
     const int max_count = ui_manager::RadarConfig::MAX_WAYPOINTS;
 
-    // Format: "📍 Waypoints: 15/50"
+    // Format: "📍 Waypoints: 15/500"
     char count_text[32];
     snprintf(count_text, sizeof(count_text), "Waypoints: %d/%d", current_count, max_count);
     lv_label_set_text(g_waypoint_count_label, count_text);
 
-    // Color coding based on usage
+    // Color coding based on usage, proportional to max_count (not a hardcoded
+    // count) — this used to be an absolute 30/45 split tuned for cap=50; at a
+    // higher cap it would show green at, e.g., 490/500 waypoints loaded.
     lv_color_t color;
-    if (current_count <= 30) {
-        color = lv_color_hex(0x00FF00);  // Green: 0-30 waypoints
-    } else if (current_count <= 45) {
-        color = lv_color_hex(0xFFFF00);  // Yellow: 31-45 waypoints
+    if (current_count <= max_count * 6 / 10) {
+        color = lv_color_hex(0x00FF00);  // Green: 0-60% of cap
+    } else if (current_count <= max_count * 9 / 10) {
+        color = lv_color_hex(0xFFFF00);  // Yellow: 60-90% of cap
     } else {
-        color = lv_color_hex(0xFF4444);  // Red: 46-50 waypoints (approaching limit)
+        color = lv_color_hex(0xFF4444);  // Red: 90-100% of cap (approaching limit)
     }
     lv_obj_set_style_text_color(g_waypoint_count_label, color, 0);
 

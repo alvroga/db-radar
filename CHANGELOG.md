@@ -49,6 +49,31 @@ empty `/sdcard/logs` — not truncated, never written at all. Fix: `logging_togg
 [`docs/i2c_bus_freeze_investigation.md`](docs/i2c_bus_freeze_investigation.md), "SD Log Reliability
 Hardening + Invalidated Field Test" section.
 
+### Changed
+
+**Waypoint cap raised 50 → 500; Haversine replaced with equirectangular approximation (2026-08-05)**
+
+`RadarConfig::MAX_WAYPOINTS` (`include/ui/ui_manager.h`) was a hard load-time cap dating from before
+the desc/hint→PSRAM migration (ADR-0001) — real geocaching.com pocket queries routinely exceed 50
+caches and were silently truncated. Raised to 500, +63.3 KB SRAM / +562.5 KB PSRAM (static RAM now
+60.4%, was 40.6%). Full cost/tradeoff analysis, including why 500 and not the 700 the SRAM budget
+could otherwise afford: [ADR-0022](docs/adr/0022-waypoint-cap-raised-to-500-not-700.md).
+
+Landed alongside the fix that made raising the cap safe: `drawWaypoints()` and `latLonToScreen()`
+(`src/ui/navigation.cpp`) computed per-waypoint distance/bearing via Haversine — 10 double-precision
+transcendental calls per waypoint, unconditional, on an ESP32-S3 FPU that's single-precision only.
+Replaced with the equirectangular approximation (`dx = R·Δlon·cos(lat)`, `dy = R·Δlat`), accurate to
+well under a pixel at radar scale: 2 multiplies + 1 `sqrtf`, plus `atan2f` only for waypoints that end
+up off-screen (bearing is otherwise unused). Also dropped two now-unneeded `cos`/`sin` calls per
+waypoint. Field-verified on hardware at the current real-world waypoint count — no regression.
+
+`updateWaypointCountLabel()` (`src/ui/settings_screen.cpp`) color thresholds were hardcoded to 30/45
+(tuned for the old cap of 50) and would have shown green at 490/500 waypoints loaded — now
+proportional to `MAX_WAYPOINTS` (green ≤60%, yellow ≤90%, red above).
+
+**Still open**: `wpt_us` at a real 500-waypoint load, and `loadAllGPXFiles()` parse time at that count,
+haven't been field-measured yet — see ADR-0022.
+
 ### Added
 
 **GPX manager shows the cache's friendly name; logs page gets select-all + bulk delete**

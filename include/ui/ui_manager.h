@@ -69,7 +69,7 @@ struct ZoomConfig {
 
 // Radar configuration
 struct RadarConfig {
-    static constexpr int MAX_WAYPOINTS = 50;
+    static constexpr int MAX_WAYPOINTS = 500;
     static constexpr int CENTER_TRIANGLE_SIDE = 44;          // Center triangle: 44px sides
     static constexpr int CENTER_TRIANGLE_HEIGHT = 38;        // Center triangle: 38px height
     static constexpr int POSITION_TRIANGLE_SIZE = 15;        // GPS position triangle size

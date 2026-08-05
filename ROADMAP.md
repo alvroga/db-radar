@@ -70,28 +70,26 @@ files above (font call sites) if font-only
 
 ---
 
-### Waypoint Memory Optimization — raise the 50-waypoint cap
+### Waypoint Memory Optimization — cap raised 50 → 500 ✅ mostly resolved
 **Severity**: Medium — real GPX files get silently truncated
 
-**Symptom**: `RadarConfig::MAX_WAYPOINTS = 50` is a hard *load-time* cap. `gpx_loader.cpp:376` stops parsing at 50 and sets `was_truncated`. A geocaching.com pocket query routinely contains hundreds of caches, so most of the file never loads.
+**Status (2026-08-05)**: `MAX_WAYPOINTS` is now 500 (was 50), and the per-waypoint render cost that
+scaling the cap would otherwise have multiplied is fixed — `drawWaypoints()`/`latLonToScreen()`
+(`src/ui/navigation.cpp`) now use an equirectangular approximation instead of Haversine, cutting 10
+double transcendental calls/waypoint to 2 multiplies + 1 `sqrtf` (+ conditionally 1 `atan2f`).
+Field-verified on hardware at the current real-world waypoint count: no regression. `updateWaypointCountLabel()`'s color thresholds (`src/ui/settings_screen.cpp`) are now proportional
+to `MAX_WAYPOINTS` instead of hardcoded to the old cap of 50. Decision record, including why 500 and
+not the 700 the SRAM budget could have afforded: [ADR-0022](docs/adr/0022-waypoint-cap-raised-to-500-not-700.md).
 
-**The SRAM ceiling that motivated this cap is gone** — see Resolved below: `desc`/`hint` moved to PSRAM, freeing ~64 KB. `MAX_WAYPOINTS` itself has **not** been raised yet; this entry is now just that remaining step.
+**Still open**: `wpt_us` at a real 500-waypoint load (synthetic GPX or a large pocket query) hasn't
+been field-measured yet, nor has boot/parse time via `loadAllGPXFiles()` at that count or a live
+`memory stats` reading — see ADR-0022's "Field verification still open" for what that entails.
 
-**Note on the render side**: the cap is *not* what limits drawing. `drawWaypoints()` culls by distance before drawing (`navigation.cpp:633`) and renders only the fixed waypoint when one is selected (`navigation.cpp:614`), so draw cost scales with *visible* waypoints. What does scale with the cap is the per-waypoint Haversine loop — and the ESP32-S3 FPU is single-precision only, so all that `double` trig is soft-float. Read `wpt_us` off the `perf` HUD before raising the cap; §3.6 of the perf backlog proposes an equirectangular approximation that would cut it.
+**Key files**: `include/ui/ui_manager.h` (`MAX_WAYPOINTS`), `src/ui/navigation.cpp`
+(`drawWaypoints()`, `latLonToScreen()`), `src/ui/settings_screen.cpp` (`updateWaypointCountLabel()`)
 
-**2026-08-04 investigation complete, no code changed yet**: SRAM math confirmed clean (`sizeof(Waypoint)`
-measured at 144 B, not assumed — raising the cap to 500 costs +63.3 KB SRAM / +562.5 KB PSRAM, landing
-static RAM at ~60.4%, close to a level this project already ran on safely pre-PSRAM-migration) and every
-other `MAX_WAYPOINTS` call site audited (no hidden LVGL/stack scaling risk — one real bug found:
-`updateWaypointCountLabel()`'s color thresholds are hardcoded to a cap of 50 and need to scale with it).
-The per-waypoint Haversine loop (10 double transcendental calls/waypoint, unconditional, before the
-distance filter) is flagged as the one real unverified risk — recommendation is to land the §3.6
-equirectangular rewrite first and field-verify `wpt_us` at a real high waypoint count before picking a
-final number. Full analysis: [`docs/waypoint_cap_increase_investigation.md`](docs/waypoint_cap_increase_investigation.md).
-
-**Key files**: `include/ui/ui_manager.h` (`Waypoint`, `MAX_WAYPOINTS`), `src/gpx/gpx_loader.cpp`
-
-**Related**: [`docs/performance_optimization_backlog.md`](docs/performance_optimization_backlog.md) step 11
+**Related**: [`docs/performance_optimization_backlog.md`](docs/performance_optimization_backlog.md) step 11,
+[`docs/waypoint_cap_increase_investigation.md`](docs/waypoint_cap_increase_investigation.md) (historical — modeled 500, see ADR-0022 for the actual decision)
 
 ---
 

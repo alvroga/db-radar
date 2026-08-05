@@ -258,28 +258,17 @@ void rotatePoint(int& screen_x, int& screen_y, float heading, int center_x, int 
 void latLonToScreen(double lat, double lon, int& x, int& y, int screen_size) {
     ui_manager::UIState& ui = ui_manager::getUIState();
 
-    // Convert degrees to radians
+    // Equirectangular approximation, not Haversine — accurate to well under a
+    // pixel at radar scale (<= a few km). Only dx/dy are needed here (not
+    // distance or bearing themselves), so this drops straight to 2 multiplies
+    // with no sqrt/atan2 at all.
     double lat1 = ui.center_lat * M_PI_LOCAL / 180.0;
-    double lat2 = lat * M_PI_LOCAL / 180.0;
     double dLat = (lat - ui.center_lat) * M_PI_LOCAL / 180.0;
     double dLon = (lon - ui.center_lon) * M_PI_LOCAL / 180.0;
 
-    // Calculate distance in meters using Haversine formula
-    double a = sin(dLat / 2.0) * sin(dLat / 2.0) +
-               cos(lat1) * cos(lat2) *
-               sin(dLon / 2.0) * sin(dLon / 2.0);
-    double c = 2.0 * atan2(sqrt(a), sqrt(1.0 - a));
-    double distance = EARTH_RADIUS_M * c;
-
-    // Calculate bearing (direction from center to point)
-    double y_component = sin(dLon) * cos(lat2);
-    double x_component = cos(lat1) * sin(lat2) - sin(lat1) * cos(lat2) * cos(dLon);
-    double bearing = atan2(y_component, x_component);
-
-    // Convert to screen coordinates
     // North is up (negative Y), East is right (positive X)
-    double dx_meters = distance * sin(bearing);
-    double dy_meters = -distance * cos(bearing);  // Negative because screen Y increases downward
+    double dx_meters = EARTH_RADIUS_M * dLon * cos(lat1);
+    double dy_meters = -EARTH_RADIUS_M * dLat;  // Negative because screen Y increases downward
 
     // Convert meters to pixels using current zoom level
     float meters_per_pixel = ui.getMetersPerPixel(screen_size);
@@ -652,10 +641,9 @@ static void drawWaypoints(lv_draw_ctx_t* ctx, int screen_size) {
     // Get current meters per pixel from zoom level
     float meters_per_pixel = ui.getMetersPerPixel(screen_size);
 
-    // Pre-compute user's lat in radians + trig values — constant for all waypoints this frame
+    // Pre-compute user's lat in radians — constant for all waypoints this frame
     double lat1      = ui.center_lat * M_PI_LOCAL / 180.0;
     double cos_lat1  = cos(lat1);
-    double sin_lat1  = sin(lat1);
 
     // Track fixed waypoint if it ends up off-screen (drawn separately, bypasses clustering)
     bool fixed_off_screen = false;
@@ -668,36 +656,26 @@ static void drawWaypoints(lv_draw_ctx_t* ctx, int screen_size) {
         // Eliminates N Haversine calcs, N polygon draws, and all sector clustering.
         if (ui.fixed_waypoint_index >= 0 && i != ui.fixed_waypoint_index) continue;
 
-        // Convert lat/lon to screen coordinates using current zoom
+        // Convert lat/lon to screen coordinates using current zoom.
+        // Equirectangular approximation, not Haversine — accurate to well
+        // under a pixel at radar scale (<= a few km). Replaces 10 double
+        // transcendental calls/waypoint with 2 multiplies + 1 sqrtf, plus a
+        // single atan2f only for waypoints that end up off-screen (bearing
+        // is otherwise unused).
         int x, y;
-        double lat2     = ui.waypoints[i].lat * M_PI_LOCAL / 180.0;
-        double cos_lat2 = cos(lat2);
-        double sin_lat2 = sin(lat2);
         double dLat = (ui.waypoints[i].lat - ui.center_lat) * M_PI_LOCAL / 180.0;
         double dLon = (ui.waypoints[i].lon - ui.center_lon) * M_PI_LOCAL / 180.0;
 
-        // Haversine formula for distance (reuses pre-computed cos_lat1)
-        double sinHalfDLat = sin(dLat / 2.0);
-        double sinHalfDLon = sin(dLon / 2.0);
-        double a = sinHalfDLat * sinHalfDLat +
-                   cos_lat1 * cos_lat2 * sinHalfDLon * sinHalfDLon;
-        double c = 2.0 * atan2(sqrt(a), sqrt(1.0 - a));
-        double distance = EARTH_RADIUS_M * c;
+        // North is up (negative Y), East is right (positive X) — reuses cos_lat1
+        float dx_meters = (float)(EARTH_RADIUS_M * dLon * cos_lat1);
+        float dy_meters = (float)(-EARTH_RADIUS_M * dLat);
+        float distance = sqrtf(dx_meters * dx_meters + dy_meters * dy_meters);
 
         // STRATEGY 1: Distance filtering - skip waypoints beyond maximum relevant distance
         // This eliminates waypoints thousands of km away
         if (distance > max_indicator_distance) {
             continue;  // Too far away, not relevant to current navigation
         }
-
-        // Calculate bearing — reuses cos_lat1, sin_lat1, cos_lat2, sin_lat2
-        double y_component = sin(dLon) * cos_lat2;
-        double x_component = cos_lat1 * sin_lat2 - sin_lat1 * cos_lat2 * cos(dLon);
-        double bearing = atan2(y_component, x_component);
-
-        // Convert to screen coordinates
-        double dx_meters = distance * sin(bearing);
-        double dy_meters = -distance * cos(bearing);
 
         float dx_pixels = dx_meters / meters_per_pixel;
         float dy_pixels = dy_meters / meters_per_pixel;
@@ -758,6 +736,10 @@ static void drawWaypoints(lv_draw_ctx_t* ctx, int screen_size) {
                 lv_draw_polygon(ctx, &star_dsc, sp_inner, 5);
             }
         } else {
+            // Bearing is only needed off-screen (on-screen draw never uses it) — computed
+            // here, not unconditionally, per waypoint. atan2f(east, north): east = dx_meters,
+            // north = -dy_meters (dy_meters is already screen-sign, i.e. negated north).
+            float bearing = atan2f(dx_meters, -dy_meters);
             if (i == ui.fixed_waypoint_index) {
                 // Fixed waypoint off-screen: record bearing, draw separately with pulse
                 fixed_off_screen = true;
@@ -765,7 +747,7 @@ static void drawWaypoints(lv_draw_ctx_t* ctx, int screen_size) {
             } else {
                 // Off-screen: STRATEGY 2 - Sector clustering
                 // Bearing: -π to π, convert to 0-360 degrees
-                float bearing_deg = bearing * 180.0f / M_PI_LOCAL;
+                float bearing_deg = bearing * 180.0f / (float)M_PI_LOCAL;
                 if (bearing_deg < 0) bearing_deg += 360.0f;
 
                 // Calculate sector: 0=N, 1=NE, 2=E, 3=SE, 4=S, 5=SW, 6=W, 7=NW

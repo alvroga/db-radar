@@ -182,9 +182,12 @@ Balance between:
 
 ### Computational Cost
 
-- **Per-waypoint overhead**: ~35 floating-point operations (Haversine + rotation)
-- **50 waypoints**: ~1,750 operations per frame
-- **Frame time**: <1 ms @ 240 MHz (negligible)
+- **Per-waypoint overhead**: equirectangular dx/dy + `sqrtf` (rotation on top), replacing the earlier
+  Haversine — see [ADR-0022](adr/0022-waypoint-cap-raised-to-500-not-700.md), 2026-08-05
+- **At the current `MAX_WAYPOINTS` (500, was 50)**: see `docs/waypoint_filtering.md` for the
+  up-to-date per-waypoint cost breakdown
+- **Frame time**: negligible; read `wpt_us` off the `perf` HUD for the current measured figure rather
+  than trusting a fixed estimate
 - **Display refresh**: 60 FPS maintained
 
 ### Memory Usage

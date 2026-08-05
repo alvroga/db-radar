@@ -667,9 +667,11 @@ quoted here was never measured — waypoint drawing is ~5ms in the instrumented 
 
 **Status**: Complete ✅ (2026-07-31) | [ADR-0001](docs/adr/0001-waypoint-detail-psram-cache.md)
 
-`Waypoint::desc`/`hint` (1024B + 256B each, × `MAX_WAYPOINTS` = 50) live in **PSRAM**, not SRAM — they
-were the single largest firmware symbol (70,992 B, ~37% of static RAM) despite being read in exactly
-one place (the detail screen, one waypoint at a time).
+`Waypoint::desc`/`hint` (1024B + 256B each, × `MAX_WAYPOINTS`) live in **PSRAM**, not SRAM — they were
+the single largest firmware symbol (70,992 B, ~37% of static RAM at the `MAX_WAYPOINTS = 50` this
+migration was measured against) despite being read in exactly one place (the detail screen, one
+waypoint at a time). `MAX_WAYPOINTS` is now **500** (see [ADR-0022](docs/adr/0022-waypoint-cap-raised-to-500-not-700.md))
+— the 70,992 B figure is historical, from before this PSRAM move, not the current PSRAM block size.
 
 ```cpp
 // include/ui/ui_manager.h
@@ -697,7 +699,8 @@ placed in `.dram0.data` (a PROGBITS section — its zero bytes are literal zeros
 copied to RAM at boot) rather than the free `.dram0.bss`. `.dram0.bss` was byte-identical before/after
 the change; the entire saving came out of `.dram0.data`.
 
-This frees the SRAM headroom but does **not** itself raise `MAX_WAYPOINTS` past 50 — see ROADMAP.md.
+This freed the SRAM headroom that made raising `MAX_WAYPOINTS` (50 → 500) affordable — see
+[ADR-0022](docs/adr/0022-waypoint-cap-raised-to-500-not-700.md) and ROADMAP.md.
 
 **Code References**:
 - Struct: `include/ui/ui_manager.h` - `WaypointDetail`, `Waypoint::desc`/`hint`
@@ -1044,4 +1047,4 @@ required for new work — tracked in `docs/adr/BACKFILL_PLAN.md`.
 
 *This document serves as the master reference for ESP32-S3 Touch LCD projects. Keep it updated as the architecture evolves.*
 
-**Last updated**: 2026-07-31 (waypoint desc/hint moved to PSRAM, freeing ~64KB SRAM and flash; full-subsystem performance audit: beacon BLE rate, sonar rhythm, direction-finding feasibility)
+**Last updated**: 2026-08-05 (`MAX_WAYPOINTS` raised 50 → 500; Haversine replaced with equirectangular approximation in `drawWaypoints()`/`latLonToScreen()`, see ADR-0022. Previously: 2026-07-31, waypoint desc/hint moved to PSRAM, freeing ~64KB SRAM and flash; full-subsystem performance audit: beacon BLE rate, sonar rhythm, direction-finding feasibility)
