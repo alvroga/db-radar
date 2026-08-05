@@ -36,6 +36,29 @@ For completed features and history, see [CHANGELOG.md](CHANGELOG.md).
 
 ## Planned
 
+### Quests *(brainstorm stage — not designed yet)*
+**Severity**: Feature — new idea, not yet scoped
+
+**Ask**: a GPX file containing multiple waypoints treated as a single "quest" — find all the
+waypoints in the set to complete it. Idea originated from the single-file-multiple-waypoints GPX
+cache display work (2026-08-05).
+
+**Open questions to resolve before design**:
+- How is a "quest" GPX distinguished from a regular multi-waypoint GPX — a naming convention, a tag
+  in the file, or explicit user grouping in the web manager?
+- How does a waypoint get marked "found" — reuse the existing `Waypoint::found` mechanism (currently
+  driven by the 15m sonar-silencing arrival radius, see Sonar Rhythm Defects above) or a separate
+  quest-specific state?
+- What happens on completion — a reward/notification of some kind ("get something") is the open
+  question; no mechanism decided.
+- Where does quest progress persist — NVS, alongside the waypoint data, or derived on the fly from
+  `found` flags at render time?
+
+**Status**: nothing implemented or designed. Next step is a brainstorming session to scope this
+before any code or ADR.
+
+---
+
 ### CRT / 8-bit Display Theme *(low priority)*
 **Severity**: Cosmetic — user preference, no functional impact
 
@@ -70,26 +93,52 @@ files above (font call sites) if font-only
 
 ---
 
-### Waypoint Memory Optimization — cap raised 50 → 500 ✅ mostly resolved
-**Severity**: Medium — real GPX files get silently truncated
+### Waypoint Memory Optimization — cap raised 50 → 500, then rolled back to 200 after a boot failure ✅ resolved at 200
+**Severity**: Medium — real GPX files get silently truncated above the cap
 
-**Status (2026-08-05)**: `MAX_WAYPOINTS` is now 500 (was 50), and the per-waypoint render cost that
-scaling the cap would otherwise have multiplied is fixed — `drawWaypoints()`/`latLonToScreen()`
-(`src/ui/navigation.cpp`) now use an equirectangular approximation instead of Haversine, cutting 10
-double transcendental calls/waypoint to 2 multiplies + 1 `sqrtf` (+ conditionally 1 `atan2f`).
-Field-verified on hardware at the current real-world waypoint count: no regression. `updateWaypointCountLabel()`'s color thresholds (`src/ui/settings_screen.cpp`) are now proportional
-to `MAX_WAYPOINTS` instead of hardcoded to the old cap of 50. Decision record, including why 500 and
-not the 700 the SRAM budget could have afforded: [ADR-0022](docs/adr/0022-waypoint-cap-raised-to-500-not-700.md).
+**Status (2026-08-05)**: `MAX_WAYPOINTS` is **200**, not the 500 ADR-0022 decided on. 500 shipped,
+built clean, and passed a static-SRAM budget check (60.4%, under the documented 80% caution line) —
+but that budget was never checked against actual free heap at boot, and the very next boot attempt
+failed: `xTaskCreatePinnedToCore` for the Network/System tasks returned `pdFAIL` because only 83,899 B
+of internal SRAM remained free before BLE init (down from an estimated ~149KB at cap=50) — BLE
+(~25KB) plus the UI (16KB) + I2C (8KB) task stacks it grants first left too little for the two after.
+This is exactly the gap ADR-0022 flagged and didn't close: see "Field verification still open" there.
+Dropping to 200 (154,656 B / 47.2% static SRAM, a row already computed in ADR-0022's table) fixed it —
+**field-confirmed booting on hardware 2026-08-05**, BLE active. The per-waypoint render fix from the
+same change (Haversine → equirectangular approximation in `drawWaypoints()`/`latLonToScreen()`,
+`src/ui/navigation.cpp`) is unaffected and stays in place — it cut 10 double transcendental
+calls/waypoint to 2 multiplies + 1 `sqrtf` (+ conditionally 1 `atan2f`) and is still field-verified
+with no regression. `updateWaypointCountLabel()`'s proportional color thresholds
+(`src/ui/settings_screen.cpp`) also stay, now proportional to 200 instead of 500.
 
-**Still open**: `wpt_us` at a real 500-waypoint load (synthetic GPX or a large pocket query) hasn't
-been field-measured yet, nor has boot/parse time via `loadAllGPXFiles()` at that count or a live
-`memory stats` reading — see ADR-0022's "Field verification still open" for what that entails.
+**Why 200 and not some other number close to the true ceiling**: the failing boot had only 15 real
+waypoints loaded (well under any cap), and the array is fixed-size regardless of fill count, so the
+200 vs. 500 SRAM difference — not GPX file size — is what the confirmed boot validates. 200 was picked
+because it was already a row in ADR-0022's table with a comfortable margin, not because it was
+incrementally tuned down from 500. The true ceiling is somewhere in the untested 200–500 range (300
+is the next candidate the table already covers, 51.6%/59.4% static SRAM) — raising it further would
+need its own hardware boot verification with BLE active before trusting it, the same way this rollback
+did.
+
+**Resolved differently than either option above (2026-08-05)**: rather than spending more SRAM on a
+higher cap, `MAX_WAYPOINTS` stays 200 and a two-tier index was added instead — every waypoint across
+every GPX file gets a lightweight PSRAM-backed index entry (`gpx_index`, up to 8192), and the 200-slot
+SRAM array becomes a working set of the closest-200 to the user's actual position, reselected as they
+move. This makes "getting past 200" a non-issue for real-world waypoint counts without raising the
+SRAM ceiling at all — see [ADR-0023](docs/adr/0023-two-tier-waypoint-index.md) and
+`docs/waypoint_two_tier_index_plan.md`. Not yet field-tested on hardware (build-clean and SRAM cost
+measured only). A live `memory stats` reading and `wpt_us` at a real 200-waypoint load are also still
+unmeasured. Decision record for the original 500 call, including why 500 over 700:
+[ADR-0022](docs/adr/0022-waypoint-cap-raised-to-500-not-700.md) (superseded on the cap number, not on
+the render-cost reasoning).
 
 **Key files**: `include/ui/ui_manager.h` (`MAX_WAYPOINTS`), `src/ui/navigation.cpp`
-(`drawWaypoints()`, `latLonToScreen()`), `src/ui/settings_screen.cpp` (`updateWaypointCountLabel()`)
+(`drawWaypoints()`, `latLonToScreen()`), `src/ui/settings_screen.cpp` (`updateWaypointCountLabel()`),
+`src/gpx/gpx_index.cpp`/`gpx_loader.cpp` (two-tier index and reselect, ADR-0023)
 
 **Related**: [`docs/performance_optimization_backlog.md`](docs/performance_optimization_backlog.md) step 11,
-[`docs/waypoint_cap_increase_investigation.md`](docs/waypoint_cap_increase_investigation.md) (historical — modeled 500, see ADR-0022 for the actual decision)
+[`docs/waypoint_cap_increase_investigation.md`](docs/waypoint_cap_increase_investigation.md) (historical — modeled 500, see ADR-0022 for the actual decision),
+[`docs/waypoint_two_tier_index_plan.md`](docs/waypoint_two_tier_index_plan.md) / [ADR-0023](docs/adr/0023-two-tier-waypoint-index.md) (closest-N selection instead of a higher cap)
 
 ---
 

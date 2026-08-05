@@ -803,7 +803,7 @@ static void extractGpxName(const char* filepath, char* out, size_t out_size) {
 
         const char* gs_start = strstr(line, "<groundspeak:name>");
         if (gs_start) {
-            gs_start += 19;
+            gs_start += 18;  // strlen("<groundspeak:name>") — matches gpx_loader.cpp's parser
             const char* gs_end = strstr(gs_start, "</groundspeak:name>");
             if (gs_end) {
                 size_t len = (size_t)(gs_end - gs_start);
@@ -1148,6 +1148,19 @@ static esp_err_t delete_handler(httpd_req_t* req) {
 
     if (remove(filepath) == 0) {
         Serial.printf("[GPX_SERVER] Deleted: %s\n", filepath);
+
+        // GPX deletes can leave the PSRAM index holding file_offsets into a
+        // now-gone file — reload before anything re-selects against it, same
+        // as upload_handler does after adding a file.
+        if (strncmp(uri, "/delete/", 8) == 0 && strncmp(uri, "/delete/logs/", 13) != 0) {
+            int reloaded = gpx_loader::refreshGPXFiles();
+            Serial.printf("[GPX_SERVER] Auto-reload after delete: %d waypoints\n", reloaded);
+
+            task_manager::UIUpdate upd = {};
+            upd.type = task_manager::UIUpdateType::RADAR_REFRESH;
+            task_manager::queueUIUpdate(upd);
+        }
+
         httpd_resp_send(req, "Deleted", 7);
         return ESP_OK;
     }
@@ -1283,6 +1296,12 @@ bool start() {
     cfg.uri_match_fn    = httpd_uri_match_wildcard;
     cfg.max_uri_handlers = 13;
     cfg.lru_purge_enable = true; // evict stuck half-open connections so httpd_start succeeds on retry
+    // Default 4096B is too thin for upload_handler() -> refreshGPXFiles() -> parseGPXFile(),
+    // which stacks ~2-3KB of local buffers (wp_desc[1024]+line[512]+...) on this same task
+    // while also doing SD/FATFS I/O — a large GPX upload triggering a full reload can overflow
+    // the default stack. Only allocated while the web server is actually running (see start()
+    // below), so this doesn't cost anything in normal radar-mode boot.
+    cfg.stack_size = 8192;
 
     if (httpd_start(&g_server, &cfg) != ESP_OK) {
         Serial.println("[GPX_SERVER] ERROR: httpd_start failed");

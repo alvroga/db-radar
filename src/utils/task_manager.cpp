@@ -24,6 +24,8 @@
 #include "hardware/buzzer.h"
 #include "hardware/connectivity/wifi_manager.h"
 #include "gpx/gpx_server.h"
+#include "gpx/gpx_loader.h"
+#include "utils/geo.h"
 #include "esp_heap_caps.h"
 #include <lvgl.h>
 
@@ -1636,6 +1638,48 @@ static void updateStatusLabels() {
                 radar_update.type = UIUpdateType::RADAR_REFRESH;
                 radar_update.timestamp = millis();  // Fix: Set timestamp to avoid bogus latency values
                 queueUIUpdate(radar_update);
+            }
+
+            // ===================================================================
+            // WAYPOINT INDEX RESELECT - movement-triggered closest-N refresh
+            // ===================================================================
+            // Only meaningful once the PSRAM index holds more waypoints than
+            // the SRAM working set — otherwise everything indexed is already
+            // loaded and reselecting would just re-materialize the same set.
+            // See docs/waypoint_two_tier_index_plan.md §5 / ADR-0023.
+            if (gps_position_valid && gps_data.valid) {
+                int idx_count; bool idx_truncated, working_set_capped;
+                gpx_loader::getIndexStats(idx_count, idx_truncated, working_set_capped);
+
+                if (working_set_capped) {
+                    ui_manager::UIState& ui = ui_manager::getUIState();
+                    // Skip while the waypoint detail screen is open — a slot
+                    // getting silently recycled underneath it would show the
+                    // wrong waypoint or its found/fixed state.
+                    if (ui.screen_waypoint == nullptr) {
+                        static double s_reselect_lat = 999.0;  // >90° = "never selected"
+                        static double s_reselect_lon = 999.0;
+                        constexpr float RESELECT_THRESHOLD_M = 150.0f;
+
+                        bool need_reselect = (s_reselect_lat > 900.0);
+                        if (!need_reselect) {
+                            // Haversine, not the WMM isotropic degrees² shortcut — that
+                            // shortcut is tuned for a ~100km threshold; at this ~150m
+                            // threshold it's off by >2x at mid/high latitudes for
+                            // east-west movement. This call is cheap either way (one
+                            // call/tick); only the reselect body below is expensive.
+                            double moved_m = geo::haversineMeters(s_reselect_lat, s_reselect_lon,
+                                                                   gps_data.lat, gps_data.lon);
+                            need_reselect = (moved_m >= RESELECT_THRESHOLD_M);
+                        }
+
+                        if (need_reselect) {
+                            s_reselect_lat = gps_data.lat;
+                            s_reselect_lon = gps_data.lon;
+                            gpx_loader::reselect(gps_data.lat, gps_data.lon);
+                        }
+                    }
+                }
             }
         }
     }

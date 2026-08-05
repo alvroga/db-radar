@@ -390,10 +390,20 @@ void createRadarScreen() {
     // Initialize waypoint system
     g_ui_state.waypoint_count = 0;
 
-    // Center reference will be updated to GPS position automatically
-    // Initial default position (will be replaced when GPS gets fix)
-    g_ui_state.center_lat = 34.133417;
-    g_ui_state.center_lon = -118.145190;
+    // Center reference will be updated to GPS position automatically once a
+    // live fix lands (navigation.cpp overwrites this unconditionally). Until
+    // then, seed from the last NVS-saved fix so the very first waypoint-index
+    // selection (loadAllGPXFiles(), main.cpp, runs shortly after this) sorts
+    // against roughly the right place instead of always this hardcoded spot.
+    double saved_lat, saved_lon;
+    uint32_t saved_fix_time;
+    if (settings_manager::loadGPSState(saved_lat, saved_lon, saved_fix_time)) {
+        g_ui_state.center_lat = saved_lat;
+        g_ui_state.center_lon = saved_lon;
+    } else {
+        g_ui_state.center_lat = 34.133417;
+        g_ui_state.center_lon = -118.145190;
+    }
 
     Serial.println("[RADAR] Radar screen created");
 

@@ -281,6 +281,10 @@ extern "C" void app_main() {
     // Auto-load GPX files from SD card
     ui_manager::updateLoadingStatus("Loading waypoints...");
     Serial.println("[GPX] Auto-loading waypoints from /sdcard/gpx/ folder...");
+    // gpx_loader::init() allocates the PSRAM two-tier index (gpx_index + selection
+    // scratch) — was never called anywhere before this, so the two-tier path was
+    // dead code and every load silently used the file-order legacy fallback.
+    gpx_loader::init();
     int waypoints_loaded = gpx_loader::loadAllGPXFiles();
     if (waypoints_loaded > 0) {
         navigation::updateRadarDisplay();

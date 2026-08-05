@@ -710,6 +710,54 @@ This freed the SRAM headroom that made raising `MAX_WAYPOINTS` (50 → 500) affo
 
 ---
 
+## Waypoint Two-Tier Index
+
+**Status**: Implemented 2026-08-05, build-clean, not yet field-tested | [ADR-0023](docs/adr/0023-two-tier-waypoint-index.md) | [Design doc](docs/waypoint_two_tier_index_plan.md)
+
+`MAX_WAYPOINTS` (200, see above) is a **working-set** size, not a limit on how many waypoints the
+device knows about. Every waypoint across every GPX file is indexed separately in PSRAM
+(`gpx_index`, new module — `include/gpx/gpx_index.h`/`src/gpx/gpx_index.cpp`, up to 8192 lightweight
+`{lat, lon, file_offset, file_id, found}` entries), and `ui.waypoints[]` holds the 200 closest to the
+user's actual position, not whichever 200 happened to load first in filesystem order.
+
+**Selection**: `gpx_loader::selectAndMaterialize()` — Haversine (`utils/geo.h`, deliberately *not* the
+equirectangular approximation `navigation.cpp` uses for rendering, since index candidates can be
+globally distributed) + `std::partial_sort` over the PSRAM index, then `fseek` + re-parse only the
+winning entries, grouped by file to minimize SD reopens.
+
+**Kept current as the user moves**: `gpx_loader::reselect()`, called from the System Task
+(`task_manager.cpp::updateStatusLabels()`) when GPS has moved >150m *and* the index holds more entries
+than the working set. It's a **delta** reselect — a surviving entry never changes slots, so only the
+few slots whose occupant actually changed get `fseek`+re-parsed, not the whole set. Skipped entirely
+while the waypoint detail screen is open (`ui.screen_waypoint != nullptr`), so a slot can't be recycled
+out from under a screen the user is looking at.
+
+**Working-set stability** (the new correctness concern this design introduces): `fixed_waypoint_index`
+survives a reselect if its slot's source index-entry is unchanged before/after — reselect never moves a
+survivor, so this is an equality check, not a lat/lon re-resolve. `selected_waypoint_index` is cleared
+defensively on every reselect. `Waypoint::found` now has `IndexEntry.found` (keyed by PSRAM index
+entry, not SRAM slot) as its source of truth, written through via `gpx_loader::markWaypointFound()` so
+it survives the slot being recycled later. Three UI-Task write sites
+(`navigation.cpp::handleTapAt()`'s selection/found writes, `waypoint_screen.cpp`'s fix/unfix button)
+picked up `ui_state_mutex` protection for their `Waypoint` struct writes, since `ui.waypoints[]` is no
+longer written only at discrete load events — the System Task's reselect is now a second, ongoing
+writer. Render-path *reads* remain unprotected, matching this codebase's pre-existing writer-takes-it/
+reader-mostly-doesn't convention (see ADR-0023's Consequences for why that's an accepted, narrow risk
+rather than an oversight).
+
+**Measured cost**: +3,640 B static SRAM for the whole feature (`MAX_WAYPOINTS` held at 200 throughout,
+isolated from ADR-0022's unrelated cap history via a `readelf -S` diff, not the `pio run` summary
+percentage alone). PSRAM: index + selection scratch ≈ 250KB, well under 16% of the 8MB chip.
+
+**Code References**:
+- Index: `include/gpx/gpx_index.h` / `src/gpx/gpx_index.cpp`
+- Selection/reselect: `src/gpx/gpx_loader.cpp` - `selectAndMaterialize()`, `reselect()`, `buildFileIndex()`
+- Movement trigger: `src/utils/task_manager.cpp` - `updateStatusLabels()`
+- Haversine helper: `include/utils/geo.h` / `src/utils/geo.cpp`
+- Stability audit: `src/ui/navigation.cpp` (`handleTapAt()`), `src/ui/waypoint_screen.cpp` (fix/unfix)
+
+---
+
 ## Navigation Modes System
 
 **Status**: Complete ✅ | [Complete Guide](docs/navigation_modes.md)
@@ -1047,4 +1095,4 @@ required for new work — tracked in `docs/adr/BACKFILL_PLAN.md`.
 
 *This document serves as the master reference for ESP32-S3 Touch LCD projects. Keep it updated as the architecture evolves.*
 
-**Last updated**: 2026-08-05 (`MAX_WAYPOINTS` raised 50 → 500; Haversine replaced with equirectangular approximation in `drawWaypoints()`/`latLonToScreen()`, see ADR-0022. Previously: 2026-07-31, waypoint desc/hint moved to PSRAM, freeing ~64KB SRAM and flash; full-subsystem performance audit: beacon BLE rate, sonar rhythm, direction-finding feasibility)
+**Last updated**: 2026-08-05 (two-tier waypoint index added — PSRAM full index + SRAM closest-N working set, `MAX_WAYPOINTS` stays 200, see ADR-0023. Same day, earlier: `MAX_WAYPOINTS` raised 50 → 500 then rolled back to 200 after a boot failure; Haversine replaced with equirectangular approximation in `drawWaypoints()`/`latLonToScreen()`, see ADR-0022. Previously: 2026-07-31, waypoint desc/hint moved to PSRAM, freeing ~64KB SRAM and flash; full-subsystem performance audit: beacon BLE rate, sonar rhythm, direction-finding feasibility)

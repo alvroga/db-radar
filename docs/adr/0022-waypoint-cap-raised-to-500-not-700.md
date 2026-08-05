@@ -1,8 +1,37 @@
 # ADR-0022: Raise MAX_WAYPOINTS to 500 (not 700+), after replacing Haversine with equirectangular
 
-Status: Accepted
+Status: Superseded on the cap number — see addendum below. Render-cost reasoning (Haversine →
+equirectangular) is unaffected.
 Date: 2026-08-05
 Decided by: You (after Claude's analysis)
+
+## Addendum (2026-08-05, same day): 500 doesn't boot
+
+The static-SRAM budget table below was checked against the documented 80% caution line and passed
+(60.4% baseline / 68.2% BLE-active). It was never checked against actual free heap at boot, which is
+a different — and tighter — resource: `xTaskCreatePinnedToCore` grabs task stacks from live internal
+heap, not from the static budget. On the first real boot at cap=500, `[BEACON] Free internal SRAM
+before BLE init: 83899 bytes` — BLE (~25KB) plus the UI (16KB) and I2C (8KB) task stacks it hands out
+first left too little for the Network (12KB) and System (8KB) tasks after; both `xTaskCreate` calls
+returned `pdFAIL` and the device never came up. This is exactly the gap the "Field verification still
+open" section below named and didn't close before shipping.
+
+`MAX_WAYPOINTS` is now **200** (`include/ui/ui_manager.h`), not 500 — see the table below, whose own
+row for 200 (154,656 B / 47.2% baseline, 55.0% BLE-active) is what got picked, on the reasoning that a
+number the table had already computed was safer than guessing a new one under time pressure.
+**Field-confirmed booting on hardware 2026-08-05, BLE active.** That boot only had 15 real waypoints
+loaded — the array is fixed-size regardless of fill count, so the confirmation validates the 200-slot
+SRAM footprint, not a 200-waypoint GPX load. 200 is therefore a conservative floor, not a measured
+ceiling: the true boundary sits somewhere in the untested 200–500 range, and the table's own 300 row
+(51.6%/59.4%) is the next candidate if more headroom is wanted — but it would need the same kind of
+hardware boot verification before being trusted, not just a clean `pio run` size check, which is what
+let 500 through the first time.
+
+The options for getting back to 500+ are noted in ROADMAP.md's Waypoint Memory Optimization entry:
+either accept a much thinner BLE-active heap margin than this project's other budget decisions assume,
+or move `Waypoint waypoints[MAX_WAYPOINTS]` into PSRAM the way `WaypointDetail` already is — a bigger
+change, since lat/lon and the found/valid flags are read every frame for every *loaded* waypoint (not
+just visible ones) in `drawWaypoints()`'s filter pass. Neither has been evaluated yet.
 
 ## Context
 

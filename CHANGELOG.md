@@ -9,7 +9,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+**Two-tier waypoint index — closest-N selection instead of a higher SRAM cap (2026-08-05)**
+
+`gpx_loader::loadAllGPXFiles()` previously filled the 200-slot `ui.waypoints[]` array in filesystem
+order — a user with waypoints across many files could get 200 that happened to load first, possibly on
+the other side of the world from their actual position, with no way to fix it short of raising
+`MAX_WAYPOINTS` again (the exact mistake ADR-0022 already made and rolled back the same day). Instead:
+every waypoint across every GPX file is now indexed in PSRAM (`gpx_index`, new module, up to 8192
+entries, `{lat, lon, file_offset, file_id, found}` each), and the 200-slot SRAM array is a working set
+of the closest 200 to the user's position, computed via Haversine + `std::partial_sort`
+(`gpx_loader::selectAndMaterialize()`) and kept current via a movement-triggered delta reselect (System
+Task, >150m moved, only when the index exceeds the working set) that re-parses just the handful of
+slots that actually changed rather than rescanning every file. `fixed_waypoint_index` survives a
+reselect if its slot's source entry is unchanged; `Waypoint::found` writes through to the PSRAM index
+so it survives a slot being recycled. Also closes a pre-existing gap where deleting a GPX file
+(`gpx_server.cpp`'s `delete_handler`) never triggered a reload at all. New `gpx index` serial command
+reports index/working-set size and truncation state. `MAX_WAYPOINTS` itself is untouched (still 200,
+the boot-verified ADR-0022 floor) — measured static SRAM cost of the whole feature is +3,640 B
+(+1.1 percentage points). Build-clean; **not yet field-tested on hardware**. See
+[ADR-0023](docs/adr/0023-two-tier-waypoint-index.md) and `docs/waypoint_two_tier_index_plan.md`.
+
 ### Fixed
+
+**Boot failure at `MAX_WAYPOINTS=500` — FreeRTOS task creation failed on real hardware (2026-08-05)**
+
+The 500-waypoint cap shipped earlier the same day (see below, and ADR-0022) passed its static-SRAM
+budget check but never booted: `xTaskCreatePinnedToCore` for the Network and System tasks returned
+`pdFAIL`. Root cause: static SRAM growth (133,056 B → 197,856 B, 40.6% → 60.4%) ate directly into
+internal heap available at runtime — `[BEACON] Free internal SRAM before BLE init: 83899 bytes` left
+too little once BLE (~25KB) and the UI/I2C task stacks (24KB) were granted. `MAX_WAYPOINTS` is now
+**200** (`include/ui/ui_manager.h`), restoring ~127KB free before BLE init — **field-confirmed booting
+on hardware, BLE active.** The equirectangular render-cost fix from the same change is unaffected and
+stays. 200 is a conservative floor (a row already computed in ADR-0022's table), not a measured
+ceiling — see the ADR-0022 addendum and ROADMAP.md's Waypoint Memory Optimization entry for what a
+higher cap would need.
 
 **FT-06 / FT-07 I2C bus freeze — field-verified resolved (2026-08-05)**
 

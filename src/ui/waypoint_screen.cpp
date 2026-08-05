@@ -1,6 +1,7 @@
 #include "ui/waypoint_screen.h"
 #include "ui/ui_manager.h"
 #include "ui/navigation.h"
+#include "utils/task_manager.h"
 #include <lvgl.h>
 #include "core/arduino_compat.h"
 
@@ -211,6 +212,11 @@ void open() {
         if (lv_event_get_code(e) == LV_EVENT_CLICKED) {
             ui_manager::UIState& ui = ui_manager::getUIState();
             int idx = (int)(intptr_t)lv_event_get_user_data(e);
+            // fixed_waypoint_index is no longer UI-Task-exclusive — the System
+            // Task's movement-triggered reselect (gpx_loader::reselect()) reads
+            // and can clear it once the PSRAM index outgrows the working set.
+            bool mx = (task_manager::ui_state_mutex != nullptr) &&
+                      (xSemaphoreTake(task_manager::ui_state_mutex, pdMS_TO_TICKS(100)) == pdTRUE);
             if (ui.fixed_waypoint_index == idx) {
                 // Already fixed — toggle off
                 ui.fixed_waypoint_index = -1;
@@ -220,6 +226,7 @@ void open() {
                 ui.fixed_waypoint_index = idx;
                 Serial.printf("[WPT_SCREEN] Waypoint %d fixed for proximity sonar\n", idx);
             }
+            if (mx) xSemaphoreGive(task_manager::ui_state_mutex);
             navigation::goToRadarScreen();
         }
     }, LV_EVENT_CLICKED, (void*)(intptr_t)idx);

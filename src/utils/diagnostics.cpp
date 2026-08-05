@@ -14,6 +14,9 @@
 #include "navigation/gps_quality.h"
 #include "i2c_manager.h"
 #include "gpx/gpx_server.h"
+#include "gpx/gpx_loader.h"
+#include "gpx/gpx_index.h"
+#include "utils/geo.h"
 #include "wifi_manager.h"
 #include "hardware/sensors/battery.h"
 #include "hardware/connectivity/beacon_proximity.h"
@@ -1032,12 +1035,54 @@ void handleGPXCommand(const char* args) {
             Serial.println("[GPX] ERROR: Failed to restart server");
         }
     }
+    else if (strncmp(args, "index list", 10) == 0) {
+        int n = atoi(args + 10);
+        if (n <= 0) n = 10;
+        ui_manager::UIState& ui = ui_manager::getUIState();
+        int limit = n < ui.waypoint_count ? n : ui.waypoint_count;
+        Serial.printf("==== Working Set (closest-first, %d of %d) ====\n", limit, ui.waypoint_count);
+        Serial.printf("Center: %.6f, %.6f\n", ui.center_lat, ui.center_lon);
+        // Slots are filled closest-first by selectAndMaterialize()/reselect() —
+        // printing in slot order IS printing in distance order. See ADR-0023.
+        for (int i = 0; i < limit; i++) {
+            const ui_manager::Waypoint& wp = ui.waypoints[i];
+            if (!wp.valid) {
+                Serial.printf("  [%3d] (invalid slot)\n", i);
+                continue;
+            }
+            double dist_m = geo::haversineMeters(ui.center_lat, ui.center_lon, wp.lat, wp.lon);
+            const char* dname = wp.display_name[0] ? wp.display_name : wp.name;
+            Serial.printf("  [%3d] %-24s %10.6f, %11.6f   %10.1f m\n",
+                          i, dname, wp.lat, wp.lon, dist_m);
+        }
+        Serial.println("==============================================");
+    }
+    else if (strncmp(args, "index", 5) == 0) {
+        Serial.println("==== Two-Tier Waypoint Index ====");
+        int index_count, working_set;
+        bool index_truncated, working_set_capped;
+        gpx_loader::getIndexStats(index_count, index_truncated, working_set_capped);
+        working_set = gpx_loader::getWaypointCount();
+        Serial.printf("Indexed waypoints:  %d (of %d max)\n", index_count, gpx_index::MAX_INDEX_ENTRIES);
+        Serial.printf("Working set:        %d (of %d max)\n", working_set,
+                      ui_manager::RadarConfig::MAX_WAYPOINTS);
+        Serial.printf("Index truncated:    %s%s\n", index_truncated ? "YES" : "no",
+                      index_truncated ? " (real loss — raise gpx_index::MAX_INDEX_ENTRIES)" : "");
+        Serial.printf("Working set capped: %s%s\n", working_set_capped ? "yes" : "no",
+                      working_set_capped ? " (expected — showing closest N, not everything)" : "");
+        Serial.printf("Center position:    %.6f, %.6f\n",
+                      ui_manager::getUIState().center_lat, ui_manager::getUIState().center_lon);
+        Serial.printf("PSRAM used:         %u bytes\n", (unsigned)gpx_index::getPsramBytesUsed());
+        Serial.println("==================================");
+    }
     else {
         Serial.println("Available GPX commands:");
         Serial.println("  gpx status    - Show GPX server status");
         Serial.println("  gpx ap        - Switch to Access Point mode (for testing)");
         Serial.println("  gpx sta       - Switch back to Station mode");
         Serial.println("  gpx restart   - Restart web server");
+        Serial.println("  gpx index     - Show two-tier waypoint index stats");
+        Serial.println("  gpx index list [N] - List closest N working-set waypoints w/ distance");
     }
 }
 

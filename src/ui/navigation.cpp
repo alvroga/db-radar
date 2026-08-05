@@ -15,6 +15,7 @@
 #include "hardware/buzzer.h"
 #include "hardware/sensors/compass_qmc5883l.h"
 #include "hardware/i2c/i2c_manager.h"
+#include "gpx/gpx_loader.h"
 #include "core/arduino_compat.h"
 #include <cfloat>
 #include <cmath>
@@ -1398,7 +1399,14 @@ void handleTapAt(int screen_x, int screen_y) {
             Serial.printf("[NAVIGATION] Waypoint %d tapped: %s\n", i,
                           ui.waypoints[i].display_name[0] ? ui.waypoints[i].display_name
                                                            : ui.waypoints[i].name);
+            // ui.waypoints[]/selected_waypoint_index are no longer UI-Task-exclusive:
+            // the System Task's movement-triggered reselect (see task_manager.cpp,
+            // gpx_loader::reselect()) can recycle slots concurrently once the PSRAM
+            // index outgrows the working set. Mutex-protect these writes to match.
+            bool mx = (task_manager::ui_state_mutex != nullptr) &&
+                      (xSemaphoreTake(task_manager::ui_state_mutex, pdMS_TO_TICKS(100)) == pdTRUE);
             ui.selected_waypoint_index = i;
+            if (mx) xSemaphoreGive(task_manager::ui_state_mutex);
 
             // Mark as found when tapping the fixed waypoint while within GPS close range.
             // 15m threshold accounts for typical GPS accuracy (±5-10m).
@@ -1411,7 +1419,13 @@ void handleTapAt(int screen_x, int screen_y) {
                             sin(dLon/2.0)*sin(dLon/2.0);
                 float found_dist = (float)(EARTH_RADIUS_M * 2.0 * atan2(sqrt(fa), sqrt(1.0 - fa)));
                 if (found_dist <= 15.0f) {
+                    bool mxf = (task_manager::ui_state_mutex != nullptr) &&
+                               (xSemaphoreTake(task_manager::ui_state_mutex, pdMS_TO_TICKS(100)) == pdTRUE);
                     ui.waypoints[i].found = true;
+                    if (mxf) xSemaphoreGive(task_manager::ui_state_mutex);
+                    // Write-through into the PSRAM index so "found" survives this
+                    // slot being recycled by a future reselect (see ADR-0023).
+                    gpx_loader::markWaypointFound(i, true);
                     buzzer::chirp(80);
                     Serial.printf("[NAVIGATION] Waypoint %d FOUND at %.1fm\n", i, found_dist);
                 }
