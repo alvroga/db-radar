@@ -1,8 +1,11 @@
 #include "utils/system_logger.h"
 #include <stdarg.h>
 #include <sys/stat.h>
+#include <sys/time.h>
+#include <time.h>
 #include <stdio.h>
 #include <unistd.h>
+#include "esp_system.h"
 
 namespace system_logger {
 
@@ -32,13 +35,71 @@ static const char* levelToString(Level level) {
     }
 }
 
+// Uptime (HH:MM:SS.mmm) until the system clock is actually valid, then real UTC
+// date/time. ntp_sync.cpp calls settimeofday() once from a GPS fix (no signal back
+// to this module needed) — 1577836800 = 2020-01-01 00:00:00 UTC is the same
+// not-yet-synced sanity gate ntp_sync.cpp's own getLocalTime() already uses, so a
+// log captured before the first fix and one captured after are self-consistent
+// with every other UTC print in this codebase (GPS_TIME's own boot line, WMM, etc).
+// Mid-file format changes at the fix are intentional, not a bug: it's the marker
+// for "GPS fix acquired" in the log itself.
 static void getTimestamp(char* buf, size_t size) {
+    struct timeval tv;
+    gettimeofday(&tv, nullptr);
+    if (tv.tv_sec >= 1577836800L) {
+        struct tm tm_info;
+        gmtime_r(&tv.tv_sec, &tm_info);
+        snprintf(buf, size, "%04d-%02d-%02d %02d:%02d:%02d.%03ldZ",
+                 tm_info.tm_year + 1900, tm_info.tm_mon + 1, tm_info.tm_mday,
+                 tm_info.tm_hour, tm_info.tm_min, tm_info.tm_sec,
+                 (long)(tv.tv_usec / 1000));
+        return;
+    }
+
     uint32_t ms = millis();
     uint32_t sec = ms / 1000;
     uint32_t min = sec / 60;
     uint32_t hr = min / 60;
     snprintf(buf, size, "%02lu:%02lu:%02lu.%03lu",
              hr % 24, min % 60, sec % 60, ms % 1000);
+}
+
+// Shifts system.log -> system_1.log -> system_2.log -> ... -> system_N.log, dropping
+// whatever was in the oldest slot. Called once at boot, before the fresh file for this
+// session is opened, so every boot gets its own file rather than appending forever into
+// one that can be truncated by MAX_LOG_SIZE during a later, unrelated session.
+static void rotateLogs() {
+    char oldest[64];
+    snprintf(oldest, sizeof(oldest), "/sdcard/logs/system_%d.log", MAX_ROTATED_LOGS);
+    remove(oldest);  // no-op if it doesn't exist
+
+    for (int i = MAX_ROTATED_LOGS - 1; i >= 1; i--) {
+        char from[64], to[64];
+        snprintf(from, sizeof(from), "/sdcard/logs/system_%d.log", i);
+        snprintf(to, sizeof(to), "/sdcard/logs/system_%d.log", i + 1);
+        rename(from, to);  // no-op (fails silently) if `from` doesn't exist
+    }
+
+    rename(LOG_FILE, "/sdcard/logs/system_1.log");
+}
+
+// Distinguishes "the firmware reset" from "the UI hung with no reset" — the two look
+// identical from the outside (screen stops updating) but point at completely different
+// bug classes. See docs/i2c_bus_freeze_investigation.md.
+static const char* resetReasonToString(esp_reset_reason_t reason) {
+    switch (reason) {
+        case ESP_RST_POWERON:   return "POWERON";
+        case ESP_RST_EXT:       return "EXT_PIN";
+        case ESP_RST_SW:        return "SW_RESET";
+        case ESP_RST_PANIC:     return "PANIC";
+        case ESP_RST_INT_WDT:   return "INT_WDT";
+        case ESP_RST_TASK_WDT:  return "TASK_WDT";
+        case ESP_RST_WDT:       return "OTHER_WDT";
+        case ESP_RST_DEEPSLEEP: return "DEEPSLEEP";
+        case ESP_RST_BROWNOUT:  return "BROWNOUT";
+        case ESP_RST_SDIO:      return "SDIO";
+        default:                return "UNKNOWN";
+    }
 }
 
 // =============================================================================
@@ -75,7 +136,12 @@ bool init() {
         }
     }
 
-    // Check existing file size
+    // Rotate: preserve whatever the previous boot wrote (which may be the last
+    // thing logged before a crash) into system_1.log, untouched by this session.
+    rotateLogs();
+
+    // Check existing file size (should be 0/absent right after rotation — this stays
+    // as a safety net in case rotation itself failed, e.g. a full SD card)
     if (stat(LOG_FILE, &st) == 0) {
         g_file_size = (size_t)st.st_size;
         // If file too large, truncate it
@@ -93,8 +159,12 @@ bool init() {
     Serial.printf("[LOG] Initialized (file: %d bytes, buffer: %d bytes)\n",
                   g_file_size, BUFFER_SIZE);
 
-    // Log boot
+    // Log boot, and WHY — a task/interrupt watchdog reset and a true UI hang look
+    // identical from outside (screen stops updating) but implicate different code.
+    // A hang with reset_reason still POWERON across boots means nothing reset it —
+    // the user power-cycled it, which is a different fact than the firmware crashing.
     log(Level::INFO, "SYS", "===== BOOT =====");
+    logf(Level::INFO, "SYS", "Reset reason: %s", resetReasonToString(esp_reset_reason()));
 
     return true;
 }
@@ -104,8 +174,9 @@ void log(Level level, const char* tag, const char* message) {
         return;
     }
 
-    // Format: "HH:MM:SS.mmm [L] TAG: message\n"
-    char timestamp[16];
+    // Format: "HH:MM:SS.mmm [L] TAG: message\n" (pre-fix) or
+    // "YYYY-MM-DD HH:MM:SS.mmmZ [L] TAG: message\n" (post-GPS-fix) — see getTimestamp().
+    char timestamp[32];
     getTimestamp(timestamp, sizeof(timestamp));
 
     char line[256];

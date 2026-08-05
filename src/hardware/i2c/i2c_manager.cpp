@@ -1,13 +1,19 @@
 #include "i2c_manager.h"
 #include "core/arduino_compat.h"
 #include "esp_log.h"
+#include "esp_rom_sys.h"
+#include "esp_timer.h"
+#include "driver/gpio.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/semphr.h"
+#include "freertos/task.h"
+#include "utils/system_logger.h"
 
 namespace i2c_manager {
 
 static const char* TAG = "I2C";
 static i2c_master_bus_handle_t g_bus_handle = nullptr;
+static Config g_config;  // saved by init() so recovery paths know which pins to inspect
 // Recursive mutex — serializes all bus transactions across tasks.
 // Recursive because reinit() holds the mutex while calling init() which calls ping().
 // ESP-IDF's internal I2C bus lock is not sufficient: concurrent calls from different
@@ -23,6 +29,78 @@ DeviceHandle RTC_DEVICE      = {0x51, "RTC",      nullptr};
 DeviceHandle TOUCH_DEVICE    = {0x15, "TOUCH",    nullptr};
 DeviceHandle EXIO_DEVICE     = {0x20, "EXIO",     nullptr};
 DeviceHandle COMPASS_DEVICE  = {0x0D, "COMPASS",  nullptr};
+
+// ============================================================================
+// Per-device forensic stats — see DeviceStatSnapshot in the header for why
+// this exists alongside the older cross-device Stats. Index order matches
+// DeviceStatSnapshot's documented output order.
+// ============================================================================
+struct InternalDeviceStats {
+    uint32_t ops = 0;
+    uint32_t fails = 0;
+    uint32_t consecutive_fails = 0;
+    uint32_t max_latency_us = 0;
+    uint32_t last_fail_ms = 0;
+    bool     has_failed = false;
+};
+static InternalDeviceStats g_dev_stats[NUM_DEVICES];
+
+static int deviceIndex(DeviceHandle& dev) {
+    if (&dev == &IMU_DEVICE_LOW)  return 0;
+    if (&dev == &IMU_DEVICE_HIGH) return 1;
+    if (&dev == &RTC_DEVICE)      return 2;
+    if (&dev == &TOUCH_DEVICE)    return 3;
+    if (&dev == &EXIO_DEVICE)     return 4;
+    if (&dev == &COMPASS_DEVICE)  return 5;
+    return -1;
+}
+
+static void recordDeviceOp(DeviceHandle& dev, bool success, uint32_t latency_us) {
+    int idx = deviceIndex(dev);
+    if (idx < 0) return;
+    InternalDeviceStats& s = g_dev_stats[idx];
+    s.ops++;
+    if (latency_us > s.max_latency_us) s.max_latency_us = latency_us;
+    if (success) {
+        s.consecutive_fails = 0;
+    } else {
+        s.fails++;
+        s.consecutive_fails++;
+        s.has_failed = true;
+        s.last_fail_ms = millis();
+    }
+}
+
+void getDeviceStats(DeviceStatSnapshot out[NUM_DEVICES]) {
+    static DeviceHandle* order[NUM_DEVICES] = {
+        &IMU_DEVICE_LOW, &IMU_DEVICE_HIGH, &RTC_DEVICE,
+        &TOUCH_DEVICE, &EXIO_DEVICE, &COMPASS_DEVICE
+    };
+    uint32_t now = millis();
+    for (int i = 0; i < NUM_DEVICES; i++) {
+        const InternalDeviceStats& s = g_dev_stats[i];
+        out[i].name = order[i]->name;
+        out[i].addr = order[i]->addr;
+        out[i].ops = s.ops;
+        out[i].fails = s.fails;
+        out[i].consecutive_fails = s.consecutive_fails;
+        out[i].max_latency_us = s.max_latency_us;
+        out[i].ms_since_last_fail = s.has_failed ? (now - s.last_fail_ms) : 0xFFFFFFFF;
+    }
+}
+
+// Reads SDA/SCL levels directly off the GPIO input register — safe to call at
+// any time, including while the I2C peripheral owns the pins via the GPIO
+// matrix, because it never touches pin direction/mode. Added 2026-08-02 for
+// the FT-06 freeze investigation: the next wedge should tell us which of
+// three states we're in (SDA low = bit-bang-recoverable, SCL low = only a
+// slave reset/power-cycle helps, both high = not electrical at all).
+static void logLineLevels(const char* context) {
+    int sda = gpio_get_level((gpio_num_t)g_config.sda_pin);
+    int scl = gpio_get_level((gpio_num_t)g_config.scl_pin);
+    Serial.printf("[I2C] %s: SDA=%d SCL=%d\n", context, sda, scl);
+    system_logger::logf(system_logger::Level::INFO, "I2C", "%s: SDA=%d SCL=%d", context, sda, scl);
+}
 
 // ============================================================================
 // Internal: register a device on the bus at init time
@@ -46,13 +124,82 @@ static bool registerDevice(DeviceHandle& dev, uint32_t scl_speed) {
 }
 
 // ============================================================================
+// bitBangClockRecovery — raw-GPIO bus recovery, done BEFORE the I2C peripheral
+// claims the pins.
+//
+// i2c_master_bus_reset() (used by resetBus(), below) cannot be trusted to do
+// this on ESP32-S3: its wait loop polls i2c_ll_master_is_bus_clear_done(),
+// which the IDF LL layer stubs to `return false` unconditionally on this SoC
+// (confirmed by reading the IDF source, see memory/i2c_bus_freeze_recovery.md).
+// The call returns ESP_OK without ever driving a clock pulse — a silent no-op
+// that only looks like recovery. This function does the real thing: standard
+// I2C bus-clear procedure (toggle SCL up to 9 times while SDA is held low by a
+// wedged slave, then issue a STOP), driven directly on the raw pins while
+// nothing else owns them.
+//
+// Must run before i2c_new_master_bus() — once the peripheral configures these
+// pins as its I2C engine, bit-banging them as plain GPIO is undefined. This is
+// also why it lives in init() rather than resetBus()/reinit(): a reboot with
+// an already-wedged bus never gets past device_manager's EXIO init otherwise
+// (reproduced 2026-08-02 — a soft reboot alone hung solid with no more serial
+// output at all, since the existing "recovery" never touched the wedge).
+// ============================================================================
+static void bitBangClockRecovery(gpio_num_t scl_pin, gpio_num_t sda_pin) {
+    gpio_config_t in_conf = {};
+    in_conf.mode = GPIO_MODE_INPUT;
+    in_conf.pull_up_en = GPIO_PULLUP_ENABLE;
+    in_conf.pin_bit_mask = (1ULL << scl_pin) | (1ULL << sda_pin);
+    gpio_config(&in_conf);
+    esp_rom_delay_us(10);
+
+    if (gpio_get_level(sda_pin) == 1) return;  // bus already free — nothing to do
+
+    Serial.println("[I2C] SDA held low before bus init — bit-banging clock recovery");
+
+    gpio_config_t od_conf = {};
+    od_conf.mode = GPIO_MODE_INPUT_OUTPUT_OD;
+    od_conf.pull_up_en = GPIO_PULLUP_ENABLE;
+    od_conf.pin_bit_mask = (1ULL << scl_pin) | (1ULL << sda_pin);
+    gpio_config(&od_conf);
+
+    gpio_set_level(sda_pin, 1);
+    gpio_set_level(scl_pin, 1);
+    esp_rom_delay_us(5);
+
+    for (int i = 0; i < 9 && gpio_get_level(sda_pin) == 0; i++) {
+        gpio_set_level(scl_pin, 0);
+        esp_rom_delay_us(5);
+        gpio_set_level(scl_pin, 1);
+        esp_rom_delay_us(5);
+    }
+
+    // STOP condition: SDA rises while SCL is high
+    gpio_set_level(sda_pin, 0);
+    esp_rom_delay_us(5);
+    gpio_set_level(scl_pin, 1);
+    esp_rom_delay_us(5);
+    gpio_set_level(sda_pin, 1);
+    esp_rom_delay_us(5);
+
+    Serial.printf("[I2C] Bit-bang recovery done — SDA now %s\n",
+                  gpio_get_level(sda_pin) ? "released (high)" : "STILL LOW");
+}
+
+// ============================================================================
 // init
 // ============================================================================
 bool init(const Config& config) {
+    g_config = config;  // needed by logLineLevels()/recovery paths outside init()
+
     // Create mutex once — never destroyed (survives reinit cycles).
     if (g_bus_mutex == nullptr) {
         g_bus_mutex = xSemaphoreCreateRecursiveMutex();
     }
+
+    logLineLevels("pre-init");
+    // Must run before the I2C peripheral claims SDA/SCL — see comment above.
+    bitBangClockRecovery((gpio_num_t)config.scl_pin, (gpio_num_t)config.sda_pin);
+    logLineLevels("post-bitbang");
 
     i2c_master_bus_config_t bus_cfg = {};
     bus_cfg.i2c_port          = I2C_NUM_0;
@@ -91,12 +238,17 @@ bool init(const Config& config) {
     // instead of staying crippled until a manual power cycle.
     if (!ping(EXIO_DEVICE)) {
         Serial.println("[I2C] WARNING: EXIO device not responding — attempting clock recovery");
+        system_logger::warn("I2C", "EXIO not responding at init — attempting recovery");
+        logLineLevels("pre-resetBus");
         resetBus();
         vTaskDelay(pdMS_TO_TICKS(10));
+        logLineLevels("post-resetBus");
         if (!ping(EXIO_DEVICE)) {
             Serial.println("[I2C] WARNING: EXIO device still not responding after recovery");
+            system_logger::error("I2C", "EXIO still not responding after recovery attempt");
         } else {
             Serial.println("[I2C] EXIO recovered after clock pulses");
+            system_logger::info("I2C", "EXIO recovered after clock pulses");
         }
     }
 
@@ -120,30 +272,51 @@ bool read(DeviceHandle& dev, uint8_t reg, uint8_t* data, size_t len, int retries
     }
 
     bool success = false;
+    esp_err_t last_err = ESP_OK;
+    uint32_t total_us = 0;
     for (int attempt = 0; attempt <= retries; attempt++) {
         if (attempt > 0) {
             g_stats.retry_count++;
             vTaskDelay(pdMS_TO_TICKS(1));
         }
 
+        int64_t t0 = esp_timer_get_time();
         esp_err_t err = i2c_master_transmit_receive(
             dev._handle,
             &reg, 1,          // write: register address
             data, len,        // read: response data
             pdMS_TO_TICKS(50) // timeout
         );
+        total_us += (uint32_t)(esp_timer_get_time() - t0);
 
         if (err == ESP_OK) {
             success = true;
             break;
         }
-
-        if (attempt == retries) {
-            Serial.printf("[I2C] %s reg=0x%02X read failed: %s\n",
-                          dev.name, reg, esp_err_to_name(err));
-        }
+        last_err = err;
     }
 
+    // Latency watch: a transaction taking >20ms is the earliest signal of a
+    // degrading (not yet fully wedged) bus — log it regardless of outcome.
+    // See docs/i2c_bus_freeze_investigation.md, "Things to try" #6.
+    if (total_us > 20000) {
+        system_logger::logf(system_logger::Level::WARN, "I2C",
+            "SLOW %s reg=0x%02X %s dur=%luus task=%s",
+            dev.name, reg, success ? "read" : "read-FAIL",
+            (unsigned long)total_us, pcTaskGetName(nullptr));
+    }
+
+    if (!success) {
+        Serial.printf("[I2C] %s reg=0x%02X read failed: %s (dur=%luus task=%s t=%lu)\n",
+                      dev.name, reg, esp_err_to_name(last_err),
+                      (unsigned long)total_us, pcTaskGetName(nullptr), (unsigned long)millis());
+        system_logger::logf(system_logger::Level::WARN, "I2C",
+            "FAIL %s reg=0x%02X read err=%s dur=%luus task=%s consec=%lu",
+            dev.name, reg, esp_err_to_name(last_err), (unsigned long)total_us,
+            pcTaskGetName(nullptr), (unsigned long)(g_stats.consecutive_failures + 1));
+    }
+
+    recordDeviceOp(dev, success, total_us);
     xSemaphoreGiveRecursive(g_bus_mutex);
     if (!success) {
         g_stats.failed_ops++;
@@ -174,29 +347,48 @@ bool write(DeviceHandle& dev, uint8_t reg, const uint8_t* data, size_t len, int 
     }
 
     bool success = false;
+    esp_err_t last_err = ESP_OK;
+    uint32_t total_us = 0;
     for (int attempt = 0; attempt <= retries; attempt++) {
         if (attempt > 0) {
             g_stats.retry_count++;
             vTaskDelay(pdMS_TO_TICKS(1));
         }
 
+        int64_t t0 = esp_timer_get_time();
         esp_err_t err = i2c_master_transmit(
             dev._handle,
             buf, len + 1,
             pdMS_TO_TICKS(50)
         );
+        total_us += (uint32_t)(esp_timer_get_time() - t0);
 
         if (err == ESP_OK) {
             success = true;
             break;
         }
-
-        if (attempt == retries) {
-            Serial.printf("[I2C] %s reg=0x%02X write failed: %s\n",
-                          dev.name, reg, esp_err_to_name(err));
-        }
+        last_err = err;
     }
 
+    // Latency watch — see the matching comment in read() above.
+    if (total_us > 20000) {
+        system_logger::logf(system_logger::Level::WARN, "I2C",
+            "SLOW %s reg=0x%02X %s dur=%luus task=%s",
+            dev.name, reg, success ? "write" : "write-FAIL",
+            (unsigned long)total_us, pcTaskGetName(nullptr));
+    }
+
+    if (!success) {
+        Serial.printf("[I2C] %s reg=0x%02X write failed: %s (dur=%luus task=%s t=%lu)\n",
+                      dev.name, reg, esp_err_to_name(last_err),
+                      (unsigned long)total_us, pcTaskGetName(nullptr), (unsigned long)millis());
+        system_logger::logf(system_logger::Level::WARN, "I2C",
+            "FAIL %s reg=0x%02X write err=%s dur=%luus task=%s consec=%lu",
+            dev.name, reg, esp_err_to_name(last_err), (unsigned long)total_us,
+            pcTaskGetName(nullptr), (unsigned long)(g_stats.consecutive_failures + 1));
+    }
+
+    recordDeviceOp(dev, success, total_us);
     xSemaphoreGiveRecursive(g_bus_mutex);
     if (!success) {
         g_stats.failed_ops++;
@@ -224,6 +416,12 @@ bool ping(DeviceHandle& dev) {
     return ok;
 }
 
+// ⚠️ Despite the name and ESP-IDF's own docs, this does NOT send clock-recovery
+// pulses on ESP32-S3 — i2c_master_bus_reset()'s wait loop polls a function the
+// IDF LL layer stubs to `return false` unconditionally on this SoC, so it
+// returns ESP_OK without ever driving a pulse. Kept only for the FSM-level
+// reset it does perform (distinct from clock recovery); real bus-clear recovery
+// is bitBangClockRecovery(), invoked from init() before the peripheral exists.
 bool resetBus() {
     if (g_bus_handle == nullptr) return false;
     esp_err_t err = i2c_master_bus_reset(g_bus_handle);
@@ -237,6 +435,7 @@ bool resetBus() {
 
 bool reinit(const Config& config) {
     Serial.println("[I2C] Full re-initialization...");
+    system_logger::warn("I2C", "Full re-initialization triggered");
 
     // Acquire bus mutex — blocks any in-flight read()/write() from other tasks
     // until reinit completes. Mutex is recursive so init() → ping() inside here
@@ -251,15 +450,10 @@ bool reinit(const Config& config) {
         }
     }
 
-    // Clock recovery: send 9 SCL pulses to release any peripheral holding SDA low.
-    // Must happen BEFORE deleting the bus handle — i2c_master_bus_reset() requires
-    // a valid handle. This fixes TCA9554/QMC5883L stuck mid-transaction after long
-    // standby (ESP_ERR_TIMEOUT on wake that a plain driver restart cannot clear).
-    if (g_bus_handle != nullptr) {
-        esp_err_t rst = i2c_master_bus_reset(g_bus_handle);
-        Serial.printf("[I2C] Clock recovery (9 SCL pulses): %s\n", esp_err_to_name(rst));
-        vTaskDelay(pdMS_TO_TICKS(10));
-    }
+    // Captured BEFORE teardown, while the peripheral still owns the pins — the
+    // most useful sample, since it's closest to whatever condition triggered
+    // the reinit in the first place.
+    logLineLevels("pre-reinit-teardown");
 
     // Remove all registered device handles before deleting the bus
     DeviceHandle* devices[] = {

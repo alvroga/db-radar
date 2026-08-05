@@ -9,6 +9,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+**FT-06 / FT-07 I2C bus freeze — field-verified resolved (2026-08-05)**
+
+The recurring full/partial interface freeze (button, touch, display unresponsive) is confirmed fixed.
+Root cause, found 2026-08-02: a real ESP-IDF bug — `i2c_master.c`'s NACK-handling busy-wait had no
+timeout bound, so a NACK the hardware couldn't autonomously clear spun the calling task forever,
+bypassing the app's own I2C timeout (matches upstream [espressif/esp-idf#17720](https://github.com/espressif/esp-idf/issues/17720),
+fixed in IDF v5.5.4; this project is pinned to 5.5.0 with no PlatformIO upgrade path short of a
+major-version jump). Patched at build time via `scripts/patch_i2c_master_nack_hang.py`.
+
+Field verification: two consecutive sessions totaling ~10.5h of logged active runtime (~8h51m +
+~1h48m), spanning an overnight standby/wake cycle and a real power-loss recovery (device dropped
+mid-session). Log analysis (`system_1.log`/`system_2.log`) shows zero `TASK_WDT`/`PANIC` reset reasons,
+an unbroken 60s `HEALTH` heartbeat cadence across both sessions (the freeze's signature is the
+heartbeat silently stopping — never observed), and an I2C failure rate of ~0.01% in both, never enough
+to trip the consecutive-failure recovery watchdog (ADR-0003). The one `POWERON` reset present lines up
+exactly with the reported drop, not a firmware crash. Full analysis:
+[`docs/i2c_bus_freeze_investigation.md`](docs/i2c_bus_freeze_investigation.md),
+"Field Verification, 2026-08-05 — confirmed" section. Decision record for the fix itself:
+[ADR-0021](docs/adr/0021-i2c-nack-hang-build-time-backport.md).
+
+---
+
+**System logger silently no-ops when enabled via the DEV/Settings toggle instead of at boot** —
+invalidated an 8-9h FT-06 field-verification session (2026-08-03)
+
+`system_logger::init()` — the only function that allocates the buffer/mutex and touches the file — was
+called from exactly one place (`main.cpp`, boot only, gated on `settings.logging_enabled` already being
+`true` in NVS at that boot). `dev_screen.cpp`'s logging toggle only called `system_logger::setEnabled()`.
+Switching logging on via the toggle without rebooting left `g_initialized` false for the rest of the
+session: `isEnabled()` reported YES, `flush()` returned success (it early-returns `true` when
+uninitialized), and every `log()`/`logf()` call silently dropped. Discovered when an 8-9h field session
+run to gather the first data point on the NACK-hang patch (see entry below) came back with a completely
+empty `/sdcard/logs` — not truncated, never written at all. Fix: `logging_toggle_event()` now calls
+`system_logger::init()` (idempotent) before `setEnabled()`, matching the boot-time path. FT-06 remains
+**not field-verified** — the 2026-08-03 session doesn't count as an attempt. Full writeup:
+[`docs/i2c_bus_freeze_investigation.md`](docs/i2c_bus_freeze_investigation.md), "SD Log Reliability
+Hardening + Invalidated Field Test" section.
+
 ### Added
 
 **GPX manager shows the cache's friendly name; logs page gets select-all + bulk delete**
@@ -24,6 +64,72 @@ shows the friendly name with the code as a small secondary line underneath. Sepa
 "Delete Selected" button that loops the existing per-file `DELETE /delete/logs/<filename>` endpoint
 over the checked set — no new delete endpoint needed. Build impact: +672 bytes RAM (0.2 pts),
 negligible flash.
+
+---
+
+**Per-boot SD log rotation + GPS-synced timestamps + reset-reason logging in system logger**
+
+`system_logger.h`/`.cpp`: `init()` now rotates `system.log → system_1.log → … → system_5.log`
+(`MAX_ROTATED_LOGS = 5`, oldest dropped) before opening a fresh file each boot, instead of appending
+forever into one file a later boot's `MAX_LOG_SIZE` truncation could silently eat into — the boot that
+matters now survives at least 5 power cycles. `getTimestamp()` prints uptime until the system clock is
+GPS-synced (`ntp_sync.cpp` calls `settimeofday()` on fix), then switches to real UTC — same
+`>= 2020-01-01` sanity gate `ntp_sync.cpp` already uses, so a session spanning a fix is self-consistent
+and dateable without cross-referencing boot time. Every boot also now logs `esp_reset_reason()` decoded
+to a string, to tell a real reset apart from a hang. Built alongside the fix above, for the next FT-06
+field attempt. Full writeup: [`docs/i2c_bus_freeze_investigation.md`](docs/i2c_bus_freeze_investigation.md),
+"SD Log Reliability Hardening + Invalidated Field Test" section.
+
+Build impact: negligible (a few dozen bytes flash for the rotation/timestamp/reset-reason logic).
+
+---
+
+**FT-06 root cause found and patched: unbounded busy-wait in ESP-IDF's I2C driver after a NACK**
+
+Reading the pinned ESP-IDF 5.5.0 source (`i2c_master.c`, `s_i2c_send_commands()`) directly found a
+real driver bug: after an `I2C_EVENT_NACK`, the driver waits for the hardware to finish the STOP
+condition with `while (i2c_ll_is_bus_busy(hal->dev)) { nop; }` — no timeout, no bound, completely
+bypassing the `xfer_timeout_ms` the application passed in. If the bus never autonomously clears after
+a NACK, the calling task hangs forever. This is a known, already-fixed upstream bug
+([espressif/esp-idf#17720](https://github.com/espressif/esp-idf/issues/17720)) — fixed in IDF v5.5.4,
+confirmed by diffing tagged source across v5.5.1 through v5.5.5. This project is pinned to 5.5.0;
+PlatformIO's registry offers nothing between 5.5.3 (still broken) and 6.0.x (major-version jump, out
+of scope). New `scripts/patch_i2c_master_nack_hang.py`, wired into `platformio.ini`'s `extra_scripts`,
+backports just the upstream timeout-bound fix into the vendored driver on every build —
+idempotent, portable (no hardcoded paths), and safe-by-construction (only patches an exact
+byte-for-byte match; warns loudly and does nothing if the framework package ever changes underneath
+it). Verified: patch applies, reruns correctly no-op, firmware builds clean. **Not yet field-verified**
+against a real freeze — the trigger condition isn't reproducible on demand. Full writeup:
+[`docs/i2c_bus_freeze_investigation.md`](docs/i2c_bus_freeze_investigation.md), "Root Cause Found and
+Patched" section.
+
+**TWDT now panics (resets) on timeout instead of only logging** — response to FT-06 occurrence 4
+
+`src/core/main.cpp`: `wdt_config.panic_on_timeout` `false → true` (timeout stays 30s). The forensic
+build below (100kHz + per-op logging) field-tested to a fresh freeze at 04:26 with `i2c_consec=0` and
+zero further log output of any kind — strong evidence a System Task I2C call blocked past its own
+driver timeout rather than returning a countable failure, which is invisible by construction to the
+existing consecutive-failure wedge detector. Doesn't fix the underlying driver hang; converts a silent,
+unrecoverable freeze into a self-healing reboot, and the next boot's `Reset reason: TASK_WDT` confirms
+the mechanism if it recurs. Bus speed deliberately left at 100kHz — this hang is orthogonal to bus
+speed/signal timing. Full writeup: [`docs/i2c_bus_freeze_investigation.md`](docs/i2c_bus_freeze_investigation.md),
+"Occurrence 4" section.
+
+**I2C forensic logging + 100kHz bus speed for FT-06 freeze investigation** — field-tested 2026-08-02;
+did not prevent freezes (see entry above), but delivered the most complete trace of one captured so far
+
+Per-op failure/latency logging (timestamp, device, register, error, calling task, duration), per-device
+counters surfaced via `diag i2c`/60s SD heartbeat/on-wedge capture, unconditional SDA/SCL line-level
+logging at every init/recovery, a 10s EXIO register canary, and a DEV-HUD I2C failure line — all
+routed through `system_logger` so they survive the power cycle a freeze forces. Bus speed dropped
+400kHz → 100kHz alongside it as a reversible mitigation experiment. Also fixed the `dev_mode` boot
+banner, which had claimed verbose SD logging (UI checkpoints, button/queue events, 30s heartbeat) that
+was never implemented — the real heartbeat ran every 120s with four fields, which is very likely why
+the SD log looked "almost useless" in the field. Heartbeat is now 60s and carries I2C stats.
+Full writeup: [`docs/i2c_bus_freeze_investigation.md`](docs/i2c_bus_freeze_investigation.md), "Forensic
+Logging Build + 100kHz" section.
+
+Build impact: RAM 40.4% → 40.6%, Flash +small (per-device stat structs + log call sites).
 
 ---
 

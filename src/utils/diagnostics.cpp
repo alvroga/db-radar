@@ -217,6 +217,30 @@ void handleDiagCommand(const char* args) {
         }
     } else if (strncmp(args, "i2c", 3) == 0) {
         i2c_manager::scanBus();
+
+        // Per-device forensic breakdown, added 2026-08-02 for the FT-06 freeze
+        // investigation — see docs/i2c_bus_freeze_investigation.md, "Things to
+        // try" #7. Same data the heartbeat writes to SD every 60s, on demand.
+        i2c_manager::DeviceStatSnapshot snap[i2c_manager::NUM_DEVICES];
+        i2c_manager::getDeviceStats(snap);
+        Serial.println("==== I2C Per-Device Stats ====");
+        for (int i = 0; i < i2c_manager::NUM_DEVICES; i++) {
+            const auto& d = snap[i];
+            if (d.ops == 0) {
+                Serial.printf("  %-8s (0x%02X)  no traffic this boot\n", d.name, d.addr);
+                continue;
+            }
+            if (d.ms_since_last_fail == 0xFFFFFFFF) {
+                Serial.printf("  %-8s (0x%02X)  ops=%-6lu fails=0        max_lat=%luus\n",
+                              d.name, d.addr, (unsigned long)d.ops, (unsigned long)d.max_latency_us);
+            } else {
+                Serial.printf("  %-8s (0x%02X)  ops=%-6lu fails=%-6lu consec=%-4lu max_lat=%luus last_fail=%lums ago\n",
+                              d.name, d.addr, (unsigned long)d.ops, (unsigned long)d.fails,
+                              (unsigned long)d.consecutive_fails, (unsigned long)d.max_latency_us,
+                              (unsigned long)d.ms_since_last_fail);
+            }
+        }
+        Serial.println("===============================");
     } else if (strncmp(args, "freeze", 6) == 0 || strncmp(args, "lvgl_freeze", 11) == 0) {
         // Skip past the command name
         if (args[0] == 'f') args += 6; else args += 11;

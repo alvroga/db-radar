@@ -8,78 +8,6 @@ For completed features and history, see [CHANGELOG.md](CHANGELOG.md).
 
 ## Known Issues
 
-### FT-06: I2C Bus Freeze — Recurring
-**Severity**: Critical — full interface freeze, required a manual power cycle once
-**Status**: recovery code shipped 2026-07-31; the 2026-07-31 debunking (61-device scan was a probe
-artifact, `Bus reset OK` unverifiable) is now **partially reopened**. 2026-08-02 field-log
-verification caught a fresh, non-probe freeze: a runtime NACK burst on the compass — an established,
-previously-working device, not a boot-time probe — that also took down touch and the buzzer (shared
-bus), and on the next reboot `[I2C] Bus reset OK` / `[I2C] EXIO recovered after clock pulses` fired,
-meaning the bus was genuinely electrically wedged across the reboot. Root cause and trigger still
-unknown; recovery code appears to be doing real work this time. **Note**: serial silence is not a
-freeze — the console died for ~4 minutes in an earlier incident while the device ran perfectly.
-
-**Symptom**: reported twice in one session. Button, touchscreen, and display updates all stop
-responding. First time needed a full power cycle to clear; second time self-cleared when the device
-went to standby and woke back up.
-
-**Root cause**: a stuck I2C bus — a slave (touch/RTC/EXIO) left mid-transaction holds SDA low
-indefinitely, and an MCU-only reset doesn't free it, so every subsequent I2C transaction fails until
-the bus is explicitly clock-recovered. Wake-from-standby already does this recovery
-(`i2c_manager::reinit()`) as a side effect, which is why the second occurrence cleared itself.
-
-**Fix**: a new consecutive-I2C-failure counter feeds (1) a boot-time retry-with-recovery when the
-initial device ping fails, and (2) a runtime watchdog in System Task that proactively calls the same
-`reinit()` recovery standby-wake already proved works, instead of requiring a manual sleep/wake or
-power cycle.
-
-**Related, separately broken**: the on-screen DEV/perf HUD label stayed frozen after the second
-freeze recovered, while touch/button/sound/rotation all came back — a distinct, not-yet-root-caused
-bug, likely a dangling LVGL object pointer. Not fixed by the above.
-
-**Full detail**: [CHANGELOG.md](CHANGELOG.md) → Unreleased → Fixed ·
-[ADR-0003](docs/adr/0003-proactive-i2c-bus-recovery-watchdog.md) ·
-[`docs/performance_optimization_backlog.md`](docs/performance_optimization_backlog.md) → work queue
-(what to watch for in the field)
-
----
-
-### FT-07: UI Freeze Regression — PRIORITY, needs full investigation
-**Severity**: Critical — full interface freeze
-**Status**: reported 2026-08-02, on the firmware built at commit `9ae6368` (WP-5, compass Level 2
-3-axis calibration) — **not** the WP-6 tilt-bench build, which had not been flashed yet at the time of
-the report. User's own words: *"the interface is frozen again... this was not happening before."*
-
-**Repro detail from the user**: device was **idle on Settings > DEV tab, nothing was being done** —
-no touch input, no calibration in progress, no visible overlay. This is a meaningful constraint: it
-rules out anything that requires an active user action or a visibly-open modal, and points at
-something that can freeze the UI Task with **zero interaction**.
-
-**Leading candidate given that constraint: [[FT-06]] recurring**, not a new bug. Touch and button
-polling run on the **UI Task** itself (`memory/MEMORY.md` Task Architecture), guarded by the shared
-I2C bus mutex. If the bus is wedged (FT-06's mechanism — a slave left mid-transaction holding SDA low),
-a touch-poll call blocking on that mutex would freeze the *entire* UI Task loop, including rendering —
-which looks exactly like "idle, frozen, nothing was being done," and needs no calibration UI, no
-overlay, no specific tab. This fits the reported symptom better than the alternative below.
-
-**Investigated and demoted**: WP-5's calibration overlay (`g_cal_timer`, `g_cal_overlay` — created as
-a child of `lv_scr_act()`, `src/ui/settings_screen.cpp:287`) staying alive across a screen rebuild.
-Read `navigation.cpp`'s `goToSettingsScreen()` looking for exactly this — it does call
-`lv_obj_del(old_screen)` without going through the overlay's own Cancel/Save cleanup, **but** nothing
-between that delete and `settings_screen::create()`'s own timer cleanup (line 584) calls
-`lv_timer_handler()`, and LVGL only advances timers when that function runs — so the two calls are
-synchronous with no window for `g_cal_timer` to fire on freed objects via this path. Also: an open
-overlay would be visibly on screen (parented to the whole settings screen, not a single tab), which
-contradicts "nothing was being done." Not ruled out entirely (there may be another way to strand the
-overlay open that wasn't checked), but it no longer fits this specific report as well as FT-06 does.
-
-**Not yet confirmed. No serial/crash log, no confirmation of whether it self-cleared or needed a power
-cycle.** Do not treat FT-06 as confirmed either — this is the better-fitting hypothesis given the repro
-detail, not proven. Get that missing information (self-cleared vs. power cycle, duration, any serial
-output) before writing recovery code aimed at FT-06 specifically.
-
----
-
 ### FT-03: Zoom Levels Not Progressive
 **Severity**: Medium — navigation confusion
 
@@ -123,11 +51,22 @@ stays sharp).
   the Render Pipeline section says not to add work to lightly)
 - Cost: any per-pixel work in the flush path competes with the frame budget documented in "Render
   Pipeline" above (currently ~85ms/frame, bus-bound) — needs a real measurement, not an assumption
-- Simpler alternative: LVGL theme/font swap only (pixel font, no scanlines) — near-zero render cost,
-  weaker effect
+- ~~Simpler alternative: LVGL theme/font swap only~~ — **chosen 2026-08-04**, scanline/per-pixel route
+  rejected. Font-only stays open as a *scope*, not a decision, until it's actually built.
+
+**2026-08-04 scoping pass (font-only route), not yet built**: LVGL ships a built-in pixel/bitmap font
+(`LV_FONT_UNSCII_8`/`LV_FONT_UNSCII_16`) currently disabled in `include/ui/lv_conf.h` — enabling it is
+one line and near-zero flash/RAM cost, no asset conversion needed. The actual work is bigger than that
+one line: fonts are set directly via `lv_obj_set_style_text_font()` at **123 call sites across 7 screen
+files** (`ui_manager.cpp`, `waypoint_screen.cpp`, `navigation.cpp`, `dev_screen.cpp`,
+`settings_screen.cpp`, `tilt_bench_screen.cpp`, `field_log_screen.cpp`), and UNSCII's fixed small pixel
+size differs from Iosevka's 14/16/20px sizing, so a runtime toggle risks shifting label spacing/layout
+across every screen — needs on-device visual verification per screen, not just a build check. Not
+started; picking this up should budget for that breadth, not treat it as a one-line settings toggle.
 
 **Key files**: `src/core/device_manager.cpp` (flush callback, if a per-pixel effect is chosen),
-`src/ui/settings_screen.cpp` (toggle), LVGL theme/font config if font-only
+`src/ui/settings_screen.cpp` (toggle), `include/ui/lv_conf.h` (`LV_FONT_UNSCII_8/16`), the 7 screen
+files above (font call sites) if font-only
 
 ---
 
@@ -139,6 +78,16 @@ stays sharp).
 **The SRAM ceiling that motivated this cap is gone** — see Resolved below: `desc`/`hint` moved to PSRAM, freeing ~64 KB. `MAX_WAYPOINTS` itself has **not** been raised yet; this entry is now just that remaining step.
 
 **Note on the render side**: the cap is *not* what limits drawing. `drawWaypoints()` culls by distance before drawing (`navigation.cpp:633`) and renders only the fixed waypoint when one is selected (`navigation.cpp:614`), so draw cost scales with *visible* waypoints. What does scale with the cap is the per-waypoint Haversine loop — and the ESP32-S3 FPU is single-precision only, so all that `double` trig is soft-float. Read `wpt_us` off the `perf` HUD before raising the cap; §3.6 of the perf backlog proposes an equirectangular approximation that would cut it.
+
+**2026-08-04 investigation complete, no code changed yet**: SRAM math confirmed clean (`sizeof(Waypoint)`
+measured at 144 B, not assumed — raising the cap to 500 costs +63.3 KB SRAM / +562.5 KB PSRAM, landing
+static RAM at ~60.4%, close to a level this project already ran on safely pre-PSRAM-migration) and every
+other `MAX_WAYPOINTS` call site audited (no hidden LVGL/stack scaling risk — one real bug found:
+`updateWaypointCountLabel()`'s color thresholds are hardcoded to a cap of 50 and need to scale with it).
+The per-waypoint Haversine loop (10 double transcendental calls/waypoint, unconditional, before the
+distance filter) is flagged as the one real unverified risk — recommendation is to land the §3.6
+equirectangular rewrite first and field-verify `wpt_us` at a real high waypoint count before picking a
+final number. Full analysis: [`docs/waypoint_cap_increase_investigation.md`](docs/waypoint_cap_increase_investigation.md).
 
 **Key files**: `include/ui/ui_manager.h` (`Waypoint`, `MAX_WAYPOINTS`), `src/gpx/gpx_loader.cpp`
 
@@ -213,6 +162,39 @@ the heading bounce is gone. See CHANGELOG.md.
 ---
 
 ## Resolved
+
+### FT-06 / FT-07: I2C Bus Freeze / UI Freeze Regression — Resolved (2026-08-05)
+**Was**: a recurring full or partial interface freeze (button, touch, display all unresponsive),
+reported across four occurrences 2026-07-31 to 2026-08-02, needing a manual power cycle at least once.
+FT-07 was the same bug recurring on Settings > DEV with zero user interaction.
+
+**Root cause**: a real ESP-IDF driver bug, not application logic — `i2c_master.c`'s NACK-handling
+busy-wait had no timeout bound at all (`components/esp_driver_i2c`, pinned IDF 5.5.0), so any I2C call
+that NACKed without the hardware autonomously completing the STOP condition spun the calling task
+forever, bypassing the application's own timeout entirely. Matches Espressif's own upstream issue
+[#17720](https://github.com/espressif/esp-idf/issues/17720), fixed in IDF v5.5.4 — three point releases
+past what PlatformIO's registry offers for the 5.5.x line, with the next available version a
+major-version jump (6.0.x) out of scope for one driver bug.
+
+**Resolution**: `scripts/patch_i2c_master_nack_hang.py` backports just the upstream timeout-bound fix
+into the vendored driver at build time (idempotent, portable via `PioPlatform().get_package_dir()`).
+`panic_on_timeout` (TWDT) stays on as a safety net for any other hang mechanism.
+
+**Field verification (2026-08-05)**: two consecutive sessions, ~10.5 hours of combined logged active
+runtime (~8h51m + ~1h48m), spanning an overnight standby/wake cycle and an unplanned power-loss
+recovery (the device was dropped mid-session). Zero freezes, zero `TASK_WDT`/`PANIC` reset reasons,
+unbroken 60s heartbeat cadence throughout both sessions (the freeze's signature is the heartbeat
+silently stopping — never observed), I2C failure rate ~0.01% in both, never enough to trip the
+consecutive-failure recovery watchdog ([ADR-0003](docs/adr/0003-proactive-i2c-bus-recovery-watchdog.md)).
+
+**Kept open, not blocking**: *why* this bus produces NACKs at all (signal integrity, bus voltage,
+clock-stretching, EXIO register corruption) is still unconfirmed — the patch bounds the hang regardless
+of the NACK's cause.
+
+**Full analysis**: [`docs/i2c_bus_freeze_investigation.md`](docs/i2c_bus_freeze_investigation.md) ·
+[ADR-0021](docs/adr/0021-i2c-nack-hang-build-time-backport.md)
+
+---
 
 ### GPX Manager Name Display + Logs Bulk Delete — Resolved (2026-08-04)
 **Was**: uploaded GPX filenames on the web upload page are bare geocache codes (e.g. `GC38EVJ.gpx`),

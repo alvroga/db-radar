@@ -40,12 +40,15 @@ bool ping(DeviceHandle& dev);
 // Full I2C bus scan (prints all detected devices)
 void scanBus();
 
-// Bus recovery — sends 9 SCL pulses to unstick any slave holding SDA low.
+// FSM-level bus reset. Does NOT send clock-recovery pulses on ESP32-S3 despite
+// its name and ESP-IDF's docs — see the comment above its definition in
+// i2c_manager.cpp. Real clock-pulse recovery is bitBangClockRecovery() (internal),
+// run automatically by init()/reinit() before the I2C peripheral claims the pins.
 bool resetBus();
 
-// Full re-initialization: tears down all device handles and bus, then re-inits.
-// Use after standby wake — more reliable than resetBus() when the I2C controller
-// FSM is stuck and physical recovery pulses alone are not enough.
+// Full re-initialization: tears down all device handles and bus, then re-inits
+// (which runs real bit-bang clock recovery on the freed pins before recreating
+// the bus). Use after standby wake or when the I2C controller FSM is stuck.
 bool reinit(const Config& config = Config{});
 
 struct Stats {
@@ -59,6 +62,24 @@ struct Stats {
     uint32_t consecutive_failures = 0;
 };
 const Stats& getStats();
+
+// Per-device forensic counters, added 2026-08-02 for the FT-06 freeze investigation
+// (docs/i2c_bus_freeze_investigation.md). Stats:: above is cross-device and existed first;
+// this exists because a wedge that starts on ONE device (e.g. a marginal compass connection)
+// looks identical to Stats:: until it's bad enough to fail everything — by then the ramp
+// that would have identified the culprit is gone.
+static constexpr int NUM_DEVICES = 6;
+struct DeviceStatSnapshot {
+    const char* name = "";
+    uint8_t addr = 0;
+    uint32_t ops = 0;
+    uint32_t fails = 0;
+    uint32_t consecutive_fails = 0;
+    uint32_t max_latency_us = 0;   // worst single transaction since boot
+    uint32_t ms_since_last_fail = 0xFFFFFFFF;  // 0xFFFFFFFF = never failed
+};
+// Fills out[0..NUM_DEVICES-1] in IMU_LOW, IMU_HIGH, RTC, TOUCH, EXIO, COMPASS order.
+void getDeviceStats(DeviceStatSnapshot out[NUM_DEVICES]);
 
 // Common device handles (defined in i2c_manager.cpp, registered at init)
 extern DeviceHandle IMU_DEVICE_LOW;   // 0x6A

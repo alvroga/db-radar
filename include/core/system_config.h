@@ -163,7 +163,12 @@ constexpr const char* HARDWARE_DESCRIPTION = "Hardware variant not selected";
 
 namespace communication {
     // I2C Configuration
-    constexpr uint32_t I2C_FREQ_HZ = 400000;     // 400kHz (can reduce to 100kHz if errors)
+    // Dropped 400kHz -> 100kHz 2026-08-02 as a diagnostic/mitigation experiment for the
+    // FT-06 bus-freeze investigation (docs/i2c_bus_freeze_investigation.md, T-B). At 100kHz
+    // a compass read is ~1ms and the bus is still >95% idle at the current 10Hz sensor rate,
+    // so this costs nothing functionally. If the marginal-signal-integrity theory is right,
+    // this alone may stop the freezes; if not, it's still a fully reversible one-line change.
+    constexpr uint32_t I2C_FREQ_HZ = 100000;     // 100kHz — was 400kHz, see comment above
     constexpr int I2C_TIMEOUT_MS = 100;
     constexpr int I2C_RETRY_COUNT = 3;
     constexpr int I2C_RETRY_DELAY_MS = 10;

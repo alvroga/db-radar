@@ -24,6 +24,17 @@ static void logging_toggle_event(lv_event_t* e) {
     if (code == LV_EVENT_VALUE_CHANGED) {
         bool enabled = lv_obj_has_state(logging_toggle, LV_STATE_CHECKED);
 
+        // init() is the only thing that allocates the buffer/mutex and opens the
+        // file — boot only calls it when logging was already enabled in NVS at
+        // that boot. Without this, flipping the toggle on mid-session leaves
+        // g_initialized false forever: setEnabled(true) makes isEnabled() report
+        // "yes" and flush() return success, but log() silently no-ops on every
+        // call and nothing ever reaches the SD card. init() is idempotent
+        // (no-op if already initialized), so it's safe to call every time.
+        if (enabled) {
+            system_logger::init();
+        }
+
         // Update system logger
         system_logger::setEnabled(enabled);
 

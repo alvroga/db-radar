@@ -72,3 +72,18 @@ not re-derived from the same reasoning that produced these numbers the first tim
 A second, unrelated bug was found alongside this one (the on-screen DEV/perf HUD label staying frozen
 after an otherwise-successful recovery) and is explicitly **not** addressed by this decision — see
 `docs/performance_optimization_backlog.md` → work queue → "Open bugs" for that follow-up.
+
+## Update, 2026-08-05
+
+FT-06 is now resolved — see [ADR-0021](0021-i2c-nack-hang-build-time-backport.md) and
+`docs/i2c_bus_freeze_investigation.md`, "Field Verification, 2026-08-05". The actual fix was a
+different mechanism than this ADR anticipated: not a wedged bus needing bus-level recovery, but a
+single I2C call inside the driver itself hanging forever past its own timeout (an ESP-IDF bug,
+`i2c_master.c`'s unbounded NACK-wait), patched by bounding that wait, not by this watchdog.
+
+This watchdog **never fired** during the ~10.5h field verification — zero `I2C_HEALTH` log lines,
+`consecutive_failures` never reached 10. That's consistent with the two fixes targeting different
+failure modes: this ADR's mechanism (a fully wedged bus, SDA stuck low) never occurred in that test, so
+"gave up / open risk" above — never verified against a real bus wedge — is still true today. The
+watchdog remains in place as a safety net for that separate, still-hypothetical scenario; it did not
+need to be, and was not, the thing that closed FT-06.

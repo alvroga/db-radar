@@ -14,6 +14,7 @@
 #include "hardware/connectivity/beacon_proximity.h"
 #include "hardware/buzzer.h"
 #include "hardware/sensors/compass_qmc5883l.h"
+#include "hardware/i2c/i2c_manager.h"
 #include "core/arduino_compat.h"
 #include <cfloat>
 #include <cmath>
@@ -1354,10 +1355,16 @@ void updateRadarDisplay() {
         // Frame = label + refr. paint is shown for attribution but is INSIDE refr.
         uint32_t total_ms_x10 = label_ms_x10 + refr_ms * 10;
 
+        // I2C health, added 2026-08-02 for the FT-06 freeze investigation — this is
+        // the only live telemetry channel in the field, since a freeze happens on
+        // battery where serial isn't attached. Cheap: reads counters, no I2C traffic.
+        const auto& i2c_stats = i2c_manager::getStats();
+
         lv_label_set_text_fmt(ui.perf_label,
                               "grid %u wpt %u rot %u ms\n"
                               "paint %u.%ums (in refr %ums)\n"
-                              "total %u.%ums  %d.%d fps",
+                              "total %u.%ums  %d.%d fps\n"
+                              "i2c fail %lu/%lu consec %lu",
                               (unsigned)(g_nav_state.grid_us / 1000),
                               (unsigned)(g_nav_state.wpt_us / 1000),
                               (unsigned)(g_nav_state.rot_us / 1000),
@@ -1365,7 +1372,10 @@ void updateRadarDisplay() {
                               (unsigned)refr_ms,
                               (unsigned)(total_ms_x10 / 10),
                               (unsigned)(total_ms_x10 % 10),
-                              (int)s_fps, (int)((s_fps - (int)s_fps) * 10));
+                              (int)s_fps, (int)((s_fps - (int)s_fps) * 10),
+                              (unsigned long)i2c_stats.failed_ops,
+                              (unsigned long)i2c_stats.total_ops,
+                              (unsigned long)i2c_stats.consecutive_failures);
     }
 }
 

@@ -25,6 +25,15 @@ constexpr size_t MAX_LOG_SIZE = 512 * 1024;     // 512KB max file size
 constexpr size_t BUFFER_SIZE = 8192;            // 8KB RAM buffer
 constexpr uint32_t FLUSH_INTERVAL_MS = 30000;   // Flush every 30 seconds
 
+// Per-boot rotation: init() renames any existing system.log to system_1.log (and
+// shifts system_1..N-1 down) before starting a fresh one, instead of appending
+// forever into a single file. A single continuous file meant a crash's log lines
+// could be silently destroyed by MAX_LOG_SIZE truncation during normal operation
+// AFTER the reboot that followed the crash — the one boot you actually need intact
+// was not distinguished from the ones after it. Keeping N rotated files means the
+// crashing boot survives at least N power cycles before it ages out.
+constexpr int MAX_ROTATED_LOGS = 5;
+
 // =============================================================================
 // LOG LEVELS
 // =============================================================================

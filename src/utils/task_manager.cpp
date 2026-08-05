@@ -66,6 +66,7 @@ static void updateMemoryStats();
 static void updateStatusLabels();
 static void checkTaskHealth();
 static void checkI2CBusHealth(uint32_t now);
+static void logDeviceStatsSummary(const char* context);
 static void flushRadarRender();
 
 // =============================================================================
@@ -559,24 +560,71 @@ static void systemTask(void* parameter) {
             system_logger::flush();
         }
 
-        // PERIODIC HEARTBEAT LOG (every 2 minutes)
+        // PERIODIC HEARTBEAT LOG (every 60s — was 120s; halved 2026-08-02 so the SD
+        // log has enough resolution to be useful for the FT-06 freeze investigation.
+        // The dev_mode boot banner used to claim 30s here without it being true —
+        // see the comment at its print site in main.cpp.)
         // =========================================================================
         static uint32_t last_heartbeat_log = 0;
-        if (now - last_heartbeat_log >= 120000) {
+        if (now - last_heartbeat_log >= 60000) {
             last_heartbeat_log = now;
 
             uint32_t uptime_min = now / 60000;
             uint32_t heap_free = esp_get_free_heap_size();
+            // Largest contiguous free block, not just total free bytes — a long session
+            // with churn (waypoint loads, screen create/destroy) can hold plenty of free
+            // heap while fragmenting it into pieces too small for the next allocation.
+            // Free-bytes-only would show "fine" right up to the allocation that fails.
+            uint32_t heap_largest_block = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+            const auto& i2c_stats = i2c_manager::getStats();
+            const auto& nav_state = navigation::getNavState();
+            uint32_t frame_ms = nav_state.label_us / 1000 + nav_state.refr_ms;
 
-            char heartbeat_msg[128];
+            char heartbeat_msg[224];
             snprintf(heartbeat_msg, sizeof(heartbeat_msg),
-                     "Up=%lum Heap=%lu UI=%s I2C=%s GPS=%s",
-                     uptime_min, heap_free,
+                     "Up=%lum Heap=%lu(largest=%lu) Frame=%lums UI=%s I2C=%s GPS=%s | "
+                     "i2c_ops=%lu i2c_fails=%lu i2c_consec=%lu",
+                     uptime_min, heap_free, heap_largest_block, (unsigned long)frame_ms,
                      system_stats.ui_task.is_healthy ? "OK" : "FAIL",
                      system_stats.i2c_task.is_healthy ? "OK" : "FAIL",
-                     dev_state.last_gps_data.valid ? "FIX" : "NO");
+                     dev_state.last_gps_data.valid ? "FIX" : "NO",
+                     (unsigned long)i2c_stats.total_ops, (unsigned long)i2c_stats.failed_ops,
+                     (unsigned long)i2c_stats.consecutive_failures);
 
             system_logger::info("HEALTH", heartbeat_msg);
+
+            // Per-device breakdown, same cadence — see docs/i2c_bus_freeze_investigation.md
+            // "Things to try" #7. Cheap: getDeviceStats() only reads counters, no I2C traffic.
+            logDeviceStatsSummary("I2C_STATS");
+        }
+
+        // EXIO register canary — every ~10s, read back CONFIG (must stay 0x00, all
+        // pins as outputs) and OUTPUT (must match the in-RAM shadow) and flag any
+        // mismatch. Catches silent register corruption that a NACK/timeout counter
+        // can't see — see E4 in docs/i2c_bus_freeze_investigation.md (EXIO read
+        // 0x3F pre-freeze vs 0x7F post-power-cycle, on a bit no firmware ever writes).
+        static uint32_t last_exio_canary = 0;
+        if (now - last_exio_canary >= 10000 && dev_state.exio_state != nullptr) {
+            last_exio_canary = now;
+
+            uint8_t cfg_readback = 0xFF;
+            uint8_t out_readback = 0xFF;
+            bool cfg_ok = i2c_manager::exio::rawRead(i2c_manager::exio::REG_CONFIG, cfg_readback);
+            bool out_ok = i2c_manager::exio::readOutput(out_readback);
+
+            if (cfg_ok && cfg_readback != 0x00) {
+                char msg[96];
+                snprintf(msg, sizeof(msg), "CONFIG readback=0x%02X, expected 0x00", cfg_readback);
+                system_logger::error("EXIO_CANARY", msg);
+                Serial.printf("[EXIO] CANARY MISMATCH: %s\n", msg);
+            }
+            if (out_ok && out_readback != dev_state.exio_state->out) {
+                char msg[96];
+                snprintf(msg, sizeof(msg), "OUTPUT readback=0x%02X, shadow=0x%02X",
+                         out_readback, dev_state.exio_state->out);
+                system_logger::error("EXIO_CANARY", msg);
+                Serial.printf("[EXIO] CANARY MISMATCH: %s\n", msg);
+            }
         }
 
         // Update peripheral health monitoring
@@ -1045,6 +1093,34 @@ static void checkTaskHealth() {
     }
 }
 
+// Formats and logs a one-line-per-device I2C forensic summary (ops/fails/
+// consecutive/worst latency/time since last failure). Used both by the wedge
+// detector below (captured at the moment recovery triggers) and by the
+// periodic heartbeat, so a postmortem on the SD log can see which device
+// started failing first and whether it was a ramp or a cliff.
+// See docs/i2c_bus_freeze_investigation.md, "Things to try" #7.
+static void logDeviceStatsSummary(const char* context) {
+    i2c_manager::DeviceStatSnapshot snap[i2c_manager::NUM_DEVICES];
+    i2c_manager::getDeviceStats(snap);
+    for (int i = 0; i < i2c_manager::NUM_DEVICES; i++) {
+        const auto& d = snap[i];
+        if (d.ops == 0) continue;  // never touched this boot — nothing to report
+        char msg[160];
+        if (d.ms_since_last_fail == 0xFFFFFFFF) {
+            snprintf(msg, sizeof(msg),
+                     "%s ops=%lu fails=0 max_lat=%luus",
+                     d.name, (unsigned long)d.ops, (unsigned long)d.max_latency_us);
+        } else {
+            snprintf(msg, sizeof(msg),
+                     "%s ops=%lu fails=%lu consec=%lu max_lat=%luus last_fail=%lums_ago",
+                     d.name, (unsigned long)d.ops, (unsigned long)d.fails,
+                     (unsigned long)d.consecutive_fails, (unsigned long)d.max_latency_us,
+                     (unsigned long)d.ms_since_last_fail);
+        }
+        system_logger::logf(system_logger::Level::INFO, context, "%s", msg);
+    }
+}
+
 // Runtime I2C bus wedge detector — self-heals a bus jammed by a slave (touch,
 // RTC, EXIO) left mid-transaction, the same failure mode documented in
 // docs/troubleshooting.md's boot-hang entry, but occurring mid-session
@@ -1097,6 +1173,12 @@ static void checkI2CBusHealth(uint32_t now) {
     Serial.printf("[I2C] %lu consecutive failures — bus appears wedged, attempting recovery #%u/%u\n",
                   (unsigned long)consecutive, recovery_attempts, MAX_RECOVERY_ATTEMPTS);
     system_logger::warn("I2C_HEALTH", "Bus wedged — attempting reinit recovery");
+
+    // Capture per-device state at the moment of detection — this is the sample
+    // that matters, since a full wedge often forces a power cycle a few
+    // seconds later that would otherwise take the in-RAM log buffer with it.
+    logDeviceStatsSummary("I2C_HEALTH");
+    system_logger::flush();
 
     Serial.println(i2c_manager::reinit() ? "[I2C] Recovery reinit reported success"
                                           : "[I2C] Recovery reinit reported failure");

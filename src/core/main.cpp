@@ -102,12 +102,19 @@ extern "C" void app_main() {
                 Serial.println("[DEV] DEV MODE ACTIVE at boot");
                 Serial.println("[DEV] ==========================================");
 
+                // This banner used to claim UI Task checkpoints, button events, and
+                // queue operations were logged to SD — none of those were ever wired
+                // up, and it said "30 seconds" while the code said 120. Found and
+                // fixed 2026-08-02 while building I2C forensic logging for FT-06
+                // (docs/i2c_bus_freeze_investigation.md): a banner nobody could see
+                // failing next to the one real log line (a 2-minute heartbeat) is
+                // exactly why the SD log looked "almost empty" in the field. Describe
+                // only what actually happens now.
                 system_logger::info("DEV", "==========================================");
-                system_logger::info("DEV", "DEV MODE VERBOSE LOGGING ENABLED");
-                system_logger::info("DEV", "- UI Task checkpoints: every 100 loops");
-                system_logger::info("DEV", "- Button events: logged to SD");
-                system_logger::info("DEV", "- Queue operations: logged to SD");
-                system_logger::info("DEV", "- Heartbeat interval: 30 seconds");
+                system_logger::info("DEV", "DEV MODE — SD LOGGING ACTIVE");
+                system_logger::info("DEV", "- I2C failures/slow ops: logged as they happen");
+                system_logger::info("DEV", "- I2C per-device stats + heartbeat: every 60s");
+                system_logger::info("DEV", "- EXIO register canary: every 10s");
                 system_logger::info("DEV", "==========================================");
             }
 
@@ -286,13 +293,22 @@ extern "C" void app_main() {
     Serial.println("[WATCHDOG] Initializing Task Watchdog Timer...");
     watchdog::Config wdt_config;
     wdt_config.timeout_seconds = 30;
-    wdt_config.panic_on_timeout = false;
+    // Panics (resets) on timeout instead of only logging. A System Task I2C call
+    // that blocks past its own driver timeout (see FT-06, 2026-08-02: two fast
+    // COMPASS ESP_ERR_INVALID_STATE hits at 04:24, then total silence with
+    // i2c_consec=0 and no next boot in system(3).log) is invisible to
+    // checkI2CBusHealth() — that detector only counts calls that return, so a
+    // hung call never reaches its 10-consecutive-failure threshold and the
+    // device just sits wedged forever. A TWDT reset turns that into a clean
+    // reboot instead, and the next boot's "Reset reason: TASK_WDT" confirms
+    // this was the mechanism if it recurs.
+    wdt_config.panic_on_timeout = true;
     wdt_config.enable_idle_task = false;
 
     if (!watchdog::init(wdt_config)) {
         Serial.println("[WARN] Watchdog initialization failed");
     } else {
-        Serial.println("[WATCHDOG] TWDT initialized with 30s timeout");
+        Serial.println("[WATCHDOG] TWDT initialized with 30s timeout (panic=true)");
     }
 
     // Boot messages — declared here so they're in scope for both the pre-task
