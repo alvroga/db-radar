@@ -25,9 +25,12 @@ hoped, because darkened rows give up the pass's bulk `memcpy` for a scalar per-p
 cost turned out not to be the deciding factor: on-device visual check showed a ~20% perceived brightness
 loss on a display already run near the floor of outdoor readability, which was rejected outright.
 **Fully reverted** — `device_manager.cpp`, `device_manager.h`, `diagnostics.cpp` are byte-identical to
-before the experiment (verified via `git diff`), nothing shipped. Font-only remains the only live route
-for this backlog item, still unbuilt. Full writeup:
-[ADR-0026](docs/adr/0026-crt-scanline-brightness-rejected.md) · ROADMAP.md → "CRT / 8-bit Display Theme".
+before the experiment (verified via `git diff`), nothing shipped. The font-only fallback scoped
+2026-08-04 was reconsidered afterward and **won't be pursued either** — the investigation was about the
+CRT/8-bit scanline *look*, not the font in isolation, and a font swap alone doesn't deliver that look.
+Whole backlog item closed. Full writeup:
+[ADR-0026](docs/adr/0026-crt-scanline-brightness-rejected.md) · ROADMAP.md → "Won't Fix" →
+"CRT / 8-bit Display Theme".
 
 **Version scheme changed from vYY.MM.DD to vYY.MM.## (2026-08-06)**
 

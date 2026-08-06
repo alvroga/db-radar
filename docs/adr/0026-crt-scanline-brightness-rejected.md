@@ -60,10 +60,13 @@ other already-accepted stage-to-stage variance in this pipeline.
 not on an unmeasured cost assumption. Nothing about the *performance* question needs revisiting — it was
 answered directly, not modeled.
 
-**Font-only (`LV_FONT_UNSCII_8/16`) is now the only live route** for this backlog item, upgraded from
-"first choice" to "the only one left standing." It remains unbuilt; the 2026-08-04 scoping (123
-`lv_obj_set_style_text_font()` call sites across 7 screen files, UNSCII's fixed pixel size vs. Iosevka's
-14/16/20px sizing) still applies unchanged.
+**Font-only (`LV_FONT_UNSCII_8/16`) was reconsidered as the last remaining route, then also closed
+(2026-08-06, same day).** It was only ever the fallback if scanlines proved infeasible — the actual ask
+was the CRT/8-bit scanline *look*, not the font by itself. With scanlines rejected on brightness, a
+standalone font swap doesn't deliver what was asked for, and it isn't worth building on its own given
+the layout-risk audit the 2026-08-04 scoping identified (123 `lv_obj_set_style_text_font()` call sites
+across 7 screen files, UNSCII's fixed pixel size vs. Iosevka's 14/16/20px sizing). The whole "CRT / 8-bit
+Display Theme" backlog item is closed; see ROADMAP.md → "Won't Fix".
 
 **A brightness-recoverable variant was not explored and is explicitly out of scope for now**: e.g.
 compensating darkened rows with a backlight/global brightness bump, or a lighter darken factor than a

@@ -59,51 +59,6 @@ before any code or ADR.
 
 ---
 
-### CRT / 8-bit Display Theme *(low priority)*
-**Severity**: Cosmetic — user preference, no functional impact
-
-**Ask**: the 480×480 IPS panel renders very sharp/clean; add a toggleable visual style that leans
-retro — scanlines, a coarser/pixelated font or dithering, maybe a subtle phosphor-glow color grade —
-to evoke a CRT / 8-bit look. Should be a **setting**, not a replacement of the current look (default
-stays sharp).
-
-**2026-08-06: scanline/per-pixel route built, tested on hardware, and reverted — rejected on
-brightness, not performance.** A halve-brightness darken on alternate output rows was added inline to
-`rotate90_tiled`'s existing scatter pass (behind a `rot scanline on|off` serial toggle, no persisted
-state, no UI), on the theory examined below that it could ride the pass "for free." Measured on real
-hardware: `tiled rotate` 38.9ms → 42.1ms, frame 80.2ms → 86.2ms (+6ms, ~7.5%) — a real, non-zero cost
-(see ADR-0026 for why: half the destination rows lose the bulk `memcpy` and fall back to a scalar
-per-pixel store loop), but small enough that it wasn't the blocker. **Killed instead by ~20% perceived
-brightness loss** on a display already run near its readability floor outdoors — unacceptable
-regardless of render cost. Code fully reverted (`git diff` clean against the pre-test commit); nothing
-of this experiment ships. Full writeup: [ADR-0026](docs/adr/0026-crt-scanline-brightness-rejected.md).
-- Where do scanlines/dither come from — a static overlay image blended over the framebuffer, or a
-  per-pixel effect in the flush callback (`rotate90_tiled` in `device_manager.cpp` already touches
-  every pixel each frame, so a color/scanline pass could ride along, but that's the exact hot path
-  the Render Pipeline section says not to add work to lightly) — **answered above: per-pixel is
-  feasible and its cost is real but small; it's dead anyway on the brightness finding.**
-- Cost: any per-pixel work in the flush path competes with the frame budget documented in "Render
-  Pipeline" above (currently ~85ms/frame, bus-bound) — **measured 2026-08-06, see above: +6ms/frame.**
-- ~~Simpler alternative: LVGL theme/font swap only~~ — **chosen 2026-08-04**, scanline/per-pixel route
-  rejected (font-only). **Reaffirmed 2026-08-06** after the scanline route was actually built and
-  killed on brightness — font-only is now the *only* live route, not just the first choice. Still not
-  yet built.
-
-**2026-08-04 scoping pass (font-only route), not yet built**: LVGL ships a built-in pixel/bitmap font
-(`LV_FONT_UNSCII_8`/`LV_FONT_UNSCII_16`) currently disabled in `include/ui/lv_conf.h` — enabling it is
-one line and near-zero flash/RAM cost, no asset conversion needed. The actual work is bigger than that
-one line: fonts are set directly via `lv_obj_set_style_text_font()` at **123 call sites across 7 screen
-files** (`ui_manager.cpp`, `waypoint_screen.cpp`, `navigation.cpp`, `dev_screen.cpp`,
-`settings_screen.cpp`, `tilt_bench_screen.cpp`, `field_log_screen.cpp`), and UNSCII's fixed small pixel
-size differs from Iosevka's 14/16/20px sizing, so a runtime toggle risks shifting label spacing/layout
-across every screen — needs on-device visual verification per screen, not just a build check. Not
-started; picking this up should budget for that breadth, not treat it as a one-line settings toggle.
-
-**Key files** (font-only is the only live route — see above): `src/ui/settings_screen.cpp` (toggle),
-`include/ui/lv_conf.h` (`LV_FONT_UNSCII_8/16`), the 7 screen files above (font call sites)
-
----
-
 ### Waypoint Memory Optimization — cap raised 50 → 500, then rolled back to 200 after a boot failure ✅ resolved at 200
 **Severity**: Medium — real GPX files get silently truncated above the cap
 
@@ -375,6 +330,37 @@ device.
 ---
 
 ## Won't Fix
+
+### CRT / 8-bit Display Theme — investigation closed (2026-08-06)
+**Was**: the 480×480 IPS panel renders very sharp/clean; ask was a toggleable retro visual style —
+scanlines, a coarser/pixelated font or dithering, a subtle phosphor-glow color grade — to evoke a
+CRT / 8-bit look, as a **setting** (default stays sharp).
+
+**What the investigation was actually about**: the CRT/8-bit *look* — scanlines and the per-pixel
+darken pattern — not the font. The font swap was only ever considered as a fallback if the real
+(scanline) route turned out infeasible.
+
+**2026-08-06: scanline/per-pixel route built, tested on hardware, and reverted — rejected on
+brightness, not performance.** A halve-brightness darken on alternate output rows was added inline to
+`rotate90_tiled`'s existing scatter pass (behind a `rot scanline on|off` serial toggle, no persisted
+state, no UI). Measured on real hardware: `tiled rotate` 38.9ms → 42.1ms, frame 80.2ms → 86.2ms
+(+6ms, ~7.5%) — a real, non-zero cost (half the destination rows lose the bulk `memcpy` and fall back
+to a scalar per-pixel store loop, see ADR-0026), but small enough that it wasn't the blocker. **Killed
+by ~20% perceived brightness loss** on a display already run near its readability floor outdoors —
+unacceptable regardless of render cost. Code fully reverted (`git diff` clean against the pre-test
+commit); nothing of this experiment ships. Full writeup:
+[ADR-0026](docs/adr/0026-crt-scanline-brightness-rejected.md).
+
+**Decision: closed, not deferred to the font-only fallback.** A 2026-08-04 scoping pass had sized a
+font-only route (LVGL's `LV_FONT_UNSCII_8/16`, 123 `lv_obj_set_style_text_font()` call sites across 7
+screen files, layout-risk from UNSCII's fixed pixel size vs. Iosevka's 14/16/20px) as the fallback if
+scanlines didn't work out. With scanlines rejected, that fallback was reconsidered on its own and
+**won't be pursued** — a font swap alone doesn't deliver the CRT/8-bit *look* the ask was for, and
+building it as a standalone feature disconnected from that look isn't worth the 7-screen layout-risk
+audit it would require. If a genuine CRT/retro theme is wanted again later, treat it as a new ask and
+re-scope from scratch rather than resuming the font-only branch.
+
+---
 
 ### FT-02: Compass Zoom-Dependent Smoothing
 **Was**: At large zoom levels (1km, 5km) compass noise produces visible jitter.
