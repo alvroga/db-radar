@@ -1054,8 +1054,8 @@ void handleGPXCommand(const char* args) {
     }
     else if (strncmp(args, "index gentest clean", 20) == 0) {
         // Removes the file gentest writes, and reloads so it drops out of the
-        // working set. Debug-only, run after gentest to leave the SD card clean.
-        const char* path = "/sdcard/gpx/CLAUDE_NEARBY_TEST.GPX";
+        // working set. Debug-only, run after gentest to leave the GPX folder clean.
+        const char* path = "/ffat/gpx/CLAUDE_NEARBY_TEST.GPX";
         if (remove(path) == 0) {
             Serial.printf("[GPX] Removed %s\n", path);
         } else {
@@ -1065,7 +1065,7 @@ void handleGPXCommand(const char* args) {
         Serial.printf("[GPX] Reload after cleanup: %d in working set\n", in_set);
     }
     else if (strncmp(args, "index gentest", 13) == 0) {
-        // Debug-only: writes a real GPX file straight to the SD card (no WiFi/
+        // Debug-only: writes a real GPX file straight to the GPX folder (no WiFi/
         // upload needed) with waypoints scattered near a given center, then runs
         // a real full reload. Exercises buildFileIndex()+selectAndMaterialize()
         // against genuinely fresh file content, and stress-tests the sort with
@@ -1079,7 +1079,7 @@ void handleGPXCommand(const char* args) {
             if (count <= 0) count = 50;
             if (count > 500) count = 500;
 
-            const char* path = "/sdcard/gpx/CLAUDE_NEARBY_TEST.GPX";
+            const char* path = "/ffat/gpx/CLAUDE_NEARBY_TEST.GPX";
             FILE* f = fopen(path, "w");
             if (!f) {
                 Serial.printf("[GPX] ERROR: failed to create %s\n", path);

@@ -62,6 +62,7 @@ struct DeviceState {
     bool touch_ok = false;
     bool lvgl_ok = false;
     bool button_ok = false;
+    bool ffat_ok = false;
 
     // SD card info
     uint32_t sd_mb = 0;
@@ -100,6 +101,7 @@ bool initCompass();
 bool initAccel();
 bool initLCD(const Config& config);
 bool initSD(const Config& config);
+bool initFFat();
 bool initBacklight(const Config& config);
 bool initLVGL(const Config& config);
 bool initTouch();

@@ -165,8 +165,12 @@ bool initializeAll(const Config& config) {
         return false;
     }
 
-    // 8. SD Card - Optional storage
+    // 8. SD Card - Optional storage (dev-mode logging)
     g_device_state.sd_ok = initSD(g_config);
+
+    // 8b. FFat - primary GPX waypoint storage (see ADR-0024). Independent of SD/EXIO,
+    // mounted here purely to land before gpx_loader::init()/gpx_server::init() in main.cpp.
+    g_device_state.ffat_ok = initFFat();
 
     // 9. Backlight - Required for visibility
     g_device_state.backlight_ok = initBacklight(g_config);
@@ -586,6 +590,33 @@ bool initSD(const Config& config) {
     return true;
 }
 
+// Primary GPX waypoint storage (see ADR-0024) — wear-levelled FAT on the "ffat"
+// partition defined in partitions_ota.csv. Formats on first boot after a repartition
+// (fresh/resized partition has no valid FAT superblock yet); every boot after that
+// mounts the existing filesystem unchanged.
+static wl_handle_t g_ffat_wl_handle = WL_INVALID_HANDLE;
+
+bool initFFat() {
+    esp_vfs_fat_mount_config_t mount_config = {};
+    mount_config.format_if_mount_failed = true;
+    mount_config.max_files = 4;
+    mount_config.allocation_unit_size = 4096;
+
+    esp_err_t ret = esp_vfs_fat_spiflash_mount_rw_wl("/ffat", "ffat", &mount_config,
+                                                      &g_ffat_wl_handle);
+    if (ret != ESP_OK) {
+        Serial.printf("[FFAT] Mount failed: %s\n", esp_err_to_name(ret));
+        return false;
+    }
+
+    uint64_t total_bytes = 0, free_bytes = 0;
+    esp_vfs_fat_info("/ffat", &total_bytes, &free_bytes);
+    Serial.printf("[FFAT] Mounted successfully: %llu KB total, %llu KB free\n",
+                  (unsigned long long)(total_bytes / 1024), (unsigned long long)(free_bytes / 1024));
+
+    return true;
+}
+
 bool initBacklight(const Config& config) {
     backlight::Cfg bl;
     bl.pin = config.lcd_bl;
@@ -900,6 +931,7 @@ void logDeviceStatus() {
     Serial.printf("SD:        %s", g_device_state.sd_ok ? "OK" : "FAIL");
     if (g_device_state.sd_ok) Serial.printf(" (%u MB)", (unsigned)g_device_state.sd_mb);
     Serial.println();
+    Serial.printf("FFat:      %s\n", g_device_state.ffat_ok ? "OK" : "FAIL");
     Serial.printf("Backlight: %s\n", g_device_state.backlight_ok ? "OK" : "FAIL");
     Serial.printf("LVGL:      %s\n", g_device_state.lvgl_ok ? "OK" : "FAIL");
     Serial.printf("Touch:     %s\n", g_device_state.touch_ok ? "OK" : "FAIL");

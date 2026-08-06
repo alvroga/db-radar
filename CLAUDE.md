@@ -205,9 +205,14 @@ board_build.f_flash = 80000000L
   default, never chosen for this project; see [ADR-0024](docs/adr/0024-ota-partitions-grown-from-unused-ffat.md)).
   4MB was chosen over an initial same-day 3.5MB pass because OTA headroom needs a full USB reflash to
   grow again while FFat headroom is freeable anytime over the web portal — see the ADR's addendum.
-  FFat was, and as of this writing still is, completely unmounted — all real storage (GPX files,
-  logs) lives on the physical SD card today; moving GPX to FFat is planned but not yet implemented
-  (see ROADMAP.md).
+  FFat is now mounted (`device_manager::initFFat()`, `esp_vfs_fat_spiflash_mount_rw_wl()` at `/ffat`,
+  right after SD init in `initializeAll()`) and holds GPX waypoint files (`/ffat/gpx`) — moved off SD
+  the same day GPX-to-FFat was decided, see ROADMAP.md's "GPX Storage: Move from SD to FFat" (Resolved)
+  and CHANGELOG.md. `gpx_loader::init()` does a one-time boot migration from `/sdcard/gpx` if the FFat
+  folder is still empty, so upgrading doesn't orphan already-uploaded waypoints — **field-verified
+  2026-08-06**, pre-migration waypoints survived and loaded correctly from `/ffat/gpx`. Dev-only
+  logging (`system_logger`, `field_log`, `tilt_bench`) stays on the physical SD card, and its web
+  management page (`/logs`) is gated behind `dev_mode` (404 when off) — not specifically field-tested.
   (`partitions/partitions.csv` is the orphaned pre-OTA 3MB/10MB table — unused, see its header.)
 - **PSRAM**: octal PSRAM, 64-byte alignment for DMA/framebuffer allocations
 - **Flash**: 16MB, running **QIO** despite `flash_mode = dio` above
@@ -1113,13 +1118,20 @@ required for new work — tracked in `docs/adr/BACKFILL_PLAN.md`.
 
 *This document serves as the master reference for ESP32-S3 Touch LCD projects. Keep it updated as the architecture evolves.*
 
-**Last updated**: 2026-08-06 (OTA partitions grown 2MB → 4MB/slot, reclaimed from the previously-unused
-11.7MB FFat partition — revised same day from an initial 3.5MB pass once the reflash-vs-web-portal
-recoverability asymmetry was weighed against FFat's already-oversupplied headroom, see ADR-0024's
-addendum; decided GPX storage will move from SD to FFat since the enclosure makes the SD
-card inaccessible without disassembly — migration itself not yet implemented, see ADR-0024 and
-ROADMAP.md. Found in the same investigation: `field_log` has no teardown path, so dev-mode-off doesn't
-fully stop it — tracked as FT-08 in ROADMAP.md. Previously: 2026-08-05, two-tier waypoint index added
+**Last updated**: 2026-08-06 (`FW_VERSION` changed from `vYY.MM.DD` to `vYY.MM.##`, a per-build
+counter within the month recovered by parsing the previously committed `fw_version_gen.h` rather than
+a separate state file — see ADR-0025. Same day, earlier: GPX storage moved from SD to FFat, with a
+one-time boot migration for already-uploaded files and a storage-usage gauge on the web GPX manager;
+the web `/logs` page and its endpoints are now gated behind `dev_mode` (404 when off), and its info
+text now states plainly that logs live on SD while GPX now lives on flash — **field-verified
+2026-08-06**, pre-migration waypoints survived and load correctly from FFat (the logs-page gating and
+bulk select/download UI not specifically exercised), see ROADMAP.md's
+"GPX Storage: Move from SD to FFat" and CHANGELOG.md. Same day, earlier: OTA partitions grown 2MB →
+4MB/slot, reclaimed from the previously-unused 11.7MB FFat partition — revised same day from an
+initial 3.5MB pass once the reflash-vs-web-portal recoverability asymmetry was weighed against FFat's
+already-oversupplied headroom, see ADR-0024's addendum. Found in the same investigation: `field_log`
+has no teardown path, so dev-mode-off doesn't fully stop it — tracked as FT-08 in ROADMAP.md.
+Previously: 2026-08-05, two-tier waypoint index added
 — PSRAM full index + SRAM closest-N working set, `MAX_WAYPOINTS` stays 200, see ADR-0023. Same day,
 earlier: `MAX_WAYPOINTS` raised 50 → 500 then rolled back to 200 after a boot failure; Haversine
 replaced with equirectangular approximation in `drawWaypoints()`/`latLonToScreen()`, see ADR-0022.

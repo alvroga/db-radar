@@ -97,7 +97,8 @@ capacity math showed FFat remains oversized for GPX at every size considered in 
 to apply past 3.5MB too, so the shipped table is 4MB OTA / 7.69MB FFat, not 3.5MB / 8.69MB.)*
 
 Storage role split going forward:
-- **FFat becomes primary storage for GPX files** (migration tracked in ROADMAP.md, not yet built).
+- **FFat becomes primary storage for GPX files** — implemented the same day, see ROADMAP.md's
+  "GPX Storage: Move from SD to FFat" (Resolved) and CHANGELOG.md for the mount/migration/gauge detail.
   Decouples the device's core function from SD's disassembly-required failure mode.
 - **SD keeps dev-only logging for now** (`system_logger`, `field_log`, `tilt_bench`). These default
   off in release builds, aren't a production dependency, and are retrievable over the web portal
@@ -120,8 +121,12 @@ capacity-capped (roughly 1,040 full-detail caches at this FFat size, still insid
 judged sufficient) rather than effectively unlimited under SD; accepted, since that use was already
 framed as a plus feature, not core.
 
-**Open / deferred, not part of this decision**: The GPX-to-FFat migration itself is not yet
-implemented. A real, unrelated bug was found while investigating the logging side of this decision —
+**Open / deferred, not part of this decision**: The GPX-to-FFat migration shipped the same day (see
+ROADMAP.md's "GPX Storage: Move from SD to FFat", Resolved) and was field-verified on real hardware
+the same day — first-boot FAT formatting and the SD→FFat migration copy both confirmed working,
+pre-migration waypoints survived and load correctly from `/ffat/gpx`. The dev-mode-gated logs page and
+bulk select/download UI haven't specifically been exercised on hardware yet. A real, unrelated bug was
+found while investigating the logging side of this decision —
 `field_log` has no teardown path (no `end()`/`stop()` function exists), so turning dev mode off does
 not fully stop it once started at boot — tracked in ROADMAP.md, not blocking this partition change
 since dev logging stays on SD regardless of this ADR.

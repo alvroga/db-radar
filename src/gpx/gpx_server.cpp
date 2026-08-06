@@ -14,6 +14,7 @@
 #include "esp_netif.h"
 #include "esp_ota_ops.h"
 #include "esp_system.h"
+#include "esp_vfs_fat.h"
 
 #include <sys/stat.h>
 #include <dirent.h>
@@ -25,7 +26,9 @@
 namespace gpx_server {
 
 // AP credentials are loaded from NVS via settings_manager (configurable from Settings > WiFi).
-static const char* GPX_FOLDER  = "/sdcard/gpx";
+// GPX moved SD -> FFat (ADR-0024); logs stay on SD (dev-mode only, low stakes, and the
+// enclosure's disassembly requirement doesn't matter for a page gated on dev_mode anyway).
+static const char* GPX_FOLDER  = "/ffat/gpx";
 static const char* LOGS_FOLDER = "/sdcard/logs";
 
 static httpd_handle_t g_server   = nullptr;
@@ -110,16 +113,46 @@ static const char UPLOAD_HTML[] = R"rawliteral(
         .file-label { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
         .file-name { color: #e0e0e0; font-size: 0.9em; }
         .file-code { color: #666; font-size: 0.75em; }
+        .file-checkbox {
+            width: 16px;
+            height: 16px;
+            accent-color: #00aa44;
+            margin-right: 10px;
+            flex-shrink: 0;
+        }
+        .bulk-actions {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin-bottom: 10px;
+        }
+        .select-all-label {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            color: #e0e0e0;
+            font-size: 0.85em;
+            cursor: pointer;
+        }
         .download-btn {
             color: #00ff00;
             text-decoration: none;
+            background: none;
             border: 1px solid #00aa44;
             padding: 4px 10px;
             border-radius: 4px;
+            cursor: pointer;
             font-size: 0.8em;
+            font-family: monospace;
             margin-right: 6px;
         }
         .download-btn:hover { background: #003311; }
+        .download-btn:disabled {
+            color: #666;
+            border-color: #444;
+            cursor: default;
+            background: none;
+        }
         .delete-btn {
             color: #ff4444;
             background: none;
@@ -131,6 +164,12 @@ static const char UPLOAD_HTML[] = R"rawliteral(
             font-family: monospace;
         }
         .delete-btn:hover { background: #220000; }
+        .delete-btn:disabled {
+            color: #666;
+            border-color: #444;
+            cursor: default;
+            background: none;
+        }
         .status {
             margin-top: 14px;
             padding: 10px 14px;
@@ -164,11 +203,38 @@ static const char UPLOAD_HTML[] = R"rawliteral(
             border-left: 3px solid #00aa44;
             padding: 10px 14px;
             margin-top: 12px;
+            margin-bottom: 20px;
             border-radius: 4px;
             font-size: 0.85em;
             color: #aaa;
         }
         .info-box strong { color: #00ff00; }
+        .storage-status {
+            background: #1f1f1f;
+            border: 1px solid #333;
+            padding: 10px 14px;
+            border-radius: 4px;
+            margin-top: 12px;
+            font-size: 0.9em;
+            color: #e0e0e0;
+        }
+        .storage-row {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 6px;
+        }
+        .storage-bar-track {
+            background: #111;
+            border-radius: 4px;
+            height: 10px;
+            overflow: hidden;
+        }
+        .storage-bar-fill {
+            height: 100%;
+            width: 0%;
+            background: #00aa44;
+            transition: width 0.3s, background 0.3s;
+        }
     </style>
 </head>
 <body>
@@ -178,8 +244,22 @@ static const char UPLOAD_HTML[] = R"rawliteral(
         
 
         <div class="nav-links">
-            <a href="/logs" class="nav-btn">System Logs</a>
+            <a href="/logs" class="nav-btn" id="logsNavLink">System Logs</a>
             <a href="/update" class="nav-btn">Firmware Update</a>
+        </div>
+
+        <div class="storage-status">
+            <div class="storage-row">
+                <span>Flash storage (GPX)</span>
+                <span id="storageText">loading...</span>
+            </div>
+            <div class="storage-bar-track">
+                <div class="storage-bar-fill" id="storageBar"></div>
+            </div>
+        </div>
+
+        <div class="info-box">
+            <strong>Auto-load:</strong> Files are loaded automatically when uploaded. Reload the page to refresh the count.
         </div>
 
         <div class="upload-area" id="uploadArea">
@@ -190,13 +270,18 @@ static const char UPLOAD_HTML[] = R"rawliteral(
 
         <div class="status" id="status"></div>
 
+        <div class="bulk-actions" id="bulkActions" style="display:none;">
+            <label class="select-all-label">
+                <input type="checkbox" id="selectAll" class="file-checkbox" onchange="toggleSelectAll()">
+                Select all
+            </label>
+            <button class="download-btn" id="downloadSelectedBtn" disabled onclick="downloadSelected()">Download Selected</button>
+            <button class="delete-btn" id="deleteSelectedBtn" disabled onclick="deleteSelected()">Delete Selected</button>
+        </div>
+
         <div class="file-list" id="fileList"></div>
 
         <div id="wpStatus" class="wp-status">Waypoints: loading...</div>
-
-        <div class="info-box">
-            <strong>Auto-load:</strong> Files are loaded automatically when uploaded. Reload the page to refresh the count.
-        </div>
     </div>
 
     <script>
@@ -204,10 +289,16 @@ static const char UPLOAD_HTML[] = R"rawliteral(
         const fileInput = document.getElementById('fileInput');
         const status = document.getElementById('status');
         const fileList = document.getElementById('fileList');
+        const bulkActions = document.getElementById('bulkActions');
+        const selectAllBox = document.getElementById('selectAll');
+        const downloadSelectedBtn = document.getElementById('downloadSelectedBtn');
+        const deleteSelectedBtn = document.getElementById('deleteSelectedBtn');
 
         // Load existing files and waypoint count on page load
         loadFileList();
         loadWaypointCount();
+        loadStorageInfo();
+        applyDevModeUI();
 
         // Click to browse
         uploadArea.addEventListener('click', () => fileInput.click());
@@ -268,6 +359,7 @@ static const char UPLOAD_HTML[] = R"rawliteral(
 
                 fileList.innerHTML = '';
                 if (data.files && data.files.length > 0) {
+                    bulkActions.style.display = 'flex';
                     data.files.forEach(entry => {
                         const file = entry.file;
                         const item = document.createElement('div');
@@ -277,6 +369,7 @@ static const char UPLOAD_HTML[] = R"rawliteral(
                                <span class="file-code">${escapeHtml(file)}</span>`
                             : `<span class="file-name">${escapeHtml(file)}</span>`;
                         item.innerHTML = `
+                            <input type="checkbox" class="file-checkbox item-checkbox" value="${file}" onchange="updateBulkUI()">
                             <div class="file-label">${nameHtml}</div>
                             <div>
                               <a class="download-btn" href="/download/gpx/${encodeURIComponent(file)}" download="${file}">Download</a>
@@ -285,10 +378,71 @@ static const char UPLOAD_HTML[] = R"rawliteral(
                         `;
                         fileList.appendChild(item);
                     });
+                } else {
+                    bulkActions.style.display = 'none';
                 }
+                selectAllBox.checked = false;
+                updateBulkUI();
             } catch (error) {
                 console.error('Failed to load file list:', error);
             }
+        }
+
+        function itemCheckboxes() {
+            return Array.from(document.querySelectorAll('#fileList .item-checkbox'));
+        }
+
+        function updateBulkUI() {
+            const boxes = itemCheckboxes();
+            const checkedCount = boxes.filter(b => b.checked).length;
+            downloadSelectedBtn.disabled = checkedCount === 0;
+            deleteSelectedBtn.disabled = checkedCount === 0;
+            deleteSelectedBtn.textContent = checkedCount > 0
+                ? `Delete Selected (${checkedCount})` : 'Delete Selected';
+            selectAllBox.checked = boxes.length > 0 && checkedCount === boxes.length;
+        }
+
+        function toggleSelectAll() {
+            itemCheckboxes().forEach(b => { b.checked = selectAllBox.checked; });
+            updateBulkUI();
+        }
+
+        function downloadSelected() {
+            const filenames = itemCheckboxes().filter(b => b.checked).map(b => b.value);
+            filenames.forEach((filename, i) => {
+                setTimeout(() => {
+                    const a = document.createElement('a');
+                    a.href = `/download/gpx/${encodeURIComponent(filename)}`;
+                    a.download = filename;
+                    document.body.appendChild(a);
+                    a.click();
+                    a.remove();
+                }, i * 400);
+            });
+        }
+
+        async function deleteSelected() {
+            const filenames = itemCheckboxes().filter(b => b.checked).map(b => b.value);
+            if (filenames.length === 0) return;
+            if (!confirm(`Delete ${filenames.length} selected file(s)?`)) return;
+
+            let failed = 0;
+            for (const filename of filenames) {
+                try {
+                    const response = await fetch(`/delete/${encodeURIComponent(filename)}`, { method: 'DELETE' });
+                    if (!response.ok) failed++;
+                } catch (error) {
+                    failed++;
+                }
+            }
+
+            if (failed === 0) {
+                showStatus(`+ ${filenames.length} file(s) deleted`, 'success');
+            } else {
+                showStatus(`! ${failed} of ${filenames.length} deletions failed`, 'error');
+            }
+            loadFileList();
+            loadWaypointCount();
         }
 
         function escapeHtml(s) {
@@ -334,6 +488,43 @@ static const char UPLOAD_HTML[] = R"rawliteral(
                 status.style.display = 'none';
             }, 5000);
         }
+
+        async function loadStorageInfo() {
+            const bar = document.getElementById('storageBar');
+            const text = document.getElementById('storageText');
+            try {
+                const r = await fetch('/storage');
+                const d = await r.json();
+                if (d.error) throw new Error(d.error);
+                bar.style.width = d.percent + '%';
+                bar.style.background = d.percent >= 90 ? '#ff4444' : (d.percent >= 70 ? '#ffaa00' : '#00aa44');
+                text.textContent = `${d.percent}% used (${formatBytes(d.used)} / ${formatBytes(d.total)})`;
+            } catch (e) {
+                text.textContent = '(unavailable)';
+            }
+        }
+
+        function formatBytes(bytes) {
+            if (bytes === 0) return '0 Bytes';
+            const k = 1024;
+            const sizes = ['Bytes', 'KB', 'MB'];
+            const i = Math.floor(Math.log(bytes) / Math.log(k));
+            return Math.round(bytes / Math.pow(k, i) * 100) / 100 + ' ' + sizes[i];
+        }
+
+        // Logs page is dev_mode-gated server-side (see /logs, /logs-list) — hide
+        // the nav link too so normal users don't see a dead-end button.
+        async function applyDevModeUI() {
+            try {
+                const r = await fetch('/dev-status');
+                const d = await r.json();
+                if (!d.dev_mode) {
+                    document.getElementById('logsNavLink').style.display = 'none';
+                }
+            } catch (e) {
+                // If the check itself fails, leave the link as-is rather than guess.
+            }
+        }
     </script>
 </body>
 </html>
@@ -350,79 +541,43 @@ static const char LOGS_HTML[] = R"rawliteral(
     <style>
         * { margin: 0; padding: 0; box-sizing: border-box; }
         body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Arial, sans-serif;
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            font-family: monospace;
+            background: #1a1a1a;
+            color: #e0e0e0;
             min-height: 100vh;
             padding: 20px;
         }
-        .container {
-            background: white;
-            border-radius: 16px;
-            box-shadow: 0 20px 60px rgba(0,0,0,0.3);
-            padding: 40px;
-            max-width: 800px;
-            margin: 0 auto;
-        }
-        h1 {
-            color: #333;
-            margin-bottom: 10px;
-            font-size: 28px;
-        }
-        .subtitle {
-            color: #666;
-            margin-bottom: 30px;
-            font-size: 14px;
-        }
-        .nav-btn {
-            background: #764ba2;
-            color: white;
-            border: none;
-            padding: 12px 24px;
+        .card {
+            background: #2a2a2a;
             border-radius: 8px;
-            cursor: pointer;
-            font-size: 14px;
-            margin-bottom: 20px;
-            transition: background 0.2s;
+            padding: 24px;
+            max-width: 560px;
+            margin: 20px auto;
+        }
+        h1 { color: #00ff00; margin-bottom: 4px; }
+        .subtitle { color: #aaa; font-size: 0.9em; margin-bottom: 20px; }
+        .nav-links { margin-bottom: 20px; }
+        .nav-btn {
+            color: #00ff00;
             text-decoration: none;
+            border: 1px solid #00aa44;
+            padding: 6px 14px;
+            border-radius: 4px;
+            font-size: 0.85em;
+            margin-right: 8px;
             display: inline-block;
         }
-        .nav-btn:hover {
-            background: #667eea;
+        .nav-btn:hover { background: #003311; }
+        .info-box {
+            background: #1f1f1f;
+            border-left: 3px solid #00aa44;
+            padding: 10px 14px;
+            margin-bottom: 20px;
+            border-radius: 4px;
+            font-size: 0.85em;
+            color: #aaa;
         }
-        .log-list {
-            margin-top: 20px;
-        }
-        .log-item {
-            background: #f5f5f5;
-            padding: 15px;
-            border-radius: 8px;
-            margin-bottom: 10px;
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-        }
-        .log-info {
-            flex-grow: 1;
-        }
-        .log-name {
-            color: #333;
-            font-weight: 500;
-            margin-bottom: 5px;
-        }
-        .log-size {
-            color: #999;
-            font-size: 12px;
-        }
-        .log-actions {
-            display: flex;
-            gap: 10px;
-        }
-        .log-checkbox {
-            width: 18px;
-            height: 18px;
-            margin-right: 15px;
-            flex-shrink: 0;
-        }
+        .info-box strong { color: #00ff00; }
         .bulk-actions {
             display: flex;
             align-items: center;
@@ -433,92 +588,123 @@ static const char LOGS_HTML[] = R"rawliteral(
             display: flex;
             align-items: center;
             gap: 8px;
-            color: #333;
-            font-size: 14px;
+            color: #e0e0e0;
+            font-size: 0.85em;
             cursor: pointer;
+        }
+        .log-checkbox {
+            width: 16px;
+            height: 16px;
+            accent-color: #00aa44;
+            flex-shrink: 0;
         }
         .delete-selected-btn {
-            background: #ff4757;
-            color: white;
-            border: none;
-            padding: 8px 16px;
-            border-radius: 6px;
+            color: #ff4444;
+            background: none;
+            border: 1px solid #aa2222;
+            padding: 4px 10px;
+            border-radius: 4px;
             cursor: pointer;
-            font-size: 14px;
-            transition: background 0.2s;
+            font-size: 0.8em;
+            font-family: monospace;
         }
-        .delete-selected-btn:hover {
-            background: #ff3838;
-        }
+        .delete-selected-btn:hover { background: #220000; }
         .delete-selected-btn:disabled {
-            background: #ccc;
+            color: #666;
+            border-color: #444;
             cursor: default;
+            background: none;
+        }
+        .log-list { margin-top: 20px; }
+        .log-item {
+            background: #1f1f1f;
+            border: 1px solid #333;
+            padding: 10px 14px;
+            border-radius: 4px;
+            margin-bottom: 8px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .log-info { flex-grow: 1; min-width: 0; margin-right: 10px; }
+        .log-name { color: #e0e0e0; font-size: 0.9em; margin-bottom: 2px; word-break: break-all; }
+        .log-size { color: #666; font-size: 0.75em; }
+        .log-actions {
+            display: flex;
+            gap: 6px;
+            flex-shrink: 0;
         }
         .download-btn {
-            background: #2196F3;
-            color: white;
-            border: none;
-            padding: 8px 16px;
-            border-radius: 6px;
+            color: #00ff00;
+            text-decoration: none;
+            background: none;
+            border: 1px solid #00aa44;
+            padding: 4px 10px;
+            border-radius: 4px;
             cursor: pointer;
-            font-size: 14px;
-            transition: background 0.2s;
+            font-size: 0.8em;
+            font-family: monospace;
         }
-        .download-btn:hover {
-            background: #1976D2;
+        .download-btn:hover { background: #003311; }
+        .download-btn:disabled {
+            color: #666;
+            border-color: #444;
+            cursor: default;
+            background: none;
         }
         .delete-btn {
-            background: #ff4757;
-            color: white;
-            border: none;
-            padding: 8px 16px;
-            border-radius: 6px;
+            color: #ff4444;
+            background: none;
+            border: 1px solid #aa2222;
+            padding: 4px 10px;
+            border-radius: 4px;
             cursor: pointer;
-            font-size: 14px;
-            transition: background 0.2s;
+            font-size: 0.8em;
+            font-family: monospace;
         }
-        .delete-btn:hover {
-            background: #ff3838;
-        }
+        .delete-btn:hover { background: #220000; }
         .status {
-            margin-top: 20px;
-            padding: 15px;
-            border-radius: 8px;
+            margin-top: 14px;
+            padding: 10px 14px;
+            border-radius: 4px;
+            font-size: 0.9em;
             display: none;
         }
         .status.success {
-            background: #d4edda;
-            color: #155724;
+            background: #003311;
+            border: 1px solid #00aa44;
+            color: #00ff00;
             display: block;
         }
         .status.error {
-            background: #f8d7da;
-            color: #721c24;
+            background: #220000;
+            border: 1px solid #aa2222;
+            color: #ff4444;
             display: block;
-        }
-        .info-box {
-            background: #e7f3ff;
-            border-left: 4px solid #2196F3;
-            padding: 15px;
-            margin-top: 20px;
-            border-radius: 4px;
-        }
-        .info-box strong {
-            color: #1976D2;
         }
         .empty-state {
             text-align: center;
             padding: 40px;
-            color: #999;
+            color: #666;
         }
     </style>
 </head>
 <body>
-    <div class="container">
-        <h1>📋 System Logs</h1>
+    <div class="card">
+        <h1>System Logs</h1>
         <p class="subtitle">View and download system log files</p>
 
-        <a href="/" class="nav-btn">← Back to GPX Upload</a>
+        <div class="nav-links">
+            <a href="/" class="nav-btn">&larr; Back to GPX Upload</a>
+        </div>
+
+        <div class="info-box">
+            <strong>Log Files:</strong> This page is only reachable while dev mode is on. Log
+            files are stored on the physical SD card (not internal flash) and contain boot events,
+            GPS data, time sync info, and diagnostic information — GPX waypoint files, by contrast,
+            live on internal flash storage. Download logs for debugging or analysis before turning
+            dev mode back off.
+        </div>
 
         <div class="status" id="status"></div>
 
@@ -527,15 +713,12 @@ static const char LOGS_HTML[] = R"rawliteral(
                 <input type="checkbox" id="selectAll" class="log-checkbox" onchange="toggleSelectAll()">
                 Select all
             </label>
+            <button class="download-btn" id="downloadSelectedBtn" disabled onclick="downloadSelected()">Download Selected</button>
             <button class="delete-selected-btn" id="deleteSelectedBtn" disabled onclick="deleteSelected()">Delete Selected</button>
         </div>
 
         <div class="log-list" id="logList">
             <div class="empty-state">Loading...</div>
-        </div>
-
-        <div class="info-box">
-            <strong>💾 Log Files:</strong> System logs are stored on the SD card and contain boot events, GPS data, time sync info, and diagnostic information. Download them for debugging or analysis.
         </div>
     </div>
 
@@ -544,6 +727,7 @@ static const char LOGS_HTML[] = R"rawliteral(
         const logList = document.getElementById('logList');
         const bulkActions = document.getElementById('bulkActions');
         const selectAllBox = document.getElementById('selectAll');
+        const downloadSelectedBtn = document.getElementById('downloadSelectedBtn');
         const deleteSelectedBtn = document.getElementById('deleteSelectedBtn');
 
         // Load log files on page load
@@ -592,6 +776,7 @@ static const char LOGS_HTML[] = R"rawliteral(
         function updateBulkUI() {
             const boxes = itemCheckboxes();
             const checkedCount = boxes.filter(b => b.checked).length;
+            downloadSelectedBtn.disabled = checkedCount === 0;
             deleteSelectedBtn.disabled = checkedCount === 0;
             deleteSelectedBtn.textContent = checkedCount > 0
                 ? `Delete Selected (${checkedCount})` : 'Delete Selected';
@@ -607,6 +792,20 @@ static const char LOGS_HTML[] = R"rawliteral(
             window.location.href = `/download/logs/${filename}`;
         }
 
+        function downloadSelected() {
+            const filenames = itemCheckboxes().filter(b => b.checked).map(b => b.value);
+            filenames.forEach((filename, i) => {
+                setTimeout(() => {
+                    const a = document.createElement('a');
+                    a.href = `/download/logs/${encodeURIComponent(filename)}`;
+                    a.download = filename;
+                    document.body.appendChild(a);
+                    a.click();
+                    a.remove();
+                }, i * 400);
+            });
+        }
+
         async function deleteLog(filename) {
             if (!confirm(`Delete ${filename}?`)) return;
 
@@ -616,13 +815,13 @@ static const char LOGS_HTML[] = R"rawliteral(
                 });
 
                 if (response.ok) {
-                    showStatus(`✓ ${filename} deleted`, 'success');
+                    showStatus(`+ ${filename} deleted`, 'success');
                     loadLogList();
                 } else {
-                    showStatus(`✗ Delete failed`, 'error');
+                    showStatus(`! Delete failed`, 'error');
                 }
             } catch (error) {
-                showStatus(`✗ Delete error: ${error.message}`, 'error');
+                showStatus(`! Delete error: ${error.message}`, 'error');
             }
         }
 
@@ -642,9 +841,9 @@ static const char LOGS_HTML[] = R"rawliteral(
             }
 
             if (failed === 0) {
-                showStatus(`✓ ${filenames.length} log file(s) deleted`, 'success');
+                showStatus(`+ ${filenames.length} log file(s) deleted`, 'success');
             } else {
-                showStatus(`✗ ${failed} of ${filenames.length} deletions failed`, 'error');
+                showStatus(`! ${failed} of ${filenames.length} deletions failed`, 'error');
             }
             loadLogList();
         }
@@ -1067,13 +1266,62 @@ static esp_err_t waypoints_handler(httpd_req_t* req) {
     return ESP_OK;
 }
 
+static esp_err_t storage_handler(httpd_req_t* req) {
+    uint64_t total_bytes = 0, free_bytes = 0;
+    httpd_resp_set_type(req, "application/json");
+
+    if (esp_vfs_fat_info("/ffat", &total_bytes, &free_bytes) != ESP_OK) {
+        const char* err = "{\"error\":\"unavailable\"}";
+        httpd_resp_send(req, err, (ssize_t)strlen(err));
+        return ESP_OK;
+    }
+
+    uint64_t used_bytes = total_bytes - free_bytes;
+    int percent = total_bytes > 0 ? (int)((used_bytes * 100) / total_bytes) : 0;
+
+    char buf[160];
+    int len = snprintf(buf, sizeof(buf),
+        "{\"total\":%llu,\"free\":%llu,\"used\":%llu,\"percent\":%d}",
+        (unsigned long long)total_bytes, (unsigned long long)free_bytes,
+        (unsigned long long)used_bytes, percent);
+    httpd_resp_send(req, buf, len);
+    return ESP_OK;
+}
+
+// Lets the upload page's JS know whether to show the System Logs nav link — the
+// /logs* routes themselves are the actual gate (see logs_page_handler), this is
+// just so a normal user doesn't see a dead-end button.
+static esp_err_t dev_status_handler(httpd_req_t* req) {
+    bool dev_mode = settings_manager::getSettings().dev_mode;
+    char buf[32];
+    int len = snprintf(buf, sizeof(buf), "{\"dev_mode\":%s}", dev_mode ? "true" : "false");
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_send(req, buf, len);
+    return ESP_OK;
+}
+
+// The logs page/API/downloads only exist for dev-mode field debugging — a normal
+// user with dev_mode off gets a 404 on all of them, not just a hidden nav link
+// (see the JS-side hide in UPLOAD_HTML, which is cosmetic only).
+static bool devLoggingUIEnabled() {
+    return settings_manager::getSettings().dev_mode;
+}
+
 static esp_err_t logs_page_handler(httpd_req_t* req) {
+    if (!devLoggingUIEnabled()) {
+        httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "Not Found");
+        return ESP_FAIL;
+    }
     Serial.println("[GPX_SERVER] GET /logs - logs page");
     httpd_resp_set_type(req, "text/html");
     return send_html_chunked(req, LOGS_HTML);
 }
 
 static esp_err_t logs_list_handler(httpd_req_t* req) {
+    if (!devLoggingUIEnabled()) {
+        httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "Not Found");
+        return ESP_FAIL;
+    }
     DIR* dir = opendir(LOGS_FOLDER);
     if (!dir) {
         httpd_resp_set_type(req, "application/json");
@@ -1123,6 +1371,10 @@ static esp_err_t delete_handler(httpd_req_t* req) {
     const char* filename = nullptr;
 
     if (strncmp(uri, "/delete/logs/", 13) == 0) {
+        if (!devLoggingUIEnabled()) {
+            httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "Not Found");
+            return ESP_FAIL;
+        }
         filename = uri + 13;
         if (!is_safe_filename(filename)) {
             httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Invalid filename");
@@ -1178,6 +1430,10 @@ static esp_err_t download_handler(httpd_req_t* req) {
     const char* mime;
 
     if (strncmp(uri, "/download/logs/", 15) == 0) {
+        if (!devLoggingUIEnabled()) {
+            httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "Not Found");
+            return ESP_FAIL;
+        }
         folder   = LOGS_FOLDER;
         filename = uri + 15;
         mime     = "text/plain";
@@ -1236,7 +1492,7 @@ bool init() {
 
     struct stat st;
     if (stat(GPX_FOLDER, &st) != 0) {
-        Serial.println("[GPX_SERVER] Creating /sdcard/gpx...");
+        Serial.println("[GPX_SERVER] Creating /ffat/gpx...");
         if (mkdir(GPX_FOLDER, 0777) != 0) {
             Serial.println("[GPX_SERVER] ERROR: Failed to create gpx folder");
             return false;
@@ -1294,7 +1550,7 @@ bool start() {
 
     httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
     cfg.uri_match_fn    = httpd_uri_match_wildcard;
-    cfg.max_uri_handlers = 13;
+    cfg.max_uri_handlers = 14;  // 12 registered below, some headroom
     cfg.lru_purge_enable = true; // evict stuck half-open connections so httpd_start succeeds on retry
     // Default 4096B is too thin for upload_handler() -> refreshGPXFiles() -> parseGPXFile(),
     // which stacks ~2-3KB of local buffers (wp_desc[1024]+line[512]+...) on this same task
@@ -1313,6 +1569,8 @@ bool start() {
         { "/upload",     HTTP_POST,   upload_handler,     nullptr },
         { "/list",       HTTP_GET,    list_handler,       nullptr },
         { "/waypoints",  HTTP_GET,    waypoints_handler,  nullptr },
+        { "/storage",    HTTP_GET,    storage_handler,    nullptr },
+        { "/dev-status", HTTP_GET,    dev_status_handler, nullptr },
         { "/logs",       HTTP_GET,    logs_page_handler,  nullptr },
         { "/logs-list",  HTTP_GET,    logs_list_handler,  nullptr },
         { "/delete/*",   HTTP_DELETE, delete_handler,     nullptr },

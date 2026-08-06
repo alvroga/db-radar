@@ -12,8 +12,14 @@
 
 namespace gpx_loader {
 
-// Configuration
-static const char* GPX_FOLDER = "/sdcard/gpx";
+// Configuration — primary storage moved SD -> FFat (see ADR-0024): FFat isn't behind
+// the enclosure's disassembly-required SD card, and GPX capacity was never SD's job
+// to begin with (the 8,192-entry PSRAM index caps usage well before flash bytes do).
+static const char* GPX_FOLDER = "/ffat/gpx";
+// Pre-migration location. Read-only here — only used by migrateFromSDIfNeeded() to
+// pick up files uploaded before this change, one time, on first boot with an empty
+// FFat folder. Never written to again after that.
+static const char* LEGACY_SD_GPX_FOLDER = "/sdcard/gpx";
 
 // Statistics
 static int files_loaded = 0;
@@ -45,17 +51,82 @@ static bool parseOneWaypointAt(FILE* file, ui_manager::Waypoint& out_wp);
 static int loadAllGPXFilesLegacy();
 static int loadAllGPXFilesIndexed();
 
+// One-time carry-over for files uploaded before the SD->FFat storage move: if the
+// new FFat folder has no .gpx files yet but the old SD one does, copy them across.
+// Runs at most once in practice — after the first successful copy, GPX_FOLDER is
+// never empty again, so every later boot skips straight past the opendir() check.
+// SD is already mounted for dev-mode logging regardless (see ADR-0024), so this
+// costs nothing extra when there's nothing to migrate.
+static void migrateFromSDIfNeeded() {
+    DIR* ffat_dir = opendir(GPX_FOLDER);
+    if (ffat_dir) {
+        struct dirent* e;
+        while ((e = readdir(ffat_dir)) != nullptr) {
+            size_t nl = strlen(e->d_name);
+            if (nl >= 4 && strcasecmp(e->d_name + nl - 4, ".gpx") == 0) {
+                closedir(ffat_dir);
+                return;  // FFat already has files — never overwrite, nothing to do
+            }
+        }
+        closedir(ffat_dir);
+    }
+
+    DIR* sd_dir = opendir(LEGACY_SD_GPX_FOLDER);
+    if (!sd_dir) return;  // no SD, or nothing there — nothing to migrate
+
+    Serial.println("[GPX_LOADER] FFat GPX folder is empty — migrating files from SD...");
+    struct dirent* entry;
+    int migrated = 0;
+    while ((entry = readdir(sd_dir)) != nullptr) {
+        const char* name = entry->d_name;
+        size_t nl = strlen(name);
+        if (nl < 4 || strcasecmp(name + nl - 4, ".gpx") != 0) continue;
+
+        char src[300], dst[300];
+        snprintf(src, sizeof(src), "%s/%s", LEGACY_SD_GPX_FOLDER, name);
+        snprintf(dst, sizeof(dst), "%s/%s", GPX_FOLDER, name);
+
+        FILE* fin = fopen(src, "rb");
+        if (!fin) continue;
+        FILE* fout = fopen(dst, "wb");
+        if (!fout) {
+            Serial.printf("[GPX_LOADER] Migration: failed to create %s\n", dst);
+            fclose(fin);
+            continue;
+        }
+
+        char buf[512];
+        size_t n;
+        bool ok = true;
+        while ((n = fread(buf, 1, sizeof(buf), fin)) > 0) {
+            if (fwrite(buf, 1, n, fout) != n) { ok = false; break; }
+        }
+        fclose(fin);
+        fclose(fout);
+        if (ok) {
+            migrated++;
+        } else {
+            Serial.printf("[GPX_LOADER] Migration: write error on %s — removing partial copy\n", dst);
+            remove(dst);
+        }
+    }
+    closedir(sd_dir);
+    Serial.printf("[GPX_LOADER] Migration complete: %d file(s) copied SD -> FFat\n", migrated);
+}
+
 bool init() {
     Serial.println("[GPX_LOADER] Initializing...");
 
     struct stat st;
     if (stat(GPX_FOLDER, &st) != 0) {
-        Serial.println("[GPX_LOADER] Creating /sdcard/gpx folder...");
+        Serial.println("[GPX_LOADER] Creating /ffat/gpx folder...");
         if (mkdir(GPX_FOLDER, 0777) != 0) {
             Serial.println("[GPX_LOADER] ERROR: Failed to create gpx folder");
             return false;
         }
     }
+
+    migrateFromSDIfNeeded();
 
     for (int i = 0; i < ui_manager::RadarConfig::MAX_WAYPOINTS; i++) g_slot_source[i] = -1;
 

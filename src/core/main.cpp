@@ -278,9 +278,9 @@ extern "C" void app_main() {
         Serial.println("[GPX] GPX server initialized successfully");
     }
 
-    // Auto-load GPX files from SD card
+    // Auto-load GPX files from FFat flash storage (moved off SD, see ADR-0024)
     ui_manager::updateLoadingStatus("Loading waypoints...");
-    Serial.println("[GPX] Auto-loading waypoints from /sdcard/gpx/ folder...");
+    Serial.println("[GPX] Auto-loading waypoints from /ffat/gpx/ folder...");
     // gpx_loader::init() allocates the PSRAM two-tier index (gpx_index + selection
     // scratch) — was never called anywhere before this, so the two-tier path was
     // dead code and every load silently used the file-order legacy fallback.

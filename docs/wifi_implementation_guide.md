@@ -132,14 +132,20 @@ HTTP server (`esp_http_server`) with the following endpoints:
 | `/list` | GET | JSON array of `{file, name}` — `name` is the cache's `<groundspeak:name>` (or its `<name>` GC code as fallback), pulled from the file so the upload page can show something more useful than the filename |
 | `/download/gpx/<file>` | GET | Download a specific GPX file |
 | `/delete/<file>` | DELETE | Delete a GPX file |
-| `/logs` | GET | System log viewer — "Select all" + "Delete Selected" bulk-delete via looped calls to `/delete/logs/<file>` |
-| `/logs-list` | GET | JSON array of `{name, size}` for files in `/logs/` |
-| `/delete/logs/<file>` | DELETE | Delete a log/CSV file |
+| `/storage` | GET | JSON `{total, free, used, percent}` for the FFat partition — drives the upload page's storage gauge |
+| `/dev-status` | GET | JSON `{dev_mode}` — upload page uses this to hide the "System Logs" nav link when dev mode is off |
+| `/logs` | GET | System log viewer — 404 unless `dev_mode` is on. "Select all" + "Delete Selected" bulk-delete via looped calls to `/delete/logs/<file>` |
+| `/logs-list` | GET | JSON array of `{name, size}` for files in `/logs/` — 404 unless `dev_mode` is on |
+| `/delete/logs/<file>` | DELETE | Delete a log/CSV file — 404 unless `dev_mode` is on |
 | `/update` | GET | OTA firmware update page |
 | `/update` | POST | Flash new firmware binary |
 
-**File storage:** physical SD card at `/sdcard/gpx` (not the FFat partition — see
-`memory/storage_is_sd_not_ffat.md`). All `.gpx` files in this folder are auto-loaded on boot.
+**File storage:** GPX files live on the FFat flash partition at `/ffat/gpx` (moved off SD 2026-08-06,
+see ADR-0024 and ROADMAP.md's "GPX Storage: Move from SD to FFat"). All `.gpx` files in this folder
+are auto-loaded on boot; a one-time migration in `gpx_loader::init()` copies over anything still on
+the old `/sdcard/gpx` location the first time the FFat folder is found empty. Dev-only logging
+(`system_logger`, `field_log`, `tilt_bench`) stays on the physical SD card at `/sdcard/logs`, gated
+behind `dev_mode` as noted above.
 
 **Implementation:** `src/gpx/gpx_server.cpp`
 

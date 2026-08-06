@@ -55,11 +55,12 @@ date — sort on that for chronology, not on the filename.
 | [0022](0022-waypoint-cap-raised-to-500-not-700.md) | Raise `MAX_WAYPOINTS` to 500 (not 700+), after replacing Haversine with equirectangular | 2026-08-05 | Superseded on the cap number (see ADR-0023) |
 | [0023](0023-two-tier-waypoint-index.md) | Two-tier waypoint index (PSRAM full index + SRAM working set) | 2026-08-05 | Accepted |
 | [0024](0024-ota-partitions-grown-from-unused-ffat.md) | OTA partitions grown to 4MB by reclaiming unused FFat; GPX storage moving off SD | 2026-08-06 | Accepted, revised same day (3.5MB → 4MB) |
+| [0025](0025-version-scheme-monthly-build-counter.md) | `FW_VERSION` monthly build counter recovered from the committed header, not a separate state file | 2026-08-06 | Accepted |
 
 ## Status
 
 - **Going forward**: new architectural decisions get an ADR at the time they're made (see CLAUDE.md
-  → Documentation Standards). Next free number: **0025**.
+  → Documentation Standards). Next free number: **0026**.
 - **Historical backfill**: ✅ complete (2026-08-01). ADRs 0004–0017 were reconstructed from
   CHANGELOG.md, ROADMAP.md, `docs/performance_optimization_backlog.md`, the component docs and git
   history, following [`BACKFILL_PLAN.md`](BACKFILL_PLAN.md). They carry

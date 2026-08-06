@@ -11,6 +11,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+**Version scheme changed from vYY.MM.DD to vYY.MM.## (2026-08-06)**
+
+`FW_VERSION` was one build per calendar day, which undercounts on days with multiple builds and
+stays static across a whole day of iteration. `scripts/gen_version.py` now writes `vYY.MM.##`, a
+counter that increments on every build and resets to `01` when the year/month rolls over. There's
+no separate state file — the counter is recovered by parsing the previously committed
+`fw_version_gen.h` (the same "committed fallback" file the script already overwrote every build);
+if that file is missing or its version string doesn't parse, the counter restarts at `01`.
+`FW_BUILD_TS` (the per-build Unix timestamp behind `FW_STAMP_VAL`'s reflash-detection) is unchanged.
+Files: `scripts/gen_version.py`, `include/core/fw_version_gen.h`, `README.md`.
+Full reasoning and the state-file alternative considered: [ADR-0025](docs/adr/0025-version-scheme-monthly-build-counter.md).
+
 **OTA partitions grown 2MB → 4MB per slot, reclaimed from unused FFat (2026-08-06)**
 
 `partitions_ota.csv` had been unchanged since project inception — a canned Arduino IDE preset never
@@ -24,14 +36,56 @@ imports, byte-counted from real files in `assets/gpx/`). Landed on 4MB, not the 
 same day, because OTA headroom can only be replenished with a full USB reflash while FFat headroom can
 be freed anytime over the web portal — that asymmetry makes OTA the better place to spend "free"
 headroom once both are already oversupplied for their actual use (see ADR-0024's addendum). Also
-decided as part of this change: GPX storage will move from SD to FFat (migration not yet implemented,
-tracked in ROADMAP.md) — the SD card is physically inaccessible without disassembling the device in
-the current enclosure, a bad place to keep a hard dependency for core functionality. SD keeps dev-only
-logging for now and stays in the design for a specific deferred future use (offline map-tile caching,
-no current priority).
+decided as part of this change: GPX storage will move from SD to FFat — the SD card is physically
+inaccessible without disassembling the device in the current enclosure, a bad place to keep a hard
+dependency for core functionality. SD keeps dev-only logging for now and stays in the design for a
+specific deferred future use (offline map-tile caching, no current priority). The migration itself
+shipped the same day — see the entry below.
 Full reasoning and alternatives considered: [ADR-0024](docs/adr/0024-ota-partitions-grown-from-unused-ffat.md).
 
 Build verified against the new table: 40.0% flash (1,678,507 / 4,194,304 bytes), unchanged RAM.
+
+**GPX storage moved from SD to FFat; web logs page gated behind dev mode (2026-08-06)**
+
+Follow-through on the decision above. `device_manager::initFFat()` mounts the `ffat` partition
+(`esp_vfs_fat_spiflash_mount_rw_wl()`, wear-levelled, `format_if_mount_failed=true` for the
+first-ever mount after a repartition) at `/ffat`, right after SD init in `initializeAll()` — SD stays
+mounted too, since dev-only logging keeps living there per ADR-0024. `gpx_loader.cpp` and
+`gpx_server.cpp` both now read/write `/ffat/gpx` instead of `/sdcard/gpx`. `gpx_loader::init()` runs a
+one-time migration on boot: if the new FFat folder has no `.gpx` files yet but the old SD folder does,
+it copies them across (byte-for-byte, `fopen`/`fread`/`fwrite`) so upgrading firmware doesn't orphan
+already-uploaded waypoints on a now-unread SD path — it only ever runs once in practice, since after
+the first copy the FFat folder is never empty again.
+
+The web GPX manager (`/`) gained a storage gauge: a new `/storage` endpoint calls
+`esp_vfs_fat_info("/ffat", ...)` and returns `{total, free, used, percent}`; the page renders it as a
+color-coded bar (green <70% used, amber <90%, red beyond) next to the existing waypoint count. The
+gauge and the "Auto-load" info box were placed right under the nav buttons, above the drop area — the
+first thing a user sees is capacity, not the upload control.
+
+The GPX page also gained the bulk select/delete/download UI the logs page already had: a "Select all"
+checkbox plus "Download Selected"/"Delete Selected" buttons above the file list, with a checkbox on
+each file row. The logs page in turn gained "Download Selected" next to its existing "Delete Selected"
+— neither page had both actions together before this pass. There's no on-device zip capability, so a
+multi-file download just fires one `<a download>` click per selected file, staggered ~400ms apart to
+avoid the browser's multi-download prompt; each file still saves individually, same as a single-file
+download does.
+
+The `/logs` page and its supporting endpoints (`/logs-list`, `/delete/logs/*`, `/download/logs/*`) now
+check `settings_manager::getSettings().dev_mode` server-side and return 404 when it's off — logging
+stays SD-only and dev-mode-only per ADR-0024, so a normal user should never be able to reach a page
+about it. The upload page's "System Logs" nav link is hidden client-side too (`/dev-status` endpoint,
+JS on page load) so there's no dead link when dev mode is off, though the server-side 404 is the real
+gate. The logs page's own info box was reworded to state plainly that logs live on the physical SD
+card while GPX waypoint files now live on internal flash — the two storage locations diverge for the
+first time with this change, so the page needed to say so.
+
+Build verified: Flash 40.5% (1,698,451 / 4,194,304 bytes, +19,944 B over the ADR-0024 baseline
+including the bulk select/download UI above), RAM 49.3% (161,584 / 327,680 bytes, +80 B).
+**Field-verified 2026-08-06**: first-boot FAT formatting and the SD→FFat migration copy both worked —
+waypoints uploaded before the migration are present and load correctly from `/ffat/gpx` after
+reflashing. The dev-mode-gated logs page and the bulk select/download UI have not specifically been
+exercised on hardware yet.
 
 ### Added
 

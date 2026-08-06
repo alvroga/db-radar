@@ -55,28 +55,6 @@ disable calls.
 
 ## Planned
 
-### GPX Storage: Move from SD to FFat
-**Severity**: Architecture — decided 2026-08-06, not yet implemented
-
-**Decision**: GPX files (`/sdcard/gpx`) move to the FFat flash partition, which was completely unused
-until now (0 mount calls anywhere in the tree — see ADR-0024). Driven by the enclosure design making
-the physical SD card inaccessible without disassembly, which is a bad failure mode for something GPX
-data (core functionality) depends on. FFat headroom (~7.69MB after the 4MB OTA resize) comfortably
-covers the project's own lean GPX generator format and the 8,192-entry PSRAM index cap either way;
-Geocaching.com-style heavy imports remain supported but become capacity-capped (roughly 1,040
-full-detail caches) rather than unlimited — an accepted tradeoff since that use was already a "plus,"
-not core. Dev-only logging (`system_logger`, `field_log`, `tilt_bench`) stays on SD for now — low
-stakes, retrievable over the web portal without disassembly, no reason to migrate in the same pass.
-SD itself stays in the physical design, justified by a specific deferred future use — offline
-map-tile/imagery caching — not by GPX capacity.
-
-**Not yet scoped**: file layout on FFat, migration/first-boot behavior for existing SD-resident GPX
-files, and whether the web GPX manager needs a storage-target selector or just switches wholesale.
-
-**Full reasoning**: [ADR-0024](docs/adr/0024-ota-partitions-grown-from-unused-ffat.md)
-
----
-
 ### Quests *(brainstorm stage — not designed yet)*
 **Severity**: Feature — new idea, not yet scoped
 
@@ -254,6 +232,32 @@ the heading bounce is gone. See CHANGELOG.md.
 ---
 
 ## Resolved
+
+### GPX Storage: Move from SD to FFat — Resolved (2026-08-06)
+**Was**: GPX files lived at `/sdcard/gpx`, on a physical SD card the enclosure design makes
+inaccessible without disassembly — a bad failure mode for core app functionality. FFat (the flash
+partition grown in the same day's OTA resize, see ADR-0024) was completely unmounted.
+
+**Resolution**: `device_manager::initFFat()` mounts the `ffat` partition (wear-levelled FAT,
+format-on-first-mount) at `/ffat`; `gpx_loader`/`gpx_server` now read/write `/ffat/gpx` instead of
+`/sdcard/gpx`. A one-time boot-time migration copies any pre-existing files from the old SD location
+into FFat if the new folder is empty, so upgrading doesn't orphan already-uploaded waypoints. The web
+GPX manager gained a storage gauge (`/storage` endpoint, `esp_vfs_fat_info()`) showing FFat usage as a
+bar + percentage, placed above the drop area so capacity is the first thing shown. Dev-only logging
+stays on SD as decided in ADR-0024 — its web page (`/logs` and related endpoints) is now gated behind
+`dev_mode`, returning 404 when off, with the nav link hidden client-side too; its info text now
+explicitly calls out that logs live on SD while GPX lives on flash, and its whole look now matches the
+GPX page's dark monospace theme instead of its old light purple-gradient one. Both pages also gained a
+shared "Select all" + "Download Selected"/"Delete Selected" bulk UI (multi-download is staggered
+`<a download>` clicks, one per file — no on-device zip capability). Build-verified: Flash 40.5%
+(+19.9 KB over the ADR-0024 baseline), RAM 49.3% (+80 B). **Field-verified 2026-08-06**: first-boot
+FAT formatting and the SD→FFat migration copy both confirmed working — waypoints uploaded before the
+migration survive and load correctly from `/ffat/gpx`. The dev-mode-gated logs page and the bulk
+select/download UI haven't specifically been exercised on hardware yet.
+
+**Full reasoning**: [ADR-0024](docs/adr/0024-ota-partitions-grown-from-unused-ffat.md)
+
+---
 
 ### FT-06 / FT-07: I2C Bus Freeze / UI Freeze Regression — Resolved (2026-08-05)
 **Was**: a recurring full or partial interface freeze (button, touch, display all unresponsive),

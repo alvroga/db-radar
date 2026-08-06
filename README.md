@@ -28,7 +28,7 @@ A GPS waypoint radar application for the Waveshare ESP32-S3-Touch-LCD-2.1 round 
 - 📡 **WiFi AP boot mode** — device creates its own access point (`Radar-GPX`); no router required
 - 🌐 **WiFi STA boot mode** — device connects to a network on boot; web portal accessible by IP
 - 🔄 **OTA firmware update** — flash new firmware from the browser at `/update`
-- 🔖 **CalVer versioning** — `vYY.MM.DD` build stamp displayed on loading screen
+- 🔖 **CalVer versioning** — `vYY.MM.##` build stamp (year, month, build counter within that month) displayed on loading screen
 - 🔋 **Battery monitoring** — GPIO4 ADC, battery symbol icon (full/3-bar/2-bar/1-bar/empty/charging)
 - ☀️ **Daylight mode** — high-contrast black-on-white theme for outdoor use
 - ⚙️ **Settings screen** — GPS, WiFi, Display, Sound, Beacon, Dev tabs; all settings NVS-persisted
