@@ -11,6 +11,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+**CRT scanline render effect built, measured on hardware, and reverted — rejected on brightness, not
+performance (2026-08-06)**
+
+Follow-up on ROADMAP.md's "CRT / 8-bit Display Theme" backlog item: the per-pixel scanline route it had
+provisionally passed over (2026-08-04, in favor of a font-only approach) was actually built and
+measured rather than left as an estimate, since this render path has a history of wrong estimates (see
+CLAUDE.md's Render Pipeline section). Implemented as a halve-brightness darken on alternate output rows
+inside `rotate90_tiled`'s existing scatter pass in `device_manager.cpp`, behind a runtime-only
+`rot scanline on|off` serial toggle (no NVS persistence, no settings UI). Measured on real hardware:
+`tiled rotate` 38.9ms → 42.1ms, frame 80.2ms → 86.2ms (+6ms, ~7.5%) — a real cost, not free as
+hoped, because darkened rows give up the pass's bulk `memcpy` for a scalar per-pixel store loop. That
+cost turned out not to be the deciding factor: on-device visual check showed a ~20% perceived brightness
+loss on a display already run near the floor of outdoor readability, which was rejected outright.
+**Fully reverted** — `device_manager.cpp`, `device_manager.h`, `diagnostics.cpp` are byte-identical to
+before the experiment (verified via `git diff`), nothing shipped. Font-only remains the only live route
+for this backlog item, still unbuilt. Full writeup:
+[ADR-0026](docs/adr/0026-crt-scanline-brightness-rejected.md) · ROADMAP.md → "CRT / 8-bit Display Theme".
+
 **Version scheme changed from vYY.MM.DD to vYY.MM.## (2026-08-06)**
 
 `FW_VERSION` was one build per calendar day, which undercounts on days with multiple builds and

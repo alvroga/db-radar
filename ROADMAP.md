@@ -86,15 +86,27 @@ retro — scanlines, a coarser/pixelated font or dithering, maybe a subtle phosp
 to evoke a CRT / 8-bit look. Should be a **setting**, not a replacement of the current look (default
 stays sharp).
 
-**Open questions to resolve before implementation**:
+**2026-08-06: scanline/per-pixel route built, tested on hardware, and reverted — rejected on
+brightness, not performance.** A halve-brightness darken on alternate output rows was added inline to
+`rotate90_tiled`'s existing scatter pass (behind a `rot scanline on|off` serial toggle, no persisted
+state, no UI), on the theory examined below that it could ride the pass "for free." Measured on real
+hardware: `tiled rotate` 38.9ms → 42.1ms, frame 80.2ms → 86.2ms (+6ms, ~7.5%) — a real, non-zero cost
+(see ADR-0026 for why: half the destination rows lose the bulk `memcpy` and fall back to a scalar
+per-pixel store loop), but small enough that it wasn't the blocker. **Killed instead by ~20% perceived
+brightness loss** on a display already run near its readability floor outdoors — unacceptable
+regardless of render cost. Code fully reverted (`git diff` clean against the pre-test commit); nothing
+of this experiment ships. Full writeup: [ADR-0026](docs/adr/0026-crt-scanline-brightness-rejected.md).
 - Where do scanlines/dither come from — a static overlay image blended over the framebuffer, or a
   per-pixel effect in the flush callback (`rotate90_tiled` in `device_manager.cpp` already touches
   every pixel each frame, so a color/scanline pass could ride along, but that's the exact hot path
-  the Render Pipeline section says not to add work to lightly)
+  the Render Pipeline section says not to add work to lightly) — **answered above: per-pixel is
+  feasible and its cost is real but small; it's dead anyway on the brightness finding.**
 - Cost: any per-pixel work in the flush path competes with the frame budget documented in "Render
-  Pipeline" above (currently ~85ms/frame, bus-bound) — needs a real measurement, not an assumption
+  Pipeline" above (currently ~85ms/frame, bus-bound) — **measured 2026-08-06, see above: +6ms/frame.**
 - ~~Simpler alternative: LVGL theme/font swap only~~ — **chosen 2026-08-04**, scanline/per-pixel route
-  rejected. Font-only stays open as a *scope*, not a decision, until it's actually built.
+  rejected (font-only). **Reaffirmed 2026-08-06** after the scanline route was actually built and
+  killed on brightness — font-only is now the *only* live route, not just the first choice. Still not
+  yet built.
 
 **2026-08-04 scoping pass (font-only route), not yet built**: LVGL ships a built-in pixel/bitmap font
 (`LV_FONT_UNSCII_8`/`LV_FONT_UNSCII_16`) currently disabled in `include/ui/lv_conf.h` — enabling it is
@@ -106,9 +118,8 @@ size differs from Iosevka's 14/16/20px sizing, so a runtime toggle risks shiftin
 across every screen — needs on-device visual verification per screen, not just a build check. Not
 started; picking this up should budget for that breadth, not treat it as a one-line settings toggle.
 
-**Key files**: `src/core/device_manager.cpp` (flush callback, if a per-pixel effect is chosen),
-`src/ui/settings_screen.cpp` (toggle), `include/ui/lv_conf.h` (`LV_FONT_UNSCII_8/16`), the 7 screen
-files above (font call sites) if font-only
+**Key files** (font-only is the only live route — see above): `src/ui/settings_screen.cpp` (toggle),
+`include/ui/lv_conf.h` (`LV_FONT_UNSCII_8/16`), the 7 screen files above (font call sites)
 
 ---
 
