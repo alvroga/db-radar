@@ -23,6 +23,7 @@
 #include "hardware/sensors/compass_qmc5883l.h"
 #include "hardware/sensors/accel_qmi8658.h"
 #include "navigation/tilt_compensation.h"
+#include <algorithm>
 #include "field_log.h"
 #include "core/arduino_compat.h"
 #include "esp_core_dump.h"
@@ -1035,25 +1036,120 @@ void handleGPXCommand(const char* args) {
             Serial.println("[GPX] ERROR: Failed to restart server");
         }
     }
-    else if (strncmp(args, "index list", 10) == 0) {
-        int n = atoi(args + 10);
-        if (n <= 0) n = 10;
-        ui_manager::UIState& ui = ui_manager::getUIState();
-        int limit = n < ui.waypoint_count ? n : ui.waypoint_count;
-        Serial.printf("==== Working Set (closest-first, %d of %d) ====\n", limit, ui.waypoint_count);
-        Serial.printf("Center: %.6f, %.6f\n", ui.center_lat, ui.center_lon);
-        // Slots are filled closest-first by selectAndMaterialize()/reselect() —
-        // printing in slot order IS printing in distance order. See ADR-0023.
-        for (int i = 0; i < limit; i++) {
-            const ui_manager::Waypoint& wp = ui.waypoints[i];
-            if (!wp.valid) {
-                Serial.printf("  [%3d] (invalid slot)\n", i);
-                continue;
+    else if (strncmp(args, "index reselect", 14) == 0) {
+        // Debug-only: calls gpx_loader::reselect() directly with a synthetic
+        // center, bypassing the real GPS pipeline entirely. Exists to exercise
+        // the movement-triggered delta-diff logic (slot-recycling) without
+        // needing a live outdoor fix — see ADR-0023's open verification item.
+        double lat = 0.0, lon = 0.0;
+        if (sscanf(args + 14, "%lf %lf", &lat, &lon) != 2) {
+            Serial.println("Usage: gpx index reselect <lat> <lon>");
+        } else {
+            uint32_t t0 = millis();
+            int n = gpx_loader::reselect(lat, lon);
+            uint32_t elapsed = millis() - t0;
+            Serial.printf("[GPX] reselect(%.6f, %.6f) -> %d in working set, %lums\n",
+                          lat, lon, n, (unsigned long)elapsed);
+        }
+    }
+    else if (strncmp(args, "index gentest clean", 20) == 0) {
+        // Removes the file gentest writes, and reloads so it drops out of the
+        // working set. Debug-only, run after gentest to leave the SD card clean.
+        const char* path = "/sdcard/gpx/CLAUDE_NEARBY_TEST.GPX";
+        if (remove(path) == 0) {
+            Serial.printf("[GPX] Removed %s\n", path);
+        } else {
+            Serial.printf("[GPX] %s not present (nothing to remove)\n", path);
+        }
+        int in_set = gpx_loader::refreshGPXFiles();
+        Serial.printf("[GPX] Reload after cleanup: %d in working set\n", in_set);
+    }
+    else if (strncmp(args, "index gentest", 13) == 0) {
+        // Debug-only: writes a real GPX file straight to the SD card (no WiFi/
+        // upload needed) with waypoints scattered near a given center, then runs
+        // a real full reload. Exercises buildFileIndex()+selectAndMaterialize()
+        // against genuinely fresh file content, and stress-tests the sort with
+        // many waypoints clustered within meters of each other.
+        double lat = 0.0, lon = 0.0;
+        int count = 50;
+        int parsed = sscanf(args + 13, "%lf %lf %d", &lat, &lon, &count);
+        if (parsed < 2) {
+            Serial.println("Usage: gpx index gentest <lat> <lon> [count]");
+        } else {
+            if (count <= 0) count = 50;
+            if (count > 500) count = 500;
+
+            const char* path = "/sdcard/gpx/CLAUDE_NEARBY_TEST.GPX";
+            FILE* f = fopen(path, "w");
+            if (!f) {
+                Serial.printf("[GPX] ERROR: failed to create %s\n", path);
+            } else {
+                fprintf(f, "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<gpx version=\"1.1\">\n");
+                randomSeed(millis());
+                double cos_lat = cos(lat * M_PI / 180.0);
+                for (int i = 0; i < count; i++) {
+                    // Random offset within ~300m in each axis — meters -> degrees.
+                    double dlat_m = (double)random(-300, 301);
+                    double dlon_m = (double)random(-300, 301);
+                    double wlat = lat + dlat_m / 111320.0;
+                    double wlon = lon + dlon_m / (111320.0 * cos_lat);
+                    // One element per line — parseOneWaypointAt() is a line-by-line
+                    // state machine (see gpx_loader.cpp) and treats any line matching
+                    // "<wpt...lat=" as a fresh reset, so a same-line "<name>...</wpt>"
+                    // would never be seen as the close tag. Matches real GPX formatting.
+                    fprintf(f, "<wpt lat=\"%.6f\" lon=\"%.6f\">\n<name>NEARBY%03d</name>\n</wpt>\n",
+                            wlat, wlon, i);
+                }
+                fprintf(f, "</gpx>\n");
+                fclose(f);
+                Serial.printf("[GPX] Wrote %d synthetic waypoints near (%.6f, %.6f) to %s\n",
+                              count, lat, lon, path);
+
+                int in_set = gpx_loader::refreshGPXFiles();
+                Serial.printf("[GPX] Reload after gentest: %d in working set\n", in_set);
             }
-            double dist_m = geo::haversineMeters(ui.center_lat, ui.center_lon, wp.lat, wp.lon);
+        }
+    }
+    else if (strncmp(args, "index list", 10) == 0) {
+        int n = 0;
+        double clat = 0.0, clon = 0.0;
+        bool has_center_override = (sscanf(args + 10, "%d %lf %lf", &n, &clat, &clon) == 3);
+        if (!has_center_override) { n = atoi(args + 10); }
+        if (n <= 0) n = 10;
+
+        ui_manager::UIState& ui = ui_manager::getUIState();
+        double center_lat = has_center_override ? clat : ui.center_lat;
+        double center_lon = has_center_override ? clon : ui.center_lon;
+
+        // Slot order is NOT reliably distance order: selectAndMaterialize() fills
+        // slots closest-first on a cold load, but reselect() deliberately leaves
+        // any slot whose entry is still in the new closest-N untouched wherever it
+        // already sits (that's the whole point of the delta-diff — skip the SD
+        // reparse for unchanged membership), so slot order can go stale relative
+        // to the *current* center after any reselect. Sort explicitly here rather
+        // than trusting slot order, so this command stays reliable as a debug tool.
+        struct Ranked { int slot; double dist; };
+        static Ranked ranked[ui_manager::RadarConfig::MAX_WAYPOINTS];
+        int valid_count = 0;
+        for (int i = 0; i < ui.waypoint_count; i++) {
+            if (!ui.waypoints[i].valid) continue;
+            ranked[valid_count].slot = i;
+            ranked[valid_count].dist = geo::haversineMeters(center_lat, center_lon,
+                                                              ui.waypoints[i].lat, ui.waypoints[i].lon);
+            valid_count++;
+        }
+        std::sort(ranked, ranked + valid_count,
+                  [](const Ranked& a, const Ranked& b) { return a.dist < b.dist; });
+
+        int limit = n < valid_count ? n : valid_count;
+        Serial.printf("==== Working Set (closest-first, %d of %d valid) ====\n", limit, valid_count);
+        Serial.printf("Center: %.6f, %.6f%s\n", center_lat, center_lon,
+                      has_center_override ? " (override)" : "");
+        for (int i = 0; i < limit; i++) {
+            const ui_manager::Waypoint& wp = ui.waypoints[ranked[i].slot];
             const char* dname = wp.display_name[0] ? wp.display_name : wp.name;
-            Serial.printf("  [%3d] %-24s %10.6f, %11.6f   %10.1f m\n",
-                          i, dname, wp.lat, wp.lon, dist_m);
+            Serial.printf("  slot[%3d] %-24s %10.6f, %11.6f   %10.1f m\n",
+                          ranked[i].slot, dname, wp.lat, wp.lon, ranked[i].dist);
         }
         Serial.println("==============================================");
     }
@@ -1083,6 +1179,8 @@ void handleGPXCommand(const char* args) {
         Serial.println("  gpx restart   - Restart web server");
         Serial.println("  gpx index     - Show two-tier waypoint index stats");
         Serial.println("  gpx index list [N] - List closest N working-set waypoints w/ distance");
+        Serial.println("  gpx index reselect <lat> <lon> - Debug: force reselect against a synthetic center");
+        Serial.println("  gpx index gentest <lat> <lon> [count] - Debug: write count waypoints near center + reload");
     }
 }
 

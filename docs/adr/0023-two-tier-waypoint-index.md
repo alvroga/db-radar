@@ -97,10 +97,52 @@ PSRAM: `gpx_index` (8192 × ~14B entries + 64 × 96B file names ≈ 121.5KB) + t
 
 ## Verification status
 
-Build-clean on ESP-IDF (`pio run -e cc-radar`), SRAM delta measured as above. **Not yet field-tested on
-hardware** — no on-device confirmation yet that: a real multi-file/high-count GPX load selects the
-correct closest-200; the movement-triggered reselect fires at the right threshold without stalling the
-System Task loop or tripping the TWDT; `found`/`fixed` survive a real walk-away-and-back; concurrent SD
-access (upload mid-reselect) doesn't corrupt state. Treat this ADR as documenting the design decision
-and initial implementation, not a closed field-verification loop — see
-`docs/waypoint_two_tier_index_plan.md` §10 for the full verification checklist this still owes.
+Build-clean on ESP-IDF, SRAM delta measured as above, **and field-verified on real hardware** with a
+16-file / 515-waypoint SD card (including a 500-waypoint globally-scattered synthetic fixture). This
+caught one real bug the build check couldn't: `gpx_loader::init()` — which allocates the PSRAM index —
+was never called anywhere in the codebase (a pre-existing gap, not introduced by this change), so the
+feature was silently dead and every load fell back to the legacy file-order path. Fixed in `main.cpp`.
+
+Confirmed on-device, cross-checked against an independent Python/Haversine oracle sharing no code with
+the firmware:
+- **Cold selection correctness** — the boot-time working set matched the oracle's closest-200 exactly,
+  for the real NVS-seeded position.
+- **Delta-reselect correctness under real membership churn** — forced a synthetic center far enough
+  away (Sydney) to evict/replace 174 of 200 slots; the new working set matched the oracle exactly for
+  that center too, materialized via real `fseek`+re-parse from the real SD card, no corruption, no
+  crash. Took 457ms for that worst-case (near-total-turnover) case — comfortably under the System
+  Task's watchdog budget for a single call, but see "still open" below on repeated/pathological cases.
+- **HDOP gating correctness** — watched real GPS fixes with HDOP 11–38 get correctly rejected (no
+  center update, no reselect), and later a good fix (HDOP 3–4.7) get correctly accepted.
+- **Movement-threshold correctness** — watched a stationary, GPS-locked device for 150s: `center_lat/
+  lon` tracked the live (accepted) fix smoothly, and the reselect trigger correctly stayed silent since
+  the position never moved the required 150m.
+- **End-to-end with genuinely fresh data** — wrote 50 synthetic waypoints scattered within ~300m of the
+  live GPS position directly to the SD card and ran a real full reload (`buildFileIndex()` +
+  `selectAndMaterialize()` against brand-new file content, not the pre-existing fixture): all 50
+  correctly dominated the top of the working set in exact distance order, interleaved correctly with
+  the one pre-existing real waypoint that was still closer than some of them. (This also surfaced and
+  fixed a bug in the *test generator*, not the firmware: `parseOneWaypointAt()` requires one XML
+  element per line, matching every real-world GPX file's format including this project's own test
+  fixture — a first version of the generator put `<name>` and `</wpt>` on the same line as `<wpt>` and
+  silently failed to materialize any of the 50 entries, while still correctly indexing them in pass 1.
+  Worth knowing as a hard constraint of the line-based parser if it's ever fed a GPX file from an
+  unusual export tool.)
+
+Three debug-only serial commands were added to make this kind of verification repeatable:
+`gpx index list [N] [lat lon]` (explicitly sorts by distance at print time — slot order is *not*
+reliably distance order once any reselect has run, since `reselect()` deliberately leaves an
+already-selected entry's slot untouched to avoid unnecessary re-parses), `gpx index reselect <lat>
+<lon>` (calls `reselect()` directly, bypassing the GPS pipeline), and `gpx index gentest <lat> <lon>
+[count]` / `gpx index gentest clean` (writes/removes a synthetic nearby-waypoints GPX file on the real
+SD card and reloads).
+
+**Still open**: the automatic GPS-driven call site itself was not directly observed invoking
+`reselect()` with a nonzero, organically-caused movement (only the manual debug injection was); a real
+outdoor walk with tethered serial would close this fully. Also still open per the design doc's §10:
+concurrent SD access (upload mid-reselect) safety — no SD-access mutex exists anywhere in this
+codebase, and this was flagged, not resolved; repeated/back-to-back large reselects' worst-case latency
+against the TWDT budget; and `found`/`fixed` survival specifically across a walk-away-and-back (the
+slot-stability *logic* was exercised by the churn test above, but not through the `fixed_waypoint_index`
+code path specifically, since fixing a waypoint requires a touchscreen interaction this verification
+pass didn't drive).

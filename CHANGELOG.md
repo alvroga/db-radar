@@ -28,8 +28,19 @@ so it survives a slot being recycled. Also closes a pre-existing gap where delet
 (`gpx_server.cpp`'s `delete_handler`) never triggered a reload at all. New `gpx index` serial command
 reports index/working-set size and truncation state. `MAX_WAYPOINTS` itself is untouched (still 200,
 the boot-verified ADR-0022 floor) — measured static SRAM cost of the whole feature is +3,640 B
-(+1.1 percentage points). Build-clean; **not yet field-tested on hardware**. See
-[ADR-0023](docs/adr/0023-two-tier-waypoint-index.md) and `docs/waypoint_two_tier_index_plan.md`.
+(+1.1 percentage points).
+
+**Field-verified on hardware** with a 16-file/515-waypoint SD card, cross-checked against an
+independent Haversine oracle script: cold selection, a forced high-churn reselect (174/200 slots,
+457ms, real SD `fseek`+re-parse, Sydney-area synthetic center), HDOP gating, the 150m movement
+threshold's correct silence while stationary, and a live end-to-end test writing 50 fresh waypoints
+near the real GPS position and confirming they correctly took over the top of the working set — all
+matched independently-computed ground truth exactly. This verification pass also caught and fixed a
+real bug: `gpx_loader::init()` (which allocates the PSRAM index) was never called anywhere, so the
+feature was silently dead on any board until now — see `main.cpp`. Still open: the automatic GPS-driven
+reselect call site wasn't observed firing from real (non-injected) movement, and concurrent-SD-access
+safety during a reselect is unverified. See [ADR-0023](docs/adr/0023-two-tier-waypoint-index.md) and
+`docs/waypoint_two_tier_index_plan.md` for the full verification detail.
 
 ### Fixed
 
