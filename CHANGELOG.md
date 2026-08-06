@@ -122,6 +122,47 @@ exercised on hardware yet.
 
 ### Fixed
 
+**Waypoint on-screen test used a square bounding box on a round display (2026-08-06)**
+
+Reported by the user with two annotated screenshots: a waypoint could visibly vanish when zooming in
+(specifically noticeable 100m → 50m), reappearing only once the user got close enough or zoomed back
+out. `drawWaypoints()`'s on/off-screen decision (`src/ui/navigation.cpp`) was `x >= 0 && x <
+screen_size && y >= 0 && y < screen_size` — a test against the full 480×480 square framebuffer. The
+physical glass is round: a waypoint whose position falls in the square's corners (outside the round
+visible radius, but still inside the 480×480 bounds) passed this test and was drawn as a dot in the
+area hidden under the round bezel, instead of falling through to the existing off-screen sector-arrow
+logic. A follow-up screenshot confirmed it directly — the "vanished" waypoint's dot was sitting in the
+black square corner outside the visible circle, not merely off the edge.
+
+Fixed by replacing the square test with a circular one (`dx²+dy² <= (screen_size/2)²`, relative to
+screen center) in both `drawWaypoints()` and the tap hit-test in `handleTapAt()` — the latter needed
+the same fix for consistency, since a waypoint drawn as an off-screen arrow could otherwise still
+register a tap in the hidden square corner where its (undrawn) dot would have been.
+
+This is distinct from FT-03 (zoom radii not a geometric progression) and the milder, purely
+geometric quadrant-vs-inscribed-circle effect the user's first two screenshots also raised — a
+waypoint that's genuinely just past the new zoom's true visible radius after zooming in. That one
+remains: the fix here only stops waypoints from being *incorrectly* drawn on-screen when they're
+actually off-screen; it doesn't change when a waypoint legitimately falls outside a smaller zoom
+radius. Build verified: RAM 49.3% (161,584 B), Flash 40.5% (1,698,859 B) — unchanged.
+**Field-verified 2026-08-06**: user confirmed on hardware the 100m → 50m corner case now behaves
+correctly. Files: `src/ui/navigation.cpp`. See ROADMAP.md → Resolved → "FT-09".
+
+**FT-03 and FT-05 closed as stale ROADMAP entries, not code fixes (2026-08-06)**
+
+Both entries described symptoms that no longer reproduce, and in both cases the likely explanation is
+the same: the zoom levels and the waypoint render path were each revised at some point without
+ROADMAP.md being updated to match, not that either issue was silently fixed by design. FT-03 was
+written against a since-replaced zoom set (50m/100m/500m/1km/5km, 2×/5× jumps); the current set
+(`RadarConfig::ZOOM_CONFIGS[]`: 50/100/200/500/1000m) is mostly 2× steps with one 2.5× jump and was
+confirmed to feel natural on hardware, no code change made. FT-05 (dot and off-screen arrow rendering
+simultaneously) could not be reproduced despite deliberately retrying the original walk-into-bounds
+scenario during the FT-09 investigation above — `drawWaypoints()`'s current `if (on_screen) {...}
+else {...}` structure makes the two mutually exclusive by construction, and the default full-frame
+redraw (`full_refresh = 1`) leaves no stale pixels to linger; most likely resolved incidentally by the
+zero-copy render rewrite, but the exact fixing commit wasn't pinned down. See ROADMAP.md → Resolved →
+"FT-03", "FT-05".
+
 **FT-08: `field_log` writer task/PSRAM ring kept running after dev mode was turned off (2026-08-06)**
 
 Found while investigating storage architecture for ADR-0024. `field_log` (the PSRAM-ring field-data

@@ -8,29 +8,7 @@ For completed features and history, see [CHANGELOG.md](CHANGELOG.md).
 
 ## Known Issues
 
-### FT-03: Zoom Levels Not Progressive
-**Severity**: Medium — navigation confusion
-
-**Symptom**: A waypoint visible at one zoom level can vanish at the next. The current radii (50m, 100m, 500m, 1km, 5km) are not geometric multiples of each other — jumps alternate between 2× and 5×. A waypoint near the outer ring of 100m zoom may fall outside the distance filter threshold for 500m zoom.
-
-**Proposed fix**: Replace with a geometric progression where each step is a fixed multiplier (e.g. ×3 or ×4): 50m → 150m → 500m → 1500m → 5000m. Every waypoint visible at zoom N would be visible at N+1, just further from centre.
-
-**Also affects**: Grid line spacing, off-screen indicator distance filter multiplier.
-
-**Key file**: `include/ui/ui_manager.h` — `RadarConfig::ZOOM_CONFIGS[]`
-
----
-
-### FT-05: On/Off-Screen Boundary Duplicate Indicator
-**Severity**: Low — edge case visual glitch
-
-**Symptom**: As a waypoint crosses from off-screen to on-screen, both the yellow dot and the orange off-screen arrow briefly appear simultaneously.
-
-**Root cause**: Off-screen sector assignment occurs before the on-screen clip check. Waypoints exactly at the boundary pixel satisfy both conditions.
-
-**Fix**: Strict boundary guard in `drawWaypoints()` — only add to off-screen sector if `x < 0 || x >= screen_size || y < 0 || y >= screen_size` (exclusive bounds check). One-line fix.
-
-**Key file**: `src/ui/navigation.cpp` — `drawWaypoints()`
+None currently open. See Resolved below for FT-03, FT-05, FT-09.
 
 ---
 
@@ -131,6 +109,66 @@ the render-cost reasoning).
 ---
 
 ## Resolved
+
+### FT-09: Waypoint On-Screen Test Used a Square Box on a Round Display — Resolved (2026-08-06)
+**Was**: reported by the user via two annotated screenshots showing a waypoint sitting inside the
+"next zoom's" inner quadrant that should stay visible when zooming in, plus a follow-up screenshot
+showing where it actually went: the dot rendered into the black square corner of the framebuffer,
+outside the round visible glass. `drawWaypoints()`'s on/off-screen test (`src/ui/navigation.cpp`) was
+`x >= 0 && x < screen_size && y >= 0 && y < screen_size` — a square bounding-box check against the
+full 480×480 framebuffer, not the round display area. A waypoint landing in the square's corners
+(inside the 480×480 bounds but outside the round visible radius) passed this test and was drawn as a
+dot hidden under the bezel, instead of falling through to the existing off-screen sector-arrow logic —
+so it appeared to simply vanish, most noticeably on the 100m → 50m zoom step.
+
+**Resolution**: replaced the square test with a circular one (`dx²+dy² <= (screen_size/2)²`) in both
+`drawWaypoints()` and the tap hit-test in `handleTapAt()` (needed the same fix for hit-test/render
+consistency). Build-verified: RAM 49.3% (161,584 B), Flash 40.5% (1,698,859 B) — unchanged.
+**Field-verified 2026-08-06** — user confirmed on hardware the 100m → 50m corner case now behaves
+correctly.
+
+**Does not fully resolve FT-03** (below) — see that entry for why the two look similar but aren't
+the same issue.
+
+**Key file**: `src/ui/navigation.cpp` — `drawWaypoints()`, `handleTapAt()`
+
+---
+
+### FT-03: Zoom Levels Not Progressive — Closed, accepted as-is (2026-08-06)
+**Was**: written against an older zoom set (50m, 100m, 500m, 1km, 5km) with jumps alternating 2×/5×,
+proposing a strict geometric progression (e.g. ×3 or ×4 every step) so a waypoint visible at zoom N
+would always still be visible at N+1.
+
+**Closed without code changes**: the zoom set in `RadarConfig::ZOOM_CONFIGS[]` had already moved on to
+50m → 100m → 200m → 500m → 1000m — mostly 2× steps with one 2.5× jump (200m → 500m) — without this
+entry being updated to match. Re-tested against the current set: the user reports the zoom now feels
+natural with no navigation-confusion symptom. Root cause of the stale entry was the same as FT-05's —
+the zoom levels were revised at some point and ROADMAP.md wasn't updated alongside. No further work
+planned; the one non-uniform step (200m → 500m) is accepted.
+
+**Key file**: `include/ui/ui_manager.h` — `RadarConfig::ZOOM_CONFIGS[]`
+
+---
+
+### FT-05: On/Off-Screen Boundary Duplicate Indicator — Closed, unreproducible (2026-08-06)
+**Was**: reported symptom was a waypoint showing both the yellow on-screen dot and the orange
+off-screen arrow simultaneously while crossing the visibility boundary — originally observed walking
+toward a waypoint that started out of bounds.
+
+**Closed without a targeted fix**: user deliberately tried to reproduce the original scenario (walking
+a waypoint from out-of-bounds into bounds) during the FT-09 investigation above and could not — only
+one of the two ever renders. This matches the current code: `drawWaypoints()` is a single `if
+(on_screen) {...} else {...}` branch, so a dot and an arrow for the same waypoint are mutually
+exclusive by construction, and the default render mode does a full framebuffer redraw every frame
+(`full_refresh = 1`, see CLAUDE.md's Render Pipeline section), leaving no stale pixels from a prior
+frame to linger. The exact commit that fixed it was not pinned down — most likely an incidental
+side effect of the zero-copy render rewrite (moving off the older canvas-based path) rather than a
+change targeted at this bug. Root cause of the stale entry: the fix (or the rewrite that subsumed it)
+predated this ROADMAP entry being updated to reflect it.
+
+**Key file**: `src/ui/navigation.cpp` — `drawWaypoints()`
+
+---
 
 ### Compass Calibration & Tilt — heading is only valid held flat — Resolved (2026-08-02), closed (2026-08-06)
 **Was**: the compass is the sole heading source, and the original 2-axis heading formula

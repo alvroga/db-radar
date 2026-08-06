@@ -692,8 +692,16 @@ static void drawWaypoints(lv_draw_ctx_t* ctx, int screen_size) {
             rotatePoint(x, y, ui.current_heading, center_x, center_y);
         }
 
-        // Check if waypoint is on-screen or off-screen
-        if (x >= 0 && x < screen_size && y >= 0 && y < screen_size) {
+        // Check if waypoint is on-screen or off-screen. The glass is round, not
+        // square — a square bounding-box test lets waypoints land in the framebuffer's
+        // corners (outside the round visible area, hidden under the bezel) and get
+        // drawn as an invisible dot instead of falling through to the off-screen arrow.
+        int screen_radius = screen_size / 2;
+        int dx_from_center = x - center_x;
+        int dy_from_center = y - center_y;
+        bool on_screen = (dx_from_center * dx_from_center + dy_from_center * dy_from_center)
+                          <= (screen_radius * screen_radius);
+        if (on_screen) {
             // On-screen: draw yellow circle beacon
             int size = ui_manager::RadarConfig::WAYPOINT_SIZE;  // 25x25
             int half_size = size / 2;
@@ -1392,7 +1400,14 @@ void handleTapAt(int screen_x, int screen_y) {
         if (!ui.waypoints[i].valid) continue;
         int wx, wy;
         latLonToScreen(ui.waypoints[i].lat, ui.waypoints[i].lon, wx, wy, screen_size);
-        if (wx < 0 || wx >= screen_size || wy < 0 || wy >= screen_size) continue;
+        // Round glass, not square — must match drawWaypoints()'s on-screen test or a
+        // waypoint drawn as an off-screen arrow could still register a tap in the
+        // hidden square corner where its (undrawn) dot would otherwise have been.
+        int screen_radius = screen_size / 2;
+        int wx_from_center = wx - screen_size / 2;
+        int wy_from_center = wy - screen_size / 2;
+        if (wx_from_center * wx_from_center + wy_from_center * wy_from_center
+            > screen_radius * screen_radius) continue;
         int dx = screen_x - wx;
         int dy = screen_y - wy;
         if (dx*dx + dy*dy <= HIT_RADIUS*HIT_RADIUS) {
