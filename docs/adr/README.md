@@ -54,7 +54,7 @@ date — sort on that for chronology, not on the filename.
 | [0021](0021-i2c-nack-hang-build-time-backport.md) | Build-time backport of the IDF NACK-hang fix, not a version bump or a manual edit | 2026-08-02 | Accepted |
 | [0022](0022-waypoint-cap-raised-to-500-not-700.md) | Raise `MAX_WAYPOINTS` to 500 (not 700+), after replacing Haversine with equirectangular | 2026-08-05 | Superseded on the cap number (see ADR-0023) |
 | [0023](0023-two-tier-waypoint-index.md) | Two-tier waypoint index (PSRAM full index + SRAM working set) | 2026-08-05 | Accepted |
-| [0024](0024-ota-partitions-grown-from-unused-ffat.md) | OTA partitions grown to 3.5MB by reclaiming unused FFat; GPX storage moving off SD | 2026-08-06 | Accepted |
+| [0024](0024-ota-partitions-grown-from-unused-ffat.md) | OTA partitions grown to 4MB by reclaiming unused FFat; GPX storage moving off SD | 2026-08-06 | Accepted, revised same day (3.5MB → 4MB) |
 
 ## Status
 

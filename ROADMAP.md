@@ -61,9 +61,9 @@ disable calls.
 **Decision**: GPX files (`/sdcard/gpx`) move to the FFat flash partition, which was completely unused
 until now (0 mount calls anywhere in the tree — see ADR-0024). Driven by the enclosure design making
 the physical SD card inaccessible without disassembly, which is a bad failure mode for something GPX
-data (core functionality) depends on. FFat headroom (~8.69MB after the 3.5MB OTA resize) comfortably
+data (core functionality) depends on. FFat headroom (~7.69MB after the 4MB OTA resize) comfortably
 covers the project's own lean GPX generator format and the 8,192-entry PSRAM index cap either way;
-Geocaching.com-style heavy imports remain supported but become capacity-capped (roughly 800-2,000
+Geocaching.com-style heavy imports remain supported but become capacity-capped (roughly 1,040
 full-detail caches) rather than unlimited — an accepted tradeoff since that use was already a "plus,"
 not core. Dev-only logging (`system_logger`, `field_log`, `tilt_bench`) stays on SD for now — low
 stakes, retrievable over the web portal without disassembly, no reason to migrate in the same pass.

@@ -1,12 +1,16 @@
 # Name,     Type, SubType,  Offset,    Size,     Flags
-# 16MB flash: 2x3.5MB OTA app slots + 8.69MB FFat + 256KB coredump
+# 16MB flash: 2x4MB OTA app slots + 7.69MB FFat + 256KB coredump
 # Replaces the single factory slot in partitions.csv
 # Raised from 2MB/11.7MB 2026-08-06 — 2MB slots were at 80% (409KB headroom)
-# with FFat entirely unmounted/unused; see docs/adr/ for the storage decision.
-# Binary size as of 2026-08-06: ~1.68MB — 3.5MB slots give ~1.9MB headroom (54%)
+# with FFat entirely unmounted/unused; see docs/adr/0024 for the storage decision.
+# Went 2MB -> 3.5MB -> 4MB same day: OTA headroom needs a full USB reflash to grow
+# again (not OTA-pushable), FFat headroom doesn't — GPX is capped by the 8,192-entry
+# waypoint index long before FFat bytes bind, so the extra room is worth more on the
+# OTA side. See ADR-0024 addendum.
+# Binary size as of 2026-08-06: ~1.68MB — 4MB slots give ~2.4MB headroom (60%)
 nvs,        data, nvs,      0x9000,    0x4000,
 otadata,    data, ota,      0xE000,    0x2000,
-ota_0,      app,  ota_0,    0x10000,   0x380000,
-ota_1,      app,  ota_1,    0x390000,  0x380000,
-ffat,       data, fat,      0x710000,  0x8B0000,
+ota_0,      app,  ota_0,    0x10000,   0x400000,
+ota_1,      app,  ota_1,    0x410000,  0x400000,
+ffat,       data, fat,      0x810000,  0x7B0000,
 coredump,   data, coredump, 0xFC0000,  0x40000,

@@ -200,9 +200,11 @@ board_build.f_flash = 80000000L
 ```
 
 ### **Memory Layout**
-- **Custom Partitions**: `partitions/partitions_ota.csv` — 2 × 3.5MB OTA app slots + ~8.69MB FFat,
+- **Custom Partitions**: `partitions/partitions_ota.csv` — 2 × 4MB OTA app slots + ~7.69MB FFat,
   grown from the original 2MB/11.7MB split 2026-08-06 (that split was an unexamined Arduino IDE
   default, never chosen for this project; see [ADR-0024](docs/adr/0024-ota-partitions-grown-from-unused-ffat.md)).
+  4MB was chosen over an initial same-day 3.5MB pass because OTA headroom needs a full USB reflash to
+  grow again while FFat headroom is freeable anytime over the web portal — see the ADR's addendum.
   FFat was, and as of this writing still is, completely unmounted — all real storage (GPX files,
   logs) lives on the physical SD card today; moving GPX to FFat is planned but not yet implemented
   (see ROADMAP.md).
@@ -1111,8 +1113,10 @@ required for new work — tracked in `docs/adr/BACKFILL_PLAN.md`.
 
 *This document serves as the master reference for ESP32-S3 Touch LCD projects. Keep it updated as the architecture evolves.*
 
-**Last updated**: 2026-08-06 (OTA partitions grown 2MB → 3.5MB/slot, reclaimed from the previously-unused
-11.7MB FFat partition; decided GPX storage will move from SD to FFat since the enclosure makes the SD
+**Last updated**: 2026-08-06 (OTA partitions grown 2MB → 4MB/slot, reclaimed from the previously-unused
+11.7MB FFat partition — revised same day from an initial 3.5MB pass once the reflash-vs-web-portal
+recoverability asymmetry was weighed against FFat's already-oversupplied headroom, see ADR-0024's
+addendum; decided GPX storage will move from SD to FFat since the enclosure makes the SD
 card inaccessible without disassembly — migration itself not yet implemented, see ADR-0024 and
 ROADMAP.md. Found in the same investigation: `field_log` has no teardown path, so dev-mode-off doesn't
 fully stop it — tracked as FT-08 in ROADMAP.md. Previously: 2026-08-05, two-tier waypoint index added
