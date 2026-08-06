@@ -23,6 +23,18 @@ if that file is missing or its version string doesn't parse, the counter restart
 Files: `scripts/gen_version.py`, `include/core/fw_version_gen.h`, `README.md`.
 Full reasoning and the state-file alternative considered: [ADR-0025](docs/adr/0025-version-scheme-monthly-build-counter.md).
 
+**GPX/logs web page layout fixes: spacing and left-justified names (2026-08-06)**
+
+Follow-up polish on the GPX-to-FFat web UI below, from a screenshot review after field-testing. Three
+CSS-only fixes in `gpx_server.cpp`: the GPX page's `.bulk-actions` row (Select all / Download Selected
+/ Delete Selected) sat flush against the drag-and-drop zone with no gap (`margin-top: 20px` added);
+the GPX file list's name/code text was visually centered in each row rather than left-justified —
+`.file-item` is a 3-child flexbox with `justify-content: space-between` and the label had no
+`flex-grow`, so it centered in the middle gap between the checkbox and the buttons (`.file-label` now
+`flex-grow: 1`, matching the pattern the logs page's `.log-info` already used correctly); and the logs
+page's checkbox sat glued against the filename with no gap — `.log-checkbox` was missing the
+`margin-right: 10px` that the GPX page's `.file-checkbox` already had.
+
 **OTA partitions grown 2MB → 4MB per slot, reclaimed from unused FFat (2026-08-06)**
 
 `partitions_ota.csv` had been unchanged since project inception — a canned Arduino IDE preset never

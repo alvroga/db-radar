@@ -110,7 +110,7 @@ static const char UPLOAD_HTML[] = R"rawliteral(
             justify-content: space-between;
             align-items: center;
         }
-        .file-label { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+        .file-label { display: flex; flex-direction: column; gap: 2px; flex-grow: 1; min-width: 0; margin-right: 10px; }
         .file-name { color: #e0e0e0; font-size: 0.9em; }
         .file-code { color: #666; font-size: 0.75em; }
         .file-checkbox {
@@ -124,6 +124,7 @@ static const char UPLOAD_HTML[] = R"rawliteral(
             display: flex;
             align-items: center;
             gap: 10px;
+            margin-top: 20px;
             margin-bottom: 10px;
         }
         .select-all-label {
@@ -596,6 +597,7 @@ static const char LOGS_HTML[] = R"rawliteral(
             width: 16px;
             height: 16px;
             accent-color: #00aa44;
+            margin-right: 10px;
             flex-shrink: 0;
         }
         .delete-selected-btn {
