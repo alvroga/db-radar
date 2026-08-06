@@ -52,11 +52,14 @@ date — sort on that for chronology, not on the filename.
 | [0019](0019-3-axis-tumble-calibration-not-ellipsoid-fit.md) | 3-axis calibration via a second min/max tumble step, not an ellipsoid/soft-iron fit | 2026-08-02 | Accepted |
 | [0020](0020-tilt-compensation-formula-and-sign-from-bench-data.md) | Tilt-compensation frame rotation and sign resolved from bench self-consistency, not the textbook formula or a first-principles sign argument | 2026-08-02 | Accepted |
 | [0021](0021-i2c-nack-hang-build-time-backport.md) | Build-time backport of the IDF NACK-hang fix, not a version bump or a manual edit | 2026-08-02 | Accepted |
+| [0022](0022-waypoint-cap-raised-to-500-not-700.md) | Raise `MAX_WAYPOINTS` to 500 (not 700+), after replacing Haversine with equirectangular | 2026-08-05 | Superseded on the cap number (see ADR-0023) |
+| [0023](0023-two-tier-waypoint-index.md) | Two-tier waypoint index (PSRAM full index + SRAM working set) | 2026-08-05 | Accepted |
+| [0024](0024-ota-partitions-grown-from-unused-ffat.md) | OTA partitions grown to 3.5MB by reclaiming unused FFat; GPX storage moving off SD | 2026-08-06 | Accepted |
 
 ## Status
 
 - **Going forward**: new architectural decisions get an ADR at the time they're made (see CLAUDE.md
-  → Documentation Standards). Next free number: **0022**.
+  → Documentation Standards). Next free number: **0025**.
 - **Historical backfill**: ✅ complete (2026-08-01). ADRs 0004–0017 were reconstructed from
   CHANGELOG.md, ROADMAP.md, `docs/performance_optimization_backlog.md`, the component docs and git
   history, following [`BACKFILL_PLAN.md`](BACKFILL_PLAN.md). They carry

@@ -34,7 +34,48 @@ For completed features and history, see [CHANGELOG.md](CHANGELOG.md).
 
 ---
 
+### FT-08: Dev Mode Off Doesn't Fully Stop `field_log`
+**Severity**: Low — dev-only resource leak, not user-facing
+
+**Symptom**: Found 2026-08-06 while investigating storage architecture (ADR-0024). `field_log` (the
+PSRAM-ring field-data logger used for hardware bring-up/tuning) is started once at boot if `dev_mode`
+was on then (`main.cpp:99`), allocating a PSRAM ring buffer and a dedicated writer task. There is no
+`field_log::end()`/`stop()` anywhere in the codebase — only `begin()` and per-session
+`startSample()`/`stopSample()`. Turning dev mode off mid-session (even via the otherwise-complete
+serial `dev off` cascade, which does correctly stop `system_logger`) leaves the field_log writer task
+and ring buffer running for the rest of the session regardless.
+
+**Fix**: Add a real `field_log::end()` (stop the writer task, flush, free the ring/mutex) and call it
+from `handleDevCommand`'s `"off"` branch (`diagnostics.cpp`) alongside the existing `system_logger`
+disable calls.
+
+**Key files**: `src/utils/field_log.cpp`, `include/utils/field_log.h`, `src/utils/diagnostics.cpp`
+
+---
+
 ## Planned
+
+### GPX Storage: Move from SD to FFat
+**Severity**: Architecture — decided 2026-08-06, not yet implemented
+
+**Decision**: GPX files (`/sdcard/gpx`) move to the FFat flash partition, which was completely unused
+until now (0 mount calls anywhere in the tree — see ADR-0024). Driven by the enclosure design making
+the physical SD card inaccessible without disassembly, which is a bad failure mode for something GPX
+data (core functionality) depends on. FFat headroom (~8.69MB after the 3.5MB OTA resize) comfortably
+covers the project's own lean GPX generator format and the 8,192-entry PSRAM index cap either way;
+Geocaching.com-style heavy imports remain supported but become capacity-capped (roughly 800-2,000
+full-detail caches) rather than unlimited — an accepted tradeoff since that use was already a "plus,"
+not core. Dev-only logging (`system_logger`, `field_log`, `tilt_bench`) stays on SD for now — low
+stakes, retrievable over the web portal without disassembly, no reason to migrate in the same pass.
+SD itself stays in the physical design, justified by a specific deferred future use — offline
+map-tile/imagery caching — not by GPX capacity.
+
+**Not yet scoped**: file layout on FFat, migration/first-boot behavior for existing SD-resident GPX
+files, and whether the web GPX manager needs a storage-target selector or just switches wholesale.
+
+**Full reasoning**: [ADR-0024](docs/adr/0024-ota-partitions-grown-from-unused-ffat.md)
+
+---
 
 ### Quests *(brainstorm stage — not designed yet)*
 **Severity**: Feature — new idea, not yet scoped

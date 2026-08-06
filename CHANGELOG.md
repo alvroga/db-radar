@@ -9,6 +9,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+**OTA partitions grown 2MB → 3.5MB per slot, reclaimed from unused FFat (2026-08-06)**
+
+`partitions_ota.csv` had been unchanged since project inception — a canned Arduino IDE preset never
+revisited for this project's actual needs. Investigation found two things: OTA slots were at 80% used
+(409KB headroom) against a project history of consistent flash growth, and the 11.7MB FFat partition
+was entirely unmounted — a full grep for FAT-on-flash mount calls found only `/sdcard` (the SD card),
+never `ffat`. Both slots grown to 3.5MB (now 45.7%/1.9MB headroom), leaving FFat at ~8.69MB — still
+oversized for GPX storage at the project's real data density (see ADR-0024's capacity math: ~169
+bytes/waypoint for the project's own lean generator format vs. ~5-11KB/waypoint for Geocaching.com
+imports, byte-counted from real files in `assets/gpx/`). Also decided as part of this change: GPX
+storage will move from SD to FFat (migration not yet implemented, tracked in ROADMAP.md) — the SD
+card is physically inaccessible without disassembling the device in the current enclosure, a bad
+place to keep a hard dependency for core functionality. SD keeps dev-only logging for now and stays
+in the design for a specific deferred future use (offline map-tile caching, no current priority).
+Full reasoning and alternatives considered: [ADR-0024](docs/adr/0024-ota-partitions-grown-from-unused-ffat.md).
+
+Build verified against the new table: 45.7% flash (1,678,507 / 3,670,016 bytes), unchanged RAM.
+
 ### Added
 
 **Two-tier waypoint index — closest-N selection instead of a higher SRAM cap (2026-08-05)**

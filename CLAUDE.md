@@ -200,7 +200,12 @@ board_build.f_flash = 80000000L
 ```
 
 ### **Memory Layout**
-- **Custom Partitions**: `partitions/partitions_ota.csv` — 2 × 2MB OTA app slots + ~11.7MB FFat.
+- **Custom Partitions**: `partitions/partitions_ota.csv` — 2 × 3.5MB OTA app slots + ~8.69MB FFat,
+  grown from the original 2MB/11.7MB split 2026-08-06 (that split was an unexamined Arduino IDE
+  default, never chosen for this project; see [ADR-0024](docs/adr/0024-ota-partitions-grown-from-unused-ffat.md)).
+  FFat was, and as of this writing still is, completely unmounted — all real storage (GPX files,
+  logs) lives on the physical SD card today; moving GPX to FFat is planned but not yet implemented
+  (see ROADMAP.md).
   (`partitions/partitions.csv` is the orphaned pre-OTA 3MB/10MB table — unused, see its header.)
 - **PSRAM**: octal PSRAM, 64-byte alignment for DMA/framebuffer allocations
 - **Flash**: 16MB, running **QIO** despite `flash_mode = dio` above
@@ -1106,4 +1111,13 @@ required for new work — tracked in `docs/adr/BACKFILL_PLAN.md`.
 
 *This document serves as the master reference for ESP32-S3 Touch LCD projects. Keep it updated as the architecture evolves.*
 
-**Last updated**: 2026-08-05 (two-tier waypoint index added — PSRAM full index + SRAM closest-N working set, `MAX_WAYPOINTS` stays 200, see ADR-0023. Same day, earlier: `MAX_WAYPOINTS` raised 50 → 500 then rolled back to 200 after a boot failure; Haversine replaced with equirectangular approximation in `drawWaypoints()`/`latLonToScreen()`, see ADR-0022. Previously: 2026-07-31, waypoint desc/hint moved to PSRAM, freeing ~64KB SRAM and flash; full-subsystem performance audit: beacon BLE rate, sonar rhythm, direction-finding feasibility)
+**Last updated**: 2026-08-06 (OTA partitions grown 2MB → 3.5MB/slot, reclaimed from the previously-unused
+11.7MB FFat partition; decided GPX storage will move from SD to FFat since the enclosure makes the SD
+card inaccessible without disassembly — migration itself not yet implemented, see ADR-0024 and
+ROADMAP.md. Found in the same investigation: `field_log` has no teardown path, so dev-mode-off doesn't
+fully stop it — tracked as FT-08 in ROADMAP.md. Previously: 2026-08-05, two-tier waypoint index added
+— PSRAM full index + SRAM closest-N working set, `MAX_WAYPOINTS` stays 200, see ADR-0023. Same day,
+earlier: `MAX_WAYPOINTS` raised 50 → 500 then rolled back to 200 after a boot failure; Haversine
+replaced with equirectangular approximation in `drawWaypoints()`/`latLonToScreen()`, see ADR-0022.
+Previously: 2026-07-31, waypoint desc/hint moved to PSRAM, freeing ~64KB SRAM and flash; full-subsystem
+performance audit: beacon BLE rate, sonar rhythm, direction-finding feasibility)
