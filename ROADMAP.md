@@ -126,9 +126,13 @@ every GPX file gets a lightweight PSRAM-backed index entry (`gpx_index`, up to 8
 SRAM array becomes a working set of the closest-200 to the user's actual position, reselected as they
 move. This makes "getting past 200" a non-issue for real-world waypoint counts without raising the
 SRAM ceiling at all — see [ADR-0023](docs/adr/0023-two-tier-waypoint-index.md) and
-`docs/waypoint_two_tier_index_plan.md`. Not yet field-tested on hardware (build-clean and SRAM cost
-measured only). A live `memory stats` reading and `wpt_us` at a real 200-waypoint load are also still
-unmeasured. Decision record for the original 500 call, including why 500 over 700:
+`docs/waypoint_two_tier_index_plan.md`. **Field-verified on hardware** against an independent Haversine
+oracle (cold selection, a forced high-churn reselect, HDOP gating, a live end-to-end nearby-waypoints
+test) — caught and fixed a real bug (`gpx_loader::init()` was never called, so the feature was
+silently dead) along the way. Still open: the automatic GPS-driven trigger firing from real movement,
+and concurrent SD access during a reselect. A live `memory stats` reading and `wpt_us` at a real
+200-waypoint load are also still unmeasured. Decision record for the original 500 call, including why
+500 over 700:
 [ADR-0022](docs/adr/0022-waypoint-cap-raised-to-500-not-700.md) (superseded on the cap number, not on
 the render-cost reasoning).
 

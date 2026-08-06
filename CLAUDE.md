@@ -712,7 +712,7 @@ This freed the SRAM headroom that made raising `MAX_WAYPOINTS` (50 → 500) affo
 
 ## Waypoint Two-Tier Index
 
-**Status**: Implemented 2026-08-05, build-clean, not yet field-tested | [ADR-0023](docs/adr/0023-two-tier-waypoint-index.md) | [Design doc](docs/waypoint_two_tier_index_plan.md)
+**Status**: Implemented and field-verified on hardware 2026-08-05, against an independent Haversine oracle (cold selection, forced high-churn reselect, HDOP gating, live end-to-end nearby-waypoints test) | [ADR-0023](docs/adr/0023-two-tier-waypoint-index.md) | [Design doc](docs/waypoint_two_tier_index_plan.md)
 
 `MAX_WAYPOINTS` (200, see above) is a **working-set** size, not a limit on how many waypoints the
 device knows about. Every waypoint across every GPX file is indexed separately in PSRAM
@@ -749,12 +749,23 @@ rather than an oversight).
 isolated from ADR-0022's unrelated cap history via a `readelf -S` diff, not the `pio run` summary
 percentage alone). PSRAM: index + selection scratch ≈ 250KB, well under 16% of the 8MB chip.
 
+**Field verification**: cold selection and a forced high-churn reselect (174/200 slots, Sydney-area
+synthetic center) both matched an independent Haversine oracle exactly on real hardware; HDOP gating
+and the 150m movement threshold's stationary-silence both behaved correctly; a live end-to-end test
+writing 50 fresh waypoints near the real GPS position and reloading put them correctly at the top of
+the working set. This pass also caught two real bugs — `gpx_loader::init()` was never called anywhere
+(the whole feature was silently dead until fixed), and a test-file generator violated the parser's
+one-element-per-line assumption. **Still open**: the automatic GPS-driven reselect call site wasn't
+observed firing from real (non-injected) movement, and concurrent SD access during a reselect is
+unverified (no SD-access mutex exists anywhere in this codebase). Full detail in ADR-0023.
+
 **Code References**:
 - Index: `include/gpx/gpx_index.h` / `src/gpx/gpx_index.cpp`
 - Selection/reselect: `src/gpx/gpx_loader.cpp` - `selectAndMaterialize()`, `reselect()`, `buildFileIndex()`
 - Movement trigger: `src/utils/task_manager.cpp` - `updateStatusLabels()`
 - Haversine helper: `include/utils/geo.h` / `src/utils/geo.cpp`
 - Stability audit: `src/ui/navigation.cpp` (`handleTapAt()`), `src/ui/waypoint_screen.cpp` (fix/unfix)
+- Debug verification commands: `src/utils/diagnostics.cpp` - `gpx index list/reselect/gentest`
 
 ---
 

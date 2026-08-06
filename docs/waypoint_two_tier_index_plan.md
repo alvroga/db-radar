@@ -1,9 +1,12 @@
 # Plan: Two-Tier Waypoint Index (PSRAM full index + SRAM working set)
 
 **Status**: Implemented 2026-08-05 (all four phasing steps, §9). Build-clean, SRAM cost measured
-(+3,640 B static, `MAX_WAYPOINTS` held at 200 throughout). **Not yet field-tested on hardware** — see
-[ADR-0023](docs/adr/0023-two-tier-waypoint-index.md) for the decision record and what verification
-(§10 below) is still outstanding. Originally written 2026-08-05 as a design-only document.
+(+3,640 B static, `MAX_WAYPOINTS` held at 200 throughout), and **field-verified on real hardware**
+against an independent Haversine oracle (cold selection, a forced high-churn reselect, HDOP gating, a
+live end-to-end nearby-waypoints test) — see [ADR-0023](docs/adr/0023-two-tier-waypoint-index.md) for
+the full record, the two real bugs this verification pass caught and fixed, and what §10 items (below)
+are still open (automatic-trigger observation from real movement; concurrent SD access safety).
+Originally written 2026-08-05 as a design-only document.
 
 ## Context
 
@@ -160,20 +163,33 @@ overwrites it).
 
 ### 10. Verification
 
-- Upload `assets/gpx/TEST_GLOBAL_500.GPX` (500 synthetic waypoints, globally scattered — already
-  generated, see below) alongside real `/sdcard/gpx/` files; confirm working set = 200 nearest to
-  actual/NVS position, not first-200-in-file-order.
-- Boot with BLE active, check free internal SRAM before BLE init (same metric ADR-0022's rollback
-  was field-verified against) — this feature must add ~0 static SRAM; confirm via `readelf -S`
-  `.dram0.bss`/`.dram0.data` diff.
-- New `gpx index` serial subcommand (extend `handleGPXCommand()`, `diagnostics.cpp:946+`): index
-  count, working-set size, truncation flags, last reselect distance/time, PSRAM bytes used.
-- Time `buildFullIndex()` + first `selectAndMaterialize()` at real waypoint counts.
-- Field-walk test: confirm delta reselect fires at threshold, doesn't stall the System Task/TWDT,
-  `found`/`fixed` survive a walk-away-and-back (§6's test case).
-- No SD-access mutex currently exists anywhere in the codebase; this adds a new concurrent SD reader
-  (periodic reselect) alongside existing ones (upload, `field_log`'s writer, boot load) — stress-test
-  concurrent access (trigger an upload mid-reselect) before trusting FATFS/VFS serializes it safely.
+Status as of the 2026-08-05 hardware pass (see ADR-0023 for full detail):
+
+- ✅ **Done.** Uploaded `assets/gpx/TEST_GLOBAL_500.GPX` alongside real `/sdcard/gpx/` files (16 files,
+  515 waypoints total); confirmed working set = 200 nearest to actual position, cross-checked against
+  an independent oracle script for two different centers (including a forced high-churn case), not
+  first-200-in-file-order.
+- ⚠️ **Partially done, and the premise was wrong.** Measured the static SRAM delta via `readelf -S`
+  `.dram0.bss`/`.dram0.data` diff: **+3,640 B**, not the "~0" this line originally predicted — small,
+  but a real, nonzero cost (the selection scratch/delta-diff bookkeeping arrays). The free-internal-
+  heap-before-BLE-init check specifically (the metric ADR-0022's rollback was actually verified
+  against, distinct from the static-SRAM percentage) was **not** repeated for this feature — still
+  open if BLE-active heap margin at boot needs re-confirming.
+- ✅ **Done**, except "last reselect distance/time" was not added. `gpx index` reports index count,
+  working-set size, truncation flags, PSRAM bytes used, and center position. `gpx index list`/
+  `reselect`/`gentest` were also added as debug-only verification tools (not in this line's original
+  scope, but ended up doing the same job).
+- ⚠️ **Partially done.** Did not time `buildFullIndex()` or the first cold `selectAndMaterialize()`
+  separately, but observed a full-churn `reselect()` (174/200 slots re-parsed from real SD) take
+  457ms — comfortably under the 30s TWDT budget, but a useful worst-case data point.
+- ⚠️ **Partially done.** Confirmed delta reselect fires correctly and doesn't stall (37–457ms observed,
+  via synthetic centers injected over serial, not a real GPS-driven trigger) and doesn't corrupt state.
+  **Not done**: an actual field walk with live GPS driving the automatic trigger; `found`/`fixed`
+  surviving a real walk-away-and-back specifically through `fixed_waypoint_index` (needs a touchscreen
+  interaction this pass didn't drive).
+- ❌ **Still fully open.** No SD-access mutex exists anywhere in the codebase; concurrent access
+  (trigger an upload mid-reselect) was not stress-tested. FATFS/VFS is assumed, not proven, to
+  serialize this safely.
 
 ### 11. ADR
 
