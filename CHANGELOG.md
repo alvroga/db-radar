@@ -117,6 +117,31 @@ waypoints uploaded before the migration are present and load correctly from `/ff
 reflashing. The dev-mode-gated logs page and the bulk select/download UI have not specifically been
 exercised on hardware yet.
 
+### Fixed
+
+**FT-08: `field_log` writer task/PSRAM ring kept running after dev mode was turned off (2026-08-06)**
+
+Found while investigating storage architecture for ADR-0024. `field_log` (the PSRAM-ring field-data
+logger for hardware bring-up/tuning) allocates a ring buffer and a dedicated writer task in `begin()`,
+called once at boot when `dev_mode` is on (`main.cpp:99`) — but there was no `end()`/`stop()`
+counterpart anywhere in the module, only per-session `startSample()`/`stopSample()`. Turning dev mode
+off mid-session via the serial `dev off` command correctly stopped `system_logger` but left the
+field_log writer task and ring buffer running for the rest of the session regardless.
+
+Added `field_log::end()`: stops any sample in progress via the existing stop path, signals the writer
+task to exit at a safe point (state `IDLE`, no open file) and waits briefly for it to self-delete, then
+frees the PSRAM ring and control mutex and clears the "begun" flag so a later `begin()` can restart
+cleanly. Wired into `handleDevCommand`'s `"off"` branch (`diagnostics.cpp`) alongside the existing
+`system_logger` disable call. Dev mode has no other toggle path in the codebase (no separate UI code
+calls `saveDevMode` directly), so this closes the leak completely rather than only for the serial path.
+
+Build verified: RAM 49.3% (161,584 B), Flash 40.5% — unchanged from the ADR-0024 GPX/FFat baseline.
+**Field-verified 2026-08-06**: `dev off` printed `[FLOG] Stopped, writer task and PSRAM ring freed`
+before the `[DEV] Dev mode OFF` line, and a follow-up `flog start flat360` returned `[FLOG] begin() not
+called` — confirming the teardown actually ran (task deleted, ring freed) rather than just logging a
+message. Files: `src/utils/field_log.cpp`, `include/utils/field_log.h`, `src/utils/diagnostics.cpp`.
+See ROADMAP.md → Resolved → "FT-08".
+
 ### Added
 
 **Two-tier waypoint index — closest-N selection instead of a higher SRAM cap (2026-08-05)**

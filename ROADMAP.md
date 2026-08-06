@@ -34,25 +34,6 @@ For completed features and history, see [CHANGELOG.md](CHANGELOG.md).
 
 ---
 
-### FT-08: Dev Mode Off Doesn't Fully Stop `field_log`
-**Severity**: Low — dev-only resource leak, not user-facing
-
-**Symptom**: Found 2026-08-06 while investigating storage architecture (ADR-0024). `field_log` (the
-PSRAM-ring field-data logger used for hardware bring-up/tuning) is started once at boot if `dev_mode`
-was on then (`main.cpp:99`), allocating a PSRAM ring buffer and a dedicated writer task. There is no
-`field_log::end()`/`stop()` anywhere in the codebase — only `begin()` and per-session
-`startSample()`/`stopSample()`. Turning dev mode off mid-session (even via the otherwise-complete
-serial `dev off` cascade, which does correctly stop `system_logger`) leaves the field_log writer task
-and ring buffer running for the rest of the session regardless.
-
-**Fix**: Add a real `field_log::end()` (stop the writer task, flush, free the ring/mutex) and call it
-from `handleDevCommand`'s `"off"` branch (`diagnostics.cpp`) alongside the existing `system_logger`
-disable calls.
-
-**Key files**: `src/utils/field_log.cpp`, `include/utils/field_log.h`, `src/utils/diagnostics.cpp`
-
----
-
 ## Planned
 
 ### Quests *(brainstorm stage — not designed yet)*
@@ -243,6 +224,30 @@ the heading bounce is gone. See CHANGELOG.md.
 ---
 
 ## Resolved
+
+### FT-08: Dev Mode Off Doesn't Fully Stop `field_log` — Resolved (2026-08-06)
+**Was**: `field_log` (the PSRAM-ring field-data logger used for hardware bring-up/tuning) is started
+once at boot if `dev_mode` was on then (`main.cpp:99`), allocating a PSRAM ring buffer and a dedicated
+writer task. There was no `field_log::end()`/`stop()` anywhere — only `begin()` and per-session
+`startSample()`/`stopSample()` — so turning dev mode off mid-session (even via the otherwise-complete
+serial `dev off` cascade, which correctly stops `system_logger`) left the field_log writer task and
+ring buffer running for the rest of the session regardless.
+
+**Resolution**: added `field_log::end()` — stops any in-progress sample via the existing stop path,
+signals the writer task to exit at a safe point (state `IDLE`, no file open) and blocks briefly until
+it self-deletes, then frees the PSRAM ring and control mutex and clears the "begun" flag so a later
+`begin()` can restart logging cleanly. Wired into `handleDevCommand`'s `"off"` branch
+(`diagnostics.cpp`) alongside the existing `system_logger` disable calls — dev mode has no other
+toggle path in the codebase, so this closes the gap completely, not just for the serial command.
+Build-verified (RAM 49.3%/161,584 B, Flash 40.5% — unchanged from the ADR-0024 baseline) and
+**field-verified on hardware 2026-08-06**: `dev off` printed `[FLOG] Stopped, writer task and PSRAM
+ring freed` before the `[DEV] Dev mode OFF` line, and a subsequent `flog start flat360` returned
+`[FLOG] begin() not called` — confirming the module was actually torn down (task deleted, ring freed,
+`g_begun` cleared), not just superficially disabled.
+
+**Key files**: `src/utils/field_log.cpp`, `include/utils/field_log.h`, `src/utils/diagnostics.cpp`
+
+---
 
 ### GPX Storage: Move from SD to FFat — Resolved (2026-08-06)
 **Was**: GPX files lived at `/sdcard/gpx`, on a physical SD card the enclosure design makes

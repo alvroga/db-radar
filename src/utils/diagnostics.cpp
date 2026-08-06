@@ -1493,6 +1493,9 @@ void handleDevCommand(const char* args) {
         settings_manager::saveDevTabVisible(false);
         settings_manager::saveLoggingEnabled(false);
         system_logger::setEnabled(false);
+        // FT-08: field_log had no teardown — its writer task and PSRAM ring kept
+        // running for the rest of the session even after dev mode was turned off.
+        field_log::end();
         { task_manager::UIUpdate u{}; u.type = task_manager::UIUpdateType::DEV_MODE_CHANGE; task_manager::queueUIUpdate(u); }
         Serial.println("[DEV] Dev mode OFF (production UI, logging disabled)");
 

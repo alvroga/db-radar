@@ -86,6 +86,12 @@ struct Stats {
 // is present — startSample() will then fail with a clear reason.
 bool begin();
 
+// Stop any in-progress sample (flushed and closed, same as stopSample()), then
+// tear down the writer task and free the PSRAM ring/mutex. Blocks briefly while
+// the writer task finishes its current cycle and deletes itself. Safe to call
+// when begin() was never called. Call begin() again to resume logging.
+void end();
+
 bool startSample(Label label);
 void stopSample();
 bool isRecording();

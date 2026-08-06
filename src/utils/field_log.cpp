@@ -44,6 +44,7 @@ TaskHandle_t      g_writer_task = nullptr;
 
 enum class State : uint8_t { IDLE, START_REQUESTED, RECORDING, STOP_REQUESTED };
 volatile State g_state = State::IDLE;
+volatile bool  g_shutdown_requested = false;
 
 field_log::Label g_label = field_log::Label::FLAT360;
 char     g_filename[64]   = {};
@@ -181,6 +182,13 @@ void writerTask(void*) {
     char line[256];
 
     for (;;) {
+        // Only exit at a safe point: no file open, nothing mid-recording. end()
+        // drives g_state to IDLE (via STOP_REQUESTED) before setting this flag.
+        if (g_shutdown_requested && g_state == State::IDLE && !f) {
+            g_writer_task = nullptr;
+            vTaskDelete(nullptr);
+        }
+
         State st = g_state;
 
         if (st == State::START_REQUESTED) {
@@ -309,6 +317,37 @@ bool begin() {
                   (unsigned)RING_ROWS, (unsigned)(RING_ROWS * sizeof(Row) / 1024),
                   (unsigned)g_next_sample_no, (unsigned long long)(g_free_bytes_cached / (1024 * 1024)));
     return true;
+}
+
+void end() {
+    if (!g_begun) return;
+
+    // Let the writer flush and close whatever's open, same path as a normal stop.
+    if (g_state == State::RECORDING || g_state == State::START_REQUESTED) {
+        g_state = State::STOP_REQUESTED;
+    }
+    while (g_state != State::IDLE) {
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+
+    // Writer task deletes itself once it observes this at a safe (no open file)
+    // point in its loop — see writerTask().
+    g_shutdown_requested = true;
+    while (g_writer_task != nullptr) {
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+    g_shutdown_requested = false;
+
+    if (g_ctrl_mutex) {
+        vSemaphoreDelete(g_ctrl_mutex);
+        g_ctrl_mutex = nullptr;
+    }
+    if (g_ring) {
+        heap_caps_free(g_ring);
+        g_ring = nullptr;
+    }
+    g_begun = false;
+    Serial.println("[FLOG] Stopped, writer task and PSRAM ring freed");
 }
 
 // Cached, for the same reason as free space: the live readout polls this from the
