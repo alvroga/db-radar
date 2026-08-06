@@ -1,6 +1,6 @@
 # Compass — QMC5883L Implementation Guide
 
-**Status**: Complete ✅ | Last updated: 2026-03-18
+**Status**: Complete ✅ | Last updated: 2026-08-06
 
 ## Hardware Overview
 
@@ -61,7 +61,12 @@ compass stream N  — stream for N seconds (default 5s)
 - **Step 1 (flat spin)**: slowly rotate the device through 360° on a flat surface. Records min/max on X/Y and computes `cal_x`/`cal_y = (max+min)/2`, plus the `H0`/residual/axis-ratio metrics below. A flat spin alone cannot calibrate Z — the axis never changes what it points at, so `min ≈ max` — which is why there's a second step.
 - **Step 2 (tumble)**: tumble the device through all orientations — flip it end over end, figure-8 motion. Records min/max on Z the same way, and gates the Save button on 3-D coverage: elevation span, azimuth sector count (8×45°), and Z span must all clear an OK/GOOD threshold before saving is allowed, so a tumble that only rocks side-to-side doesn't pass by accident. Coverage is scored from the magnetometer alone (elevation/azimuth of the corrected vector in sensor frame) — no accelerometer needed. See [ADR-0019](adr/0019-3-axis-tumble-calibration-not-ellipsoid-fit.md) for why this is min/max-per-axis rather than a full ellipsoid/soft-iron fit.
 
-`cal_z` is applied by `read()` but not yet consumed by the heading formula, which stays 2-axis (`atan2f(cy, cx)`) until Level 3 tilt compensation (WP-6).
+`cal_z` is applied by `read()`. The `atan2f(cy, cx)` formula above is the flat-hold case; when the
+device is tilted, Level 3 tilt compensation (WP-6, shipped and closed 2026-08-02/2026-08-06 — see
+ROADMAP.md and [`compass_calibration_foundation.md`](compass_calibration_foundation.md) §12) replaces
+it with an accelerometer-corrected formula in `src/navigation/tilt_compensation.cpp`, so `cal_z` does
+feed the final heading. A known, accepted cosmetic limitation remains: a fast flat→nose-up tilt
+produces a ~30° transient bounce that self-corrects within ~1s (accel-only, no gyro — ADR-0018).
 
 ---
 
@@ -81,9 +86,10 @@ NVS alongside them (`cal_h0`, `cal_resid`, `cal_axr`):
 `compass_qmc5883l::classifyHealth(data, h0)` uses `H0` at runtime: it smooths `h_mag` with a ~1s EMA
 and applies hysteresis (enter/exit 1.12/1.08) to classify each reading as `HEALTHY`, `TILTED` (h_mag
 elevated — tilt only ever inflates it), `DISTURBANCE` (sensor overflow only), or `UNCALIBRATED` (no
-`H0` yet). **This detects, it does not correct** — the radar HUD shows a "Compass: hold flat" /
-"Compass: interference" / "Compass: recalibrate?" indicator, hidden when healthy, but the heading
-itself is unchanged (that's Level 3 tilt compensation, WP-6, which needs the accelerometer).
+`H0` yet). **This is the health/trust indicator, not the correction path** — the radar HUD shows a
+"Compass: hold flat" / "Compass: interference" / "Compass: recalibrate?" indicator, hidden when
+healthy, independent of the actual tilt correction applied to the heading (Level 3 tilt compensation,
+WP-6 — see above).
 
 **⚠️ Corrected 2026-08-02, same day as ship**: the first version also tried a low-magnitude threshold
 (ratio < 0.85) for `DISTURBANCE`, guessing a disturbance might weaken the field. Reported unreliable

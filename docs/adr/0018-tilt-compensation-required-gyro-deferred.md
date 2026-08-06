@@ -65,6 +65,14 @@ this ADR treated as the actual gyro trigger. Gyro fusion remains deferred; the t
 now a known, observed behavior rather than a hypothetical, and a future occurrence worse than "recovers
 within ~1s" is the thing that would actually reopen this decision.
 
+## Update (2026-08-06, closed)
+
+No occurrence worse than "recovers within ~1s" has been reported since the 2026-08-02 EMA retune. The
+bounce is being kept as a known, accepted cosmetic limitation of the accel-only approach — this is not
+a scheduled work item and gyro fusion is not planned. This ADR's decision stands as final unless a
+future field report describes the persistent-lag trigger it already defines, at which point gyro
+fusion is the thing to reopen, not a further EMA retune.
+
 ## Consequences
 
 **Easier**: the go/no-go question that gated WP-6 is resolved with field evidence rather than

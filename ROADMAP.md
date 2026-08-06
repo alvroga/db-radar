@@ -130,55 +130,50 @@ the render-cost reasoning).
 
 ---
 
-### Compass Calibration & Tilt — heading is only valid held flat
-**Severity**: High — the compass is the sole heading source, and it inverts when the device is tilted
-**Status**: WP-0 through WP-5 done. Field trip (WP-2) and offline analysis (WP-3) complete 2026-08-01/02
-— **go decision for Level 3 tilt compensation**. WP-4 (Level 1 health metrics: `H0`/residual/axis-ratio
-in the calibration overlay, runtime `classifyHealth()`, HUD trust indicator) shipped 2026-08-02. WP-5
-(Level 2: 3-axis calibration — a second, tumble/figure-8 calibration step that recovers a real
-`cal_z_offset` via 3-D coverage scoring) shipped 2026-08-02 — see CHANGELOG.md and ADR-0019. WP-6
-(accelerometer tilt compensation) **shipped 2026-08-02** — see CHANGELOG.md and
-[ADR-0020](docs/adr/0020-tilt-compensation-formula-and-sign-from-bench-data.md). The mag↔accel frame
-rotation was measured via the Settings > DEV > Tilt Bench protocol
-([`docs/compass_tilt_bench.md`](docs/compass_tilt_bench.md)), a vector cross-product formula (not the
-textbook roll/pitch one, which fit poorly) and a bench-derived sign were implemented in
-`navigation/tilt_compensation`, and both were confirmed in live hand-held use. The one open item is
-cosmetic, not a defect: a fast flat→nose-up tilt shows a ~30° transient heading bounce that recovers
-within ~1s, caused by the gravity EMA lagging the tilt change mid-motion — expected for an accel-only
-(no gyro, [ADR-0018](docs/adr/0018-tilt-compensation-required-gyro-deferred.md)) approach, and already
-tightened once (τ 1.0s → 0.5s) in response.
+## Resolved
 
-**Symptom** (field-confirmed): facing north held **flat**, N points to the top — correct. Facing north
-held **vertical**, N points to the **bottom**. The heading formula is 2-axis (`atan2(cy, cx)`), so the
-large vertical field component leaks in as tilt grows; the crossover is at only **90° − inclination
-≈ 31.5°**, past which the reading inverts. Phone-style holding is deep past it. Separately, nothing
-detects a stale calibration — opening the enclosure invalidates it silently.
+### Compass Calibration & Tilt — heading is only valid held flat — Resolved (2026-08-02), closed (2026-08-06)
+**Was**: the compass is the sole heading source, and the original 2-axis heading formula
+(`atan2(cy, cx)`) inverts past **90° − magnetic inclination ≈ 31.5°** of tilt. Facing north held flat,
+N pointed to the top — correct. Facing north held vertical (phone-style, deep past the crossover), N
+pointed to the **bottom**. WP-3 field data (`docs/calibration/wp3_results.md`) confirmed the error is
+heading-dependent, not a fixed bias — at ~46–50° tilt, heading error vs GPS course was **−135° walking
+north and +4° walking south** — so no lookup-table correction could fix it, only real
+accelerometer-based tilt compensation.
 
-**WP-3 confirmed the tilt error is heading-dependent, not a fixed bias** — at ~46–50° tilt, heading
-error vs GPS course was −135° walking north and +4° walking south. No lookup-table correction can fix
-that; only real accelerometer-based tilt compensation can. Flat holding stays accurate in every
-direction tested (under 8° mean error). Also answered: `H₀` ≈ 3000 (raw units), a figure-8 tumble
-covers the full sphere (3-D calibration is feasible), and accel-only (no gyro) suffices for tilt
-compensation provided it's oversampled/averaged rather than read at a flat 10 Hz. Full numbers:
-[`docs/calibration/wp3_results.md`](docs/calibration/wp3_results.md).
+**Resolution**: four staged work packages, WP-0 through WP-6, all shipped 2026-08-02. WP-4 (Level 1
+health metrics: `H0`/residual/axis-ratio, runtime `classifyHealth()`, HUD trust indicator). WP-5
+(Level 2: a second tumble/figure-8 calibration step recovering a real `cal_z_offset` via 3-D coverage
+scoring, min/max-per-axis rather than an ellipsoid fit — [ADR-0019](docs/adr/0019-3-axis-tumble-calibration-not-ellipsoid-fit.md)).
+WP-6 (Level 3: accelerometer tilt compensation) — the mag↔accel frame rotation was measured via the
+Settings > DEV > Tilt Bench protocol ([`docs/compass_tilt_bench.md`](docs/compass_tilt_bench.md)) and
+turned out to be a signed permutation, not the textbook roll/pitch decomposition (which fit the bench
+data poorly, ~69° circular std); a coordinate-convention-agnostic vector formula was built instead and
+both it and its bench-derived sign were confirmed in live hand-held use — flat, vertical, and
+phone-style holding all read correct heading. Full reasoning:
+[ADR-0020](docs/adr/0020-tilt-compensation-formula-and-sign-from-bench-data.md).
 
-**Plan**: four staged levels — (1) magnitude-based health metrics ✅ done, free and no new hardware;
-(2) 3-axis calibration ✅ done — a second tumble/figure-8 step, min/max-per-axis rather than an
-ellipsoid fit (ADR-0019); (3) accelerometer tilt compensation — next; (4) τ-per-zoom smoothing. Gyro is
-rejected for tilt fusion — WP-3's shake-spectrum analysis found no need for it (ADR-0018).
+**Accepted as final, not pursued further (2026-08-06)**: a fast flat→nose-up tilt still produces a
+~30° transient heading bounce that self-corrects within ~1s — the gravity EMA
+(`GRAVITY_EMA_TAU_S`, tightened 1.0s → 0.5s in response to this exact field report) lagging the
+near-instantaneous mag reading mid-transition. This is the accel-only limitation
+[ADR-0018](docs/adr/0018-tilt-compensation-required-gyro-deferred.md) flagged as the gyro-fusion
+trigger going in — a gyro would fix it, but costs continuous bus traffic against an already-tuned I2C
+timing floor (`I2C_PROCESS_MS = 20`, ADR-0013 — see the FT-06/FT-07 entry below for the bus's history
+of undiagnosed freezes), an unmeasured power draw, and its own fusion constant to tune. The bounce is
+bounded and fast-recovering, not the "persistent lag" ADR-0018 set as the actual trigger, so the
+accel-only formula is being kept as-is. **Revisit only if gyro fusion is
+reconsidered** — not a scheduled work item. WP-7 (τ-per-zoom smoothing) remains open and independent,
+tracked as FT-02 below.
 
-**Resolved along the way**: `HEADING_SMOOTHING` went 0.8@1Hz → 0.3@10Hz, which did **not** preserve
-the time constant (0.62 s → 0.28 s). Restored to α = 0.15 (τ ≈ 0.62 s) and **verified on a walk** —
-the heading bounce is gone. See CHANGELOG.md.
-
-**Supersedes** FT-02 below, whose "won't fix" reasoning assumed a 1 Hz compass rate.
+**Also resolved along the way**: `HEADING_SMOOTHING` went 0.8@1Hz → 0.3@10Hz, which did **not**
+preserve the time constant (0.62 s → 0.28 s). Restored to α = 0.15 (τ ≈ 0.62 s) and verified on a
+walk.
 
 **Full design, field protocol and implementation plan**:
 [`docs/compass_calibration_foundation.md`](docs/compass_calibration_foundation.md)
 
 ---
-
-## Resolved
 
 ### FT-08: Dev Mode Off Doesn't Fully Stop `field_log` — Resolved (2026-08-06)
 **Was**: `field_log` (the PSRAM-ring field-data logger used for hardware bring-up/tuning) is started
@@ -364,4 +359,4 @@ re-scope from scratch rather than resuming the font-only branch.
 
 ### FT-02: Compass Zoom-Dependent Smoothing
 **Was**: At large zoom levels (1km, 5km) compass noise produces visible jitter.
-**Decision**: Won't fix. Zoom-dependent EMA is not viable at 1Hz compass rate — heavy smoothing at large zoom would make the radar sluggish and unresponsive to real turns. At walking speeds and practical zoom levels the current 1Hz rate is acceptable. The correct long-term solution is a higher compass update rate (requires moving compass wires to Wire1 on GPIO19/20 for a dedicated I2C bus), not software smoothing.
+**Original decision (superseded)**: Won't fix — zoom-dependent EMA judged not viable at a 1Hz compass rate. That premise is gone: the compass now samples at 10Hz (see the Compass Calibration & Tilt entry above), the long-term fix this entry called for and never expected to happen without a hardware change. **Not reopened as active work** — it survives only as WP-7 (τ-per-zoom smoothing) in [`docs/compass_calibration_foundation.md`](docs/compass_calibration_foundation.md), independent of the now-closed tilt-compensation work above and not currently scheduled.

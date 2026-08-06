@@ -1,6 +1,6 @@
 # Compass Calibration — Foundation and Field Data Plan
 
-**Status**: Proposal — ready to implement from | **Date**: 2026-08-01
+**Status**: WP-0 through WP-6 implemented and closed (2026-08-06); WP-7 (τ-per-zoom smoothing) open and independent | **Date**: 2026-08-01, updated 2026-08-06
 
 This document lays the foundation for compass calibration work. It states what calibration means on
 this hardware, what we have today, what each further level costs and delivers, the field data
@@ -887,6 +887,10 @@ the bounce is bounded and fast-recovering — see ADR-0018's 2026-08-02 update. 
 `task_manager.cpp`'s compass pipeline; `compass tilt` / `compass tilt on|off` /
 `compass tilt sign +1|-1` diagnostic commands in `diagnostics.cpp`.
 
+**Closed 2026-08-06**: no worse-than-1s occurrence has been reported since the retune. The bounce is
+being kept as-is — an accepted cosmetic limitation, not a scheduled work item — until gyro fusion is
+reconsidered (see ADR-0018's 2026-08-06 update). WP-6 is done; nothing further is planned here.
+
 ### WP-7 — τ-per-zoom smoothing, and the gyro decision *(needs WP-3)*
 
 τ in seconds per zoom level (§9.1), baselined on the §9.1a number. Reopen ROADMAP FT-02 with its
@@ -900,12 +904,12 @@ expired premise stated. Gyro go/no-go from sample 9 (§6A.2).
 `docs/compass_i2c_constraint.md` → ADR-0013, ADR-0014, ADR-0017. Then `CLAUDE.md` for build and
 documentation standards.
 
-**Start at WP-6 (Level 3: tilt compensation) if continuing this work.** WP-0 through WP-5 are done —
-field data collected and analyzed (WP-2/WP-3), Level 1 health metrics built (WP-4), Level 2 3-axis
-calibration built (WP-5, this section). WP-6 needs care: it requires the mag↔accel frame rotation,
-which is an **unknown needing a dedicated bench procedure**, not something the existing field data
-answers (§10). WP-7 (τ-per-zoom smoothing, gyro decision) is independent and can be done in either
-order relative to WP-6.
+**WP-0 through WP-6 are done and closed (2026-08-06).** Field data collected and analyzed (WP-2/WP-3),
+Level 1 health metrics built (WP-4), Level 2 3-axis calibration built (WP-5), Level 3 tilt compensation
+built and field-confirmed (WP-6). The one remaining rough edge — a ~30° transient bounce on a fast
+flat→nose-up tilt — is accepted as-is (ADR-0018's 2026-08-06 update); gyro fusion is not planned unless
+a future report describes a worse, persistent-lag failure mode. **If continuing this work, start at
+WP-7** (τ-per-zoom smoothing, ROADMAP FT-02) — it is independent of WP-6 and was never blocked by it.
 
 **Invariants that will bite:**
 - **LVGL is not thread-safe.** After the tasks start, only the UI Task may call LVGL.
