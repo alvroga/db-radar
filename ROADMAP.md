@@ -108,6 +108,79 @@ the render-cost reasoning).
 
 ---
 
+### Event Pixel Art / Image Assets — brainstorm stage, not designed yet
+**Severity**: Feature — new idea, not yet scoped
+
+**Ask**: static pixel-art images shown for discrete events (e.g. quest completion, once Quests above
+has real state), also usable standalone for other one-off events (GPS lock acquired, a milestone
+badge, etc.) without depending on Quests shipping first.
+
+**Budget context (sanity check only, not a decision)**: firmware is ~1.68MB in a 4MB OTA slot (~60%
+headroom). `LV_COLOR_DEPTH` is 16 (RGB565) project-wide (`include/ui/lv_conf.h`) — there is no true
+32bpp render path here without a global change that would also inflate every framebuffer, so a literal
+ARGB8888 asset format isn't the right target. Indexed 4/8-bit palettes cost roughly a third of
+RGB565+8-bit-alpha (`LV_IMG_CF_TRUE_COLOR_ALPHA`) for the same dimensions and suit pixel art's
+naturally low color count — e.g. a 150×150 sprite is ~23KB indexed vs ~68KB true-color+alpha. A few
+hundred KB earmarked for art (dozens of small indexed sprites) leaves most of the current headroom for
+code.
+
+**Open questions to resolve before design**:
+- Compiled into flash as LVGL image C arrays (simple, spends OTA slot headroom directly) vs. loaded
+  from FFat at runtime via `lv_fs` (matches the GPX/web-upload pattern already built — art becomes
+  updatable from the web portal without a reflash, at the cost of a filesystem driver + an
+  event→sprite lookup)
+- Color format/bit depth per image (indexed 4/8-bit vs 16-bit+alpha) — affects flash size and blit cost
+- Which events warrant art beyond quest completion, and whether that's decided before or after Quests
+  itself is scoped
+
+**Status**: nothing implemented or designed.
+
+---
+
+### First-Flash Procedure for a New Board — not yet verified end-to-end
+**Severity**: Process — a new board is inbound and needs a defined, low-friction bring-up path
+
+**Ask**: first image onto a blank board via USB + PlatformIO/VSCode (should handle bootloader,
+partition table, and app in one step), then every subsequent update via the already-built web
+`/update` OTA flow (`gpx_server.cpp` — `esp_ota_begin`/`esp_ota_write`/`esp_ota_set_boot_partition`) —
+not USB again.
+
+**Already confirmed by inspecting the build** (`.pio/build/cc-radar/flasher_args.json`): `pio run -t
+upload` writes all four required regions in one command — bootloader (`0x0`), partition table
+(`0x8000`), app to `ota_0` (`0x10000`), **and** `ota_data_initial.bin` to the `otadata` partition
+(`0xe000`). A blank chip's otadata is pre-seeded to boot `ota_0` correctly by this alone; no manual
+esptool/otadata step should be needed.
+
+**Still open / needs verification on the actual new board**:
+- `esp_ota_mark_app_valid_cancel_rollback()` (`main.cpp:421`) must run on first boot or the bootloader
+  will roll back on the next reset — `CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y` is set, so this isn't
+  optional. Confirmed present in code; not confirmed firing correctly on a genuinely blank chip (only
+  ever exercised on already-provisioned boards so far).
+- NVS starts blank on new hardware (unlike FFat, which auto-formats on first mount per the GPX-to-FFat
+  entry below) — compass calibration (tumble + figure-8, Settings > Display), WiFi/beacon settings,
+  and `dev_mode` state all need to be redone from scratch, not just copied over.
+- GPX waypoints: nothing pre-loaded unless an old SD card with `/sdcard/gpx` is present for the
+  one-time migration to fire; otherwise re-upload via the web portal like any fresh install.
+- Whether the `/update` OTA path needs anything different for the *first* real OTA on a freshly-USB-
+  flashed board vs. steady-state — expected not to, since otadata is already valid after the USB
+  flash, but not yet tested end-to-end on new hardware.
+
+**Also raised, not yet discussed in depth**: a browser-based first-flash option for people without
+PlatformIO — WebSerial flashing (Espressif's `esptool-js`, or the pre-built ESP Web Tools wrapper)
+talks to the ROM bootloader directly from Chrome/Edge, so it works on a genuinely blank chip with no
+firmware installed anywhere. The four files + offsets it would need are exactly what
+`flasher_args.json` already lists (bootloader/partition-table/app/otadata), so most of the integration
+is pointing a manifest at those binaries. Open before this is real: hosting (GitHub Pages vs. a local
+page the user opens), browser support is Chrome/Edge/Opera only, and — the actual new part — those
+four `.bin`s are currently per-dev-machine build artifacts with no release/tagging process, so "which
+binary do we hand out" is a process question, not just a page to build. To be discussed properly, not
+decided yet.
+
+**Status**: nothing verified on real new hardware yet. Walk this checklist in order when the new board
+arrives and turn it into a field-verified procedure.
+
+---
+
 ## Resolved
 
 ### FT-09: Waypoint On-Screen Test Used a Square Box on a Round Display — Resolved (2026-08-06)

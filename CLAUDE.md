@@ -1112,6 +1112,24 @@ required for new work — tracked in `docs/adr/BACKFILL_PLAN.md`.
 - [ ] CLAUDE.md updated (if architecture changed)
 - [ ] README.md updated (if user-visible)
 
+**CLAUDE.md Size Discipline**:
+CLAUDE.md is the fast-orientation file loaded into every session — it should hold evergreen
+quick-reference (build commands, pin maps, hardware init order, common pitfalls) and *currently
+load-bearing* constraints (things that will silently regress if "cleaned up" — e.g. the four
+render-pipeline flags, `UI_PRIORITY`, `I2C_PROCESS_MS`). It should **not** hold feature narrative,
+measurement history, or anything a `docs/*.md`/ADR "Complete Guide" link already covers — that content
+belongs at the link, not duplicated above it.
+- **Audit trigger**: whenever this file crosses ~500 lines, or every ~3 months, whichever comes first
+  — do a pass over every section asking "does a `docs/*.md` or ADR already exist for this, or should
+  one?" If yes, cut the section to a 5–10 line summary + link. If a section is marked
+  superseded/historical, delete it outright — the history lives in CHANGELOG.md, not here.
+- **The trailing "Last updated" line is the usual offender** — it accretes into a mini-changelog over
+  time. Keep it to one line (date + a pointer to CHANGELOG.md); don't append narrative to it going
+  forward.
+- **Never trim an explicitly load-bearing constraint to hit a line-count target.** Moving the
+  *narrative* around a "don't clean this up" statement is fine; the constraint itself must survive
+  intact somewhere in this file even if that means landing above the target line count.
+
 **Complete Documentation Guide**: [`docs/documentation_standards.md`](docs/documentation_standards.md)
 
 ---
