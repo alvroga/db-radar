@@ -266,19 +266,19 @@ static const char UPLOAD_HTML[] = R"rawliteral(
         <div class="storage-status">
             <div class="storage-row">
                 <span>Flash storage (GPX)</span>
-                <span id="storageText">loading...</span>
+                <span id="storageText" data-loading="1">loading</span>
             </div>
             <div class="storage-bar-track">
                 <div class="storage-bar-fill" id="storageBar"></div>
             </div>
             <div class="storage-row" style="margin-top:8px; margin-bottom:0;">
                 <span>GPX files</span>
-                <span id="fileCountText">loading...</span>
+                <span id="fileCountText" data-loading="1">loading</span>
             </div>
         </div>
 
         <div class="info-box">
-            <strong>Auto-load:</strong> Files are loaded automatically when uploaded. Reload the page to refresh the count.
+            <strong>Auto-load:</strong> Files are loaded automatically when uploaded.
         </div>
 
         <div class="info-box">
@@ -316,6 +316,23 @@ static const char UPLOAD_HTML[] = R"rawliteral(
         const selectAllBox = document.getElementById('selectAll');
         const downloadSelectedBtn = document.getElementById('downloadSelectedBtn');
         const deleteSelectedBtn = document.getElementById('deleteSelectedBtn');
+
+        // Animated "loading" ellipsis for storageText/fileCountText — cycles
+        // ./../... every 400ms while data-loading="1" so a slow /list or /storage
+        // response doesn't look stalled. Cleared (data-loading="0") the moment
+        // either element gets real content; the interval just no-ops on it after.
+        (function animateLoadingDots() {
+            const targets = ['storageText', 'fileCountText'];
+            let n = 0;
+            setInterval(() => {
+                n = (n % 3) + 1;
+                const dots = '.'.repeat(n);
+                for (const id of targets) {
+                    const el = document.getElementById(id);
+                    if (el.dataset.loading === '1') el.textContent = 'loading' + dots;
+                }
+            }, 400);
+        })();
 
         // Load existing files on page load
         loadFileList();
@@ -403,6 +420,7 @@ static const char UPLOAD_HTML[] = R"rawliteral(
                 showStatus(`! ${uploaded} uploaded, ${failed} failed`, 'error');
             }
             loadFileList();
+            loadStorageInfo();
         }
 
         // Shared by loadFileList() (current count) and loadStorageInfo() (max,
@@ -411,8 +429,9 @@ static const char UPLOAD_HTML[] = R"rawliteral(
         let gFileCount = null, gFileMax = null;
         function updateFileCountDisplay() {
             const el = document.getElementById('fileCountText');
-            el.textContent = (gFileCount === null || gFileMax === null)
-                ? 'loading...' : `${gFileCount} / ${gFileMax}`;
+            if (gFileCount === null || gFileMax === null) return;  // still loading — dots animation owns the text
+            el.dataset.loading = '0';
+            el.textContent = `${gFileCount} / ${gFileMax}`;
         }
 
         async function loadFileList() {
@@ -516,6 +535,7 @@ static const char UPLOAD_HTML[] = R"rawliteral(
                 showStatus(`! ${failed} of ${filenames.length} deletions failed`, 'error');
             }
             loadFileList();
+            loadStorageInfo();
         }
 
         function escapeHtml(s) {
@@ -536,6 +556,7 @@ static const char UPLOAD_HTML[] = R"rawliteral(
                     await triggerReload();
                     showStatus(`+ ${filename} deleted`, 'success');
                     loadFileList();
+                    loadStorageInfo();
                 } else {
                     showStatus(`! Delete failed`, 'error');
                 }
@@ -572,10 +593,12 @@ static const char UPLOAD_HTML[] = R"rawliteral(
                 if (d.error) throw new Error(d.error);
                 bar.style.width = d.percent + '%';
                 bar.style.background = d.percent >= 90 ? '#ff4444' : (d.percent >= 70 ? '#ffaa00' : '#00aa44');
+                text.dataset.loading = '0';
                 text.textContent = `${d.percent}% used (${formatBytes(d.used)} / ${formatBytes(d.total)})`;
                 gFileMax = d.file_max;
                 updateFileCountDisplay();
             } catch (e) {
+                text.dataset.loading = '0';
                 text.textContent = '(unavailable)';
             }
         }

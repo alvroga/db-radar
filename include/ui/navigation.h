@@ -93,6 +93,11 @@ void radarDrawBeginCb(lv_event_t* e);
 // Call once on creation and again whenever the daylight theme changes.
 void drawBeaconFoundIndicator(lv_obj_t* canvas, bool daylight);
 
+// Draw the fixed-waypoint "locked on" icon (dot + ring, monochrome white/black
+// matching the rest of the HUD) into a 45×45 TRUE_COLOR_ALPHA canvas.
+// Call once on creation and again whenever the daylight theme changes.
+void drawFixedWaypointIndicator(lv_obj_t* canvas, bool daylight);
+
 // GPS coordinate conversion
 void latLonToScreen(double lat, double lon, int& x, int& y, int screen_size);
 float metersToPixels(float meters, float meters_per_pixel);

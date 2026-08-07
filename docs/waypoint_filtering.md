@@ -10,7 +10,7 @@ This document explains the two-strategy waypoint filtering system that intellige
 
 The GPS Radar uses a **dual-strategy filtering system** to provide optimal situational awareness while preventing visual clutter:
 
-1. **Distance-Based Filtering (Strategy 1)** - Shows waypoints within 10× the current zoom radius
+1. **Distance-Based Filtering (Strategy 1)** - Shows waypoints within 100× the current zoom radius
 2. **Sector-Based Clustering (Strategy 2)** - Shows maximum 8 off-screen indicators (one per direction)
 
 This approach allows users to see waypoints **beyond the current zoom level** (for navigation planning) while keeping the display clean and performant.
@@ -24,18 +24,27 @@ Eliminate waypoints that are too far away to be relevant for current navigation 
 
 ### Configuration
 ```cpp
-// include/ui/ui_manager.h:63
-static constexpr float DISTANCE_FILTER_MULTIPLIER = 10.0f;
+// include/ui/ui_manager.h — RadarConfig
+static constexpr float DISTANCE_FILTER_MULTIPLIER = 100.0f;  // raised from 10.0f, 2026-08-07
 ```
 
 ### How It Works
 
-**Adaptive Distance Threshold**:
-- At **10km zoom**: Shows waypoints within **100km** (10km × 10)
-- At **1km zoom**: Shows waypoints within **10km** (1km × 10)
-- At **500m zoom**: Shows waypoints within **5km** (500m × 10)
-- At **100m zoom**: Shows waypoints within **1km** (100m × 10)
-- At **10m zoom**: Shows waypoints within **100m** (10m × 10)
+**Adaptive Distance Threshold** (multiplier raised 10× → 100×, 2026-08-07 — see
+[Touch Interaction and Distance Display](#touch-interaction-and-distance-display) below for why):
+- At **1km zoom**: Shows waypoints within **100km** (1km × 100)
+- At **500m zoom**: Shows waypoints within **50km** (500m × 100)
+- At **200m zoom**: Shows waypoints within **20km** (200m × 100)
+- At **100m zoom**: Shows waypoints within **10km** (100m × 100)
+- At **50m zoom**: Shows waypoints within **5km** (50m × 100)
+
+Raising the multiplier is safe because sector clustering (Strategy 2, below) already caps visible
+off-screen triangles at `MAX_OFFSCREEN_INDICATORS` (8) regardless of how many candidates pass this
+filter — a wider cutoff only changes which waypoint fills a sector when nothing closer already exists
+in it. It's also meaningful, not just harmless: the working-set selection
+(`gpx_loader::selectAndMaterialize()`/`reselect()`, see [ADR-0023](adr/0023-two-tier-waypoint-index.md))
+picks the N globally-closest waypoints with **no distance cap**, so there are real far-away candidates
+for a wider cutoff to actually surface.
 
 **Calculation** (`src/ui/navigation.cpp:296-300`):
 ```cpp
@@ -54,7 +63,7 @@ if (distance > max_indicator_distance) {
 
 ### Rationale
 
-**Why 10× multiplier?**
+**Why 100× multiplier?**
 
 1. **Navigation Planning**: See waypoints outside current zoom radius to plan route
 2. **Situational Awareness**: Know what's ahead without constantly changing zoom
@@ -76,11 +85,11 @@ Prevent off-screen indicator clutter by showing **maximum 8 directional indicato
 
 ### Configuration
 ```cpp
-// include/ui/ui_manager.h:64-66
+// include/ui/ui_manager.h — RadarConfig
 static constexpr int MAX_OFFSCREEN_INDICATORS = 8;
 static constexpr int INDICATOR_SECTORS = 8;
-static constexpr int INDICATOR_SIZE = 15;  // Triangle size (pixels)
-static constexpr int INDICATOR_EDGE_INSET = 20;  // Inset from edge (pixels)
+static constexpr int INDICATOR_SIZE = 25;  // Triangle size (pixels)
+static constexpr int INDICATOR_EDGE_INSET = 25;  // Inset from edge (pixels)
 ```
 
 ### How It Works
@@ -128,7 +137,8 @@ if (distance < sectors[sector].closest_distance) {
 ```
 
 **Result**: Maximum 8 off-screen indicators, even if hundreds of waypoints are beyond screen bounds
-(`MAX_WAYPOINTS` is 500 as of 2026-08-05, see [ADR-0022](adr/0022-waypoint-cap-raised-to-500-not-700.md)).
+(`MAX_WAYPOINTS` is 200 — a working-set size, not a device-wide cap; see the two-tier PSRAM index,
+[ADR-0023](adr/0023-two-tier-waypoint-index.md)).
 
 ---
 
@@ -151,15 +161,15 @@ if (x >= 0 && x < screen_size && y >= 0 && y < screen_size) {
 
 ### Off-Screen Indicators
 **Appearance**: Orange triangles at screen edge
-- **Size**: 15 pixels (triangle base)
+- **Size**: 25 pixels (triangle base)
 - **Color**: `0xFF8800` (orange - distinct from yellow)
-- **Position**: 20px inset from circular screen edge
+- **Position**: 25px inset from circular screen edge
 - **Direction**: Triangle points toward waypoint bearing
 - **Drawing**: `src/ui/navigation.cpp:250-289`
 
 ```cpp
-// Position indicator 20px inset from circular edge
-int inset = 20;
+// Position indicator 25px inset from circular edge
+int inset = 25;
 float edge_x = center_x + (radius - inset) * sin(bearing);
 float edge_y = center_y - (radius - inset) * cos(bearing);
 
@@ -224,8 +234,8 @@ compute bearing" step. See [ADR-0022](adr/0022-waypoint-cap-raised-to-500-not-70
 | WP5 | 300m | Off-screen, Sector E | Add to sector 2 (East) |
 | WP6 | 500m | Off-screen, Sector SE | Add to sector 3 (Southeast) |
 | ... | ... | ... | ... |
-| WP10 | 1500m | Too far | Skip (> 1km = 100m × 10) |
-| WP11 | 5km | Too far | Skip |
+| WP10 | 15km | Too far | Skip (> 10km = 100m × 100) |
+| WP11 | 50km | Too far | Skip |
 
 **Result**:
 - 2 yellow circles on screen
@@ -281,17 +291,17 @@ than trusting either number, especially at the new 500-waypoint cap.
 
 ### Adjusting Distance Multiplier
 
-**Current**: 10.0× zoom radius
+**Current**: 100.0× zoom radius (raised from 10.0×, 2026-08-07)
 
 **To increase range** (show more distant waypoints):
 ```cpp
-// include/ui/ui_manager.h:63
-static constexpr float DISTANCE_FILTER_MULTIPLIER = 20.0f;  // Show 20× zoom radius
+// include/ui/ui_manager.h — RadarConfig
+static constexpr float DISTANCE_FILTER_MULTIPLIER = 200.0f;  // Show 200× zoom radius
 ```
 
 **To decrease range** (focus on nearby waypoints):
 ```cpp
-static constexpr float DISTANCE_FILTER_MULTIPLIER = 5.0f;  // Show 5× zoom radius
+static constexpr float DISTANCE_FILTER_MULTIPLIER = 10.0f;  // Show 10× zoom radius (the old default)
 ```
 
 **Trade-offs**:
@@ -330,8 +340,9 @@ int sector = (int)((bearing_deg + 11.25f) / 22.5f) % NUM_SECTORS;
 ### GPX Loader
 - Filtering operates on `ui.waypoints[]` array
 - GPX loader populates array via `gpx_loader::loadAllGPXFiles()`
-- Maximum 500 waypoints (`ui_manager::RadarConfig::MAX_WAYPOINTS`, raised from 50 on 2026-08-05 —
-  see [ADR-0022](adr/0022-waypoint-cap-raised-to-500-not-700.md))
+- Working-set size of 200 (`ui_manager::RadarConfig::MAX_WAYPOINTS`) — the closest N waypoints across
+  every indexed GPX file, reselected on movement; see the two-tier PSRAM index,
+  [ADR-0023](adr/0023-two-tier-waypoint-index.md)
 
 ### Radar Display
 - Called by `navigation::updateRadarDisplay()` every frame
@@ -352,13 +363,17 @@ int sector = (int)((bearing_deg + 11.25f) / 22.5f) % NUM_SECTORS;
 ```cpp
 // include/ui/ui_manager.h
 struct RadarConfig {
-    static constexpr int MAX_WAYPOINTS = 500;  // raised from 50, 2026-08-05, see ADR-0022
+    // 500 (ADR-0022) failed to boot on hardware the same day and was rolled back to 200;
+    // the two-tier PSRAM index (ADR-0023) is what actually solved "more waypoints than
+    // fit in the working set" — this is a working-set size, not a device-wide cap.
+    static constexpr int MAX_WAYPOINTS = 200;
     static constexpr int WAYPOINT_SIZE = 25;  // On-screen circle size
     static constexpr int MAX_OFFSCREEN_INDICATORS = 8;
-    static constexpr float DISTANCE_FILTER_MULTIPLIER = 10.0f;
+    static constexpr float DISTANCE_FILTER_MULTIPLIER = 100.0f;  // raised from 10.0f, 2026-08-07
     static constexpr int INDICATOR_SECTORS = 8;
-    static constexpr int INDICATOR_SIZE = 15;  // Triangle size
-    static constexpr int INDICATOR_EDGE_INSET = 20;  // Distance from edge
+    static constexpr int INDICATOR_SIZE = 25;  // Triangle size
+    static constexpr int INDICATOR_EDGE_INSET = 25;  // Distance from edge
+    static constexpr float FIXED_WAYPOINT_MAX_DISTANCE_M = 100000.0f;  // Auto-unfix past this range
 };
 ```
 
@@ -366,7 +381,7 @@ struct RadarConfig {
 
 ## Touch Interaction and Distance Display
 
-**Status**: Implemented 2026-08-07, build-verified (not yet field-tested)
+**Status**: Implemented 2026-08-07, extended same day, build-verified (not yet field-tested)
 
 Off-screen indicators are tappable, same as on-screen waypoint dots. `drawWaypoints()`
 (`navigation.cpp`) persists each drawn indicator's screen position, source waypoint index, and
@@ -375,11 +390,28 @@ waypoint) every frame; `handleTapAt()` hit-tests against it (24px radius) after 
 dots, and opens the same waypoint detail screen a tapped on-screen dot would. No mutex is needed —
 both the draw callback and the touch callback run on the UI Task.
 
-The waypoint detail screen (`waypoint_screen.cpp`) now shows a DISTANCE row (Haversine via
-`utils/geo.h`, not this doc's equirectangular approximation — a tapped off-screen waypoint can be
-well outside that approximation's accurate range), formatted as meters under 1km and `"%.1f km"` at
-or above it. Hidden without a GPS fix. This makes the distance to any off-screen indicator (up to
-10km away at 1km zoom, per the multiplier above) visible on tap instead of requiring a guess.
+There are two distinct distance displays, serving two different purposes — an early version of this
+feature conflated them, so the distinction is worth stating explicitly:
+
+- **One-shot glance, no fixing required**: the waypoint detail screen (`waypoint_screen.cpp`) shows a
+  DISTANCE row (Haversine via `utils/geo.h`, not this doc's equirectangular approximation — a tapped
+  off-screen waypoint can be well outside that approximation's accurate range), formatted as meters
+  under 1km and `"%.1f km"` at or above it. Computed once when the screen opens — cheap (a single
+  Haversine call), not a per-frame cost. Hidden without a GPS fix.
+- **Live tracking while fixed**: the existing middle-left `waypoint_distance_label` ("Fixed: Xm"/"Fixed:
+  X.X km") and its `fixed_waypoint_icon` (a small dot-in-ring canvas above the label, matching the
+  on-radar waypoint beacon's own color, tap target for the same action) update continuously while a
+  waypoint is fixed — same widgets whether the fixed waypoint is on-screen or off-screen. Previously
+  this auto-unfixed at a hardcoded 1km regardless of how far the fixed waypoint was, which made fixing
+  anything off-screen effectively non-functional (it would fix and immediately auto-release next
+  frame). The cap is now `RadarConfig::FIXED_WAYPOINT_MAX_DISTANCE_M` (100km, raised from an initial
+  20km the same day — 20km was itself still blocking legitimate fixes on distant off-screen waypoints,
+  and 100km now matches `DISTANCE_FILTER_MULTIPLIER`'s own cutoff at 1km zoom) — a safety net for a
+  stale fix, not a normal-use limit — and the label formats km above 1000m like the detail screen's
+  DISTANCE row does.
+
+`drawWaypoints()` also still enforces "when a waypoint is fixed, render only that target" — all other
+on-screen dots and off-screen triangles disappear, on-screen or off.
 
 ## Future Enhancements
 
@@ -403,7 +435,7 @@ or above it. Hidden without a GPS fix. This makes the distance to any off-screen
 
 The GPS Radar waypoint filtering system provides:
 
-✅ **Intelligent range limiting** - Shows 10× zoom radius for optimal awareness
+✅ **Intelligent range limiting** - Shows 100× zoom radius for optimal awareness
 ✅ **Clean visual display** - Maximum 8 off-screen indicators prevents clutter
 ✅ **Performance** - O(n) algorithm with negligible overhead
 ✅ **Flexibility** - Easy to tune via compile-time constants
@@ -413,8 +445,13 @@ This dual-strategy approach balances **situational awareness** (knowing what's b
 
 ---
 
-**Last Updated**: 2026-08-07 (off-screen indicators made tappable, distance display added — see
-Touch Interaction section above). Previously 2026-08-05 (`MAX_WAYPOINTS` raised 50 → 500; Haversine
-replaced with equirectangular approximation — see [ADR-0022](adr/0022-waypoint-cap-raised-to-500-not-700.md))
+**Last Updated**: 2026-08-07 (`DISTANCE_FILTER_MULTIPLIER` raised 10×→100×; fixed-waypoint live distance
+label's auto-unfix cap raised 1km→`FIXED_WAYPOINT_MAX_DISTANCE_M`, 20km then same-day 100km, so fixing
+off-screen waypoints actually works; added `fixed_waypoint_icon` — see Touch Interaction section above).
+Same day, earlier:
+off-screen indicators made tappable, detail-screen distance display added. Previously 2026-08-05
+(`MAX_WAYPOINTS` raised 50 → 500, then rolled back to 200 same day after a hardware boot failure — see
+[ADR-0022](adr/0022-waypoint-cap-raised-to-500-not-700.md) — superseded by the two-tier PSRAM index,
+[ADR-0023](adr/0023-two-tier-waypoint-index.md); Haversine replaced with equirectangular approximation)
 **Author**: GPS Radar Development Team
 **Related Documentation**: `README.md`, `CLAUDE.md`, `docs/gps_settings_simplification.md`

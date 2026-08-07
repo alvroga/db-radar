@@ -620,7 +620,9 @@ static void drawWaypoints(lv_draw_ctx_t* ctx, int screen_size) {
     ui_manager::UIState& ui = ui_manager::getUIState();
 
     // Calculate maximum relevant distance based on current zoom level
-    // Shows waypoints within 10× zoom radius (e.g., 10m zoom shows up to 100m)
+    // Shows waypoints within 100× zoom radius (RadarConfig::DISTANCE_FILTER_MULTIPLIER),
+    // e.g. 50m zoom shows up to 5km. Sector clustering below still caps visible
+    // triangles at MAX_OFFSCREEN_INDICATORS regardless of how wide this cutoff is.
     int zoom_idx = static_cast<int>(ui.current_zoom);
     float zoom_radius = ui_manager::RadarConfig::ZOOM_CONFIGS[zoom_idx].radius_meters;
     float max_indicator_distance = zoom_radius * ui_manager::RadarConfig::DISTANCE_FILTER_MULTIPLIER;
@@ -1056,6 +1058,33 @@ void drawBeaconFoundIndicator(lv_obj_t* canvas, bool daylight) {
     lv_canvas_draw_polygon(canvas, sp_inner, 5, &star_dsc);
 }
 
+void drawFixedWaypointIndicator(lv_obj_t* canvas, bool daylight) {
+    const int CX = 22, CY = 22;
+    // Monochrome, matching the rest of the HUD text/icons (waypoint_distance_label,
+    // beacon_dbm_label, etc.) rather than the waypoint's own yellow/dark-orange —
+    // this is chrome, not a map object.
+    const lv_color_t color = daylight ? lv_color_black() : lv_color_white();
+
+    lv_canvas_fill_bg(canvas, lv_color_black(), LV_OPA_TRANSP);
+
+    // Outer ring — "locked on" halo, 45×45 canvas, radius 18 (50% bigger than the
+    // original 30×30/radius-12 version)
+    lv_draw_arc_dsc_t ring_dsc;
+    lv_draw_arc_dsc_init(&ring_dsc);
+    ring_dsc.color = color;
+    ring_dsc.width = 3;
+    ring_dsc.opa   = LV_OPA_COVER;
+    lv_canvas_draw_arc(canvas, CX, CY, 18, 0, 360, &ring_dsc);
+
+    // Inner filled dot — same fill style as the on-screen waypoint beacon, scaled to match
+    lv_draw_rect_dsc_t dot_dsc;
+    lv_draw_rect_dsc_init(&dot_dsc);
+    dot_dsc.bg_color = color;
+    dot_dsc.bg_opa   = LV_OPA_COVER;
+    dot_dsc.radius   = LV_RADIUS_CIRCLE;
+    lv_canvas_draw_rect(canvas, CX - 9, CY - 9, 18, 18, &dot_dsc);
+}
+
 /**
  * @brief Paint the radar geometry directly into LVGL's draw buffer.
  *
@@ -1301,9 +1330,12 @@ void updateRadarDisplay() {
     // request rate rather than at LVGL's redraw rate.
     updateWaypointFixSonar();
 
-    // ── Fixed waypoint distance label (LVGL overlay widget, NOT canvas text) ──────
+    // ── Fixed waypoint distance label + "locked on" icon (LVGL overlay widgets, NOT
+    // canvas text) ──────────────────────────────────────────────────────────────
     // Updated at ~1Hz but only calls lv_label_set_text when the integer value changes.
     // Hides/shows with HUD via hideHUD()/showHUD(); managed here when waypoint changes.
+    // The icon always mirrors the label's visibility — it's a second tap target for
+    // the same action, not independent state.
     if (ui.waypoint_distance_label) {
         static int s_last_dist_display = -1;  // Cache: prevents lv_label_set_text on every frame
 
@@ -1318,30 +1350,43 @@ void updateRadarDisplay() {
                            sin(dLon/2.0)*sin(dLon/2.0);
                 float dist_m = (float)(EARTH_RADIUS_M * 2.0 * atan2(sqrt(a), sqrt(1.0 - a)));
 
-                // Auto-unfix when waypoint goes beyond 1km — outside navigation reach.
-                // All waypoints become visible again on the next draw cycle.
-                if (dist_m > 1000.0f) {
-                    Serial.printf("[NAV] Fixed waypoint auto-released: %.0fm > 1km\n", dist_m);
+                // Auto-unfix past FIXED_WAYPOINT_MAX_DISTANCE_M — a safety net for a
+                // stale fix, not a normal-use limit. Off-screen waypoints can now be
+                // fixed from well beyond the old hardcoded 1km cap.
+                if (dist_m > ui_manager::RadarConfig::FIXED_WAYPOINT_MAX_DISTANCE_M) {
+                    Serial.printf("[NAV] Fixed waypoint auto-released: %.0fm > %.0fm\n",
+                                  dist_m, ui_manager::RadarConfig::FIXED_WAYPOINT_MAX_DISTANCE_M);
                     ui.fixed_waypoint_index = -1;
                     s_last_dist_display = -1;
                     lv_obj_add_flag(ui.waypoint_distance_label, LV_OBJ_FLAG_HIDDEN);
+                    if (ui.fixed_waypoint_icon)
+                        lv_obj_add_flag(ui.fixed_waypoint_icon, LV_OBJ_FLAG_HIDDEN);
                     buzzer::stopSonar();
                 } else {
                     int dist_display = (int)dist_m;
                     if (dist_display != s_last_dist_display) {
                         s_last_dist_display = dist_display;
-                        char buf[16];
-                        snprintf(buf, sizeof(buf), "Fixed: %dm", dist_display);
+                        char buf[24];
+                        // Matches waypoint_screen.cpp's DISTANCE section formatting.
+                        if (dist_m < 1000.0f)
+                            snprintf(buf, sizeof(buf), "Fixed: %d m", dist_display);
+                        else
+                            snprintf(buf, sizeof(buf), "Fixed: %.1f km", dist_m / 1000.0f);
                         lv_label_set_text(ui.waypoint_distance_label, buf);
                     }
-                    if (ui.hud_visible)
+                    if (ui.hud_visible) {
                         lv_obj_clear_flag(ui.waypoint_distance_label, LV_OBJ_FLAG_HIDDEN);
+                        if (ui.fixed_waypoint_icon)
+                            lv_obj_clear_flag(ui.fixed_waypoint_icon, LV_OBJ_FLAG_HIDDEN);
+                    }
                 }
             }
         } else {
             // No fixed waypoint — hide and invalidate cache so next fix triggers a fresh draw
             s_last_dist_display = -1;
             lv_obj_add_flag(ui.waypoint_distance_label, LV_OBJ_FLAG_HIDDEN);
+            if (ui.fixed_waypoint_icon)
+                lv_obj_add_flag(ui.fixed_waypoint_icon, LV_OBJ_FLAG_HIDDEN);
         }
     }
 

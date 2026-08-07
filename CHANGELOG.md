@@ -11,6 +11,60 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+**GPX web manager: storage gauge and file count now refresh after upload/delete, not just on page
+reload (2026-08-07) — build-verified, not yet field-tested**
+
+The "Flash storage (GPX)" gauge and "GPX files" count are already live reads (`esp_vfs_fat_info("/ffat")`
+and a directory listing, both queried fresh per request — no reboot or device-side caching was ever
+involved). The bug was purely client-side: `loadStorageInfo()` only ran once, on initial page load —
+`triggerReload()`'s three call sites (batch upload, batch delete, single delete) all refreshed the file
+list (`loadFileList()`) but never re-fetched `/storage`, so the gauge stayed frozen at whatever it read
+when the page opened until the user manually reloaded the browser tab. Added a `loadStorageInfo()` call
+alongside each of those three `loadFileList()` calls. Also removed the now-stale "Reload the page to
+refresh the count" line from the page's own Auto-load info box, and added a small animated
+`.`/`..`/`...` ellipsis (`data-loading` attribute + a 400ms interval) to the "loading" placeholder text
+on `storageText`/`fileCountText` so the initial fetch doesn't read as stalled.
+
+`pio run` clean. Flash +1,072 B (embedded HTML/JS string), RAM unchanged. Not yet tested on hardware.
+
+**Fixed-waypoint live distance now works for off-screen waypoints; added a "locked on" icon;
+off-screen indicator range raised 10×→100× (2026-08-07) — build-verified, not yet field-tested**
+
+Follow-up to the "Off-screen waypoint indicators: tappable" change directly below. That change added
+a one-shot DISTANCE row to the waypoint detail screen, but the actually-requested behavior — the same
+continuously-updating "Fixed: Xm" readout the middle-left HUD already shows for on-screen fixed
+waypoints — silently didn't work for anything off-screen: `updateRadarDisplay()`'s fixed-waypoint
+label auto-unfixed at a hardcoded 1km regardless of how far the fixed waypoint actually was, so fixing
+a farther/off-screen waypoint would show "Fixed:" for one frame and then immediately auto-release.
+
+- The hardcoded 1km auto-unfix is now `RadarConfig::FIXED_WAYPOINT_MAX_DISTANCE_M` (100km, raised from
+  an initial 20km same-day pass — 20km was itself still blocking legitimate fixes on distant off-screen
+  waypoints; 100km now matches `DISTANCE_FILTER_MULTIPLIER`'s own cutoff at 1km zoom) — a safety net
+  for a stale fix, not a normal-use limit — and the label formats km above 1000m (`"Fixed: %.1f km"`),
+  matching the detail screen's DISTANCE row convention.
+- Added `fixed_waypoint_icon`: a 45×45 `lv_canvas` "locked on" icon (filled dot + ring), monochrome
+  white/black matching the rest of the HUD (not the waypoint's own yellow/dark-orange — this is chrome,
+  not a map object), positioned above the distance label, tappable as a second target for the same
+  action (open the fixed waypoint's detail screen). Drawn by the new
+  `navigation::drawFixedWaypointIndicator()`, following the existing `drawBeaconFoundIndicator()`
+  pattern (same canvas-buffer/hide-show/theme-redraw lifecycle). Visibility is driven from the same
+  per-frame block as the label, not independently. Sized 45×45 (50% larger than the initial 30×30 pass)
+  per field feedback on legibility.
+- `RadarConfig::DISTANCE_FILTER_MULTIPLIER` raised 10.0→100.0: sector clustering already caps visible
+  off-screen triangles at `MAX_OFFSCREEN_INDICATORS` (8) regardless of how many candidates pass this
+  filter, so a wider cutoff only changes which waypoint fills a sector when nothing closer exists in
+  it — not how much clutter is shown. It's also meaningful, not just harmless: the two-tier index's
+  working-set selection (`gpx_loader::selectAndMaterialize()`/`reselect()`, ADR-0023) picks the N
+  globally-closest waypoints with no distance cap, so there are real far-away candidates for a wider
+  cutoff to surface. `docs/waypoint_filtering.md` updated throughout (multiplier, worked examples,
+  "Important Constants" block) — and its pre-existing stale `MAX_WAYPOINTS = 500`/`INDICATOR_SIZE = 15`
+  figures were corrected to the actual current values (200, 25) while touching those same blocks; the
+  `500` was never re-synced after that cap was rolled back to 200 the same day it shipped (ADR-0022's
+  own addendum) and then superseded by the two-tier PSRAM index (ADR-0023).
+
+`pio run` clean. RAM +6,072 B (dominated by the 45×45 `TRUE_COLOR_ALPHA` canvas buffer, ~6,075 B at
+`LV_COLOR_DEPTH=16`) / Flash +724 B. Not yet tested on hardware.
+
 **Off-screen waypoint indicators: tappable, and distance now shown on the detail screen
 (2026-08-07) — build-verified, not yet field-tested**
 

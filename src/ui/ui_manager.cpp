@@ -364,6 +364,30 @@ void createRadarScreen() {
         }
     }, LV_EVENT_CLICKED, nullptr);
 
+    // Fixed-waypoint "locked on" icon — sits just above waypoint_distance_label, same
+    // tap action as the label (second, bigger tap target for the same thing). Hidden
+    // until a waypoint is fixed; visibility is driven from navigation.cpp alongside the
+    // label, not from show/hideHUD() directly (see comment there).
+    {
+        static uint8_t s_fixed_icon_buf[LV_CANVAS_BUF_SIZE_TRUE_COLOR_ALPHA(45, 45)];
+        g_ui_state.fixed_waypoint_icon = lv_canvas_create(stage);
+        lv_canvas_set_buffer(g_ui_state.fixed_waypoint_icon,
+                             s_fixed_icon_buf, 45, 45, LV_IMG_CF_TRUE_COLOR_ALPHA);
+        lv_obj_set_size(g_ui_state.fixed_waypoint_icon, 45, 45);
+        lv_obj_align(g_ui_state.fixed_waypoint_icon, LV_ALIGN_LEFT_MID, 13, -63);
+        lv_obj_add_flag(g_ui_state.fixed_waypoint_icon, LV_OBJ_FLAG_HIDDEN);
+        lv_obj_add_flag(g_ui_state.fixed_waypoint_icon, LV_OBJ_FLAG_CLICKABLE);
+        lv_obj_set_ext_click_area(g_ui_state.fixed_waypoint_icon, 10);
+        lv_obj_add_event_cb(g_ui_state.fixed_waypoint_icon, [](lv_event_t* e) {
+            ui_manager::UIState& ui = ui_manager::getUIState();
+            if (ui.fixed_waypoint_index >= 0) {
+                ui.selected_waypoint_index = ui.fixed_waypoint_index;
+                navigation::goToWaypointScreen();
+            }
+        }, LV_EVENT_CLICKED, nullptr);
+        navigation::drawFixedWaypointIndicator(g_ui_state.fixed_waypoint_icon, false);
+    }
+
     // Beacon-found indicator — 40×40 TRUE_COLOR_ALPHA canvas, same position as DEV label.
     // Shows a circle outline + solid star when beacon_found is set in NVS.
     // Hides with the rest of the HUD. Managed by updateRadarDisplay().
@@ -508,6 +532,8 @@ void hideHUD() {
             lv_obj_add_flag(g_ui_state.beacon_dbm_label, LV_OBJ_FLAG_HIDDEN);
         if (g_ui_state.waypoint_distance_label)
             lv_obj_add_flag(g_ui_state.waypoint_distance_label, LV_OBJ_FLAG_HIDDEN);
+        if (g_ui_state.fixed_waypoint_icon)
+            lv_obj_add_flag(g_ui_state.fixed_waypoint_icon, LV_OBJ_FLAG_HIDDEN);
         if (g_ui_state.beacon_found_canvas)
             lv_obj_add_flag(g_ui_state.beacon_found_canvas, LV_OBJ_FLAG_HIDDEN);
         g_ui_state.hud_visible = false;
@@ -618,6 +644,11 @@ void updateDaylightMode(bool daylight_enabled) {
     // Redraw beacon-found indicator in new theme color
     if (g_ui_state.beacon_found_canvas) {
         navigation::drawBeaconFoundIndicator(g_ui_state.beacon_found_canvas, daylight_enabled);
+    }
+
+    // Redraw fixed-waypoint icon in new theme color
+    if (g_ui_state.fixed_waypoint_icon) {
+        navigation::drawFixedWaypointIndicator(g_ui_state.fixed_waypoint_icon, daylight_enabled);
     }
 
     Serial.printf("[UI] Daylight mode %s - HUD text: %s\n",

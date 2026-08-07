@@ -77,11 +77,24 @@ struct RadarConfig {
 
     // Off-screen indicator configuration
     static constexpr int MAX_OFFSCREEN_INDICATORS = 8;       // Max indicators (one per sector)
-    static constexpr float DISTANCE_FILTER_MULTIPLIER = 10.0f;  // Show waypoints within 10× zoom radius
+    // Show waypoints within 100× zoom radius (was 10×, raised 2026-08-07). Sector
+    // clustering already caps visible triangles at MAX_OFFSCREEN_INDICATORS regardless
+    // of how many candidates pass this filter — widening it only changes which waypoint
+    // fills a sector when nothing closer exists in it, not how much clutter is shown.
+    // The working-set selection (gpx_loader::selectAndMaterialize/reselect) picks the N
+    // globally-closest waypoints with no distance cap, so there are real candidates for
+    // this to surface at 100×.
+    static constexpr float DISTANCE_FILTER_MULTIPLIER = 100.0f;
     static constexpr int INDICATOR_SECTORS = 8;              // 8 sectors: N, NE, E, SE, S, SW, W, NW
     static constexpr int INDICATOR_SIZE = 25;                // Triangle size (pixels) - increased for visibility
     static constexpr int INDICATOR_EDGE_INSET = 25;          // Inset from circular edge (pixels)
     static constexpr int INDICATOR_BORDER_WIDTH = 3;         // Border width (pixels) for better visibility
+
+    // Fixed-waypoint auto-unfix range: a safety net for a stale fix, not a normal-use
+    // limit — off-screen waypoints can be fixed from well beyond the old 1km cap. Raised
+    // 20km->100km, 2026-08-07: 20km was itself blocking legitimate fixes on distant
+    // off-screen waypoints, matching DISTANCE_FILTER_MULTIPLIER's own 1km-zoom cutoff.
+    static constexpr float FIXED_WAYPOINT_MAX_DISTANCE_M = 100000.0f;
 
     // Waypoint glow effect configuration (analog radar aesthetic)
     static constexpr int WAYPOINT_GLOW_RADIUS = 18;          // Shadow width in pixels
@@ -133,6 +146,7 @@ struct UIState {
     lv_obj_t* center_label = nullptr;      // Center text label (test for custom font)
     lv_obj_t* wifi_mode_label = nullptr;   // WiFi mode overlay (shown when radar is disabled)
     lv_obj_t* waypoint_distance_label = nullptr;  // Distance to fixed waypoint (LVGL overlay, not canvas draw)
+    lv_obj_t* fixed_waypoint_icon = nullptr;      // "Locked on" dot+ring icon above waypoint_distance_label
     lv_obj_t* beacon_found_canvas = nullptr;       // Beacon-found indicator (circle + star, shown when isFound())
     lv_obj_t* compass_health_label = nullptr;      // Compass trust indicator (Level 1 health metrics, WP-4) — hidden when healthy
 
