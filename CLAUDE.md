@@ -698,6 +698,13 @@ physical quantity, and put the noise filter on the **input** (a τ-based EMA on 
 than hysteresis on the **output**. Hysteresis is only correct where a genuinely discrete decision is
 being made — beeping vs silent, in range vs out. The beacon ring (§7.3c) wants the same treatment.
 
+**Known, accepted issue: every GPX upload/delete visibly glitches the display** (shifted/wrapped
+frame content) — a real FFat write/erase briefly disables both cores' cache/interrupts, which can
+starve the RGB panel's DMA refill. `CONFIG_SPI_FLASH_AUTO_SUSPEND` was enabled to test as a fix
+(2026-08-07) but field data suggests it didn't resolve it; not pursued further, documented in the
+GPX web manager UI instead of the render pipeline. Detail: `docs/adr/0028-defer-gpx-reload-to-
+explicit-endpoint.md`'s Verification status section, CHANGELOG.md.
+
 ---
 
 ## Documentation Standards

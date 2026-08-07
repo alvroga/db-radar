@@ -12,7 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 **GPX batch upload/delete: O(N²) reload cost fixed; flash-suspend enabled against display
-corruption during heavy FFat writes (2026-08-07) — implemented, not yet field-verified**
+corruption during heavy FFat writes (2026-08-07) — field-verified**
 
 Two findings from stress-testing `MAX_INDEX_FILES = 512` with a real 512-file upload/delete batch,
 done in chunks of 100: (1) timing was clearly non-linear — first 100 files took 1m22s, the next 100
@@ -39,9 +39,35 @@ already chunks itself) but couldn't preempt mid-chunk; `AUTO_SUSPEND` (ESP32-S3 
 can pause a flash op for higher-priority work instead. `sdkconfig.cc-radar` regenerated and diffed —
 only the intended flag and its automatic Kconfig-dependency siblings changed, nothing else drifted.
 
-Both changes `pio run` clean. **Verification pending**: the remaining ~312 files of the original
-512-file stress test, to confirm both fixes empirically (timing should now scale linearly, and the
-display should no longer glitch, or glitch less, on each write).
+**Field-verified 2026-08-07**, completing the remaining ~312 files of the original 512-file stress
+test: an equal-sized 100-file batch that took 3m36s before this fix took 24s after — ~9x faster,
+confirming the O(N²)→O(N) reload fix. All 512 files uploaded successfully, and radar boot/render
+time was unaffected by the much larger file/waypoint count. The flash-suspend change does not
+appear to have resolved the display corruption, though its effect wasn't isolated from the reload
+fix in this test — the corruption is now treated as accepted, expected behavior (see the web UI's
+new "Note" box below) rather than pursued further. Full verification detail:
+[ADR-0028](docs/adr/0028-defer-gpx-reload-to-explicit-endpoint.md)'s Verification status section.
+
+**GPX web manager: upload/delete progress feedback, file-count display, and a display-glitch note
+(2026-08-07)**
+
+Follow-up polish after the 512-file stress test above, driven by two real gaps it exposed: (1) the
+only feedback during a long batch was watching the physical device's screen glitch on each write —
+not exactly reassuring — and (2) the page's "Waypoints loaded: X / 200" indicator was nearly
+useless as upload feedback, since it reflects the live GPS-position working set (capped at 200) and
+saturates almost immediately regardless of how many of the 512 files actually got indexed
+correctly.
+
+Added a persistent progress indicator (`gpx_server.cpp`, separate `<div>` from the existing
+success/error status box so it doesn't fight that box's 5-second auto-hide) showing `Uploading 45 /
+312: FILE.GPX` (or `Deleting …`) live per-file during `handleFiles()`/`deleteSelected()`, switching
+to `Rebuilding index` during the batch's single `/reload` call, with a pure-CSS animated ellipsis
+(no extra JS timers). Replaced the "Waypoints loaded" indicator with a "GPX files: N / 512" count
+under the storage-usage bar — `storage_handler()` now also returns `file_max` (from
+`gpx_index::MAX_INDEX_FILES`) so the page doesn't hardcode a second copy of that constant; current
+count comes from `/list`'s response length, already fetched. Added a second info-box, matching the
+existing "Auto-load" one's style, noting that upload/delete will visibly glitch the display — this
+is expected, not a malfunction, per the finding above.
 
 **SD→FFat GPX auto-migration removed — was silently restoring deleted files (2026-08-07)**
 

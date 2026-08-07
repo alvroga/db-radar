@@ -3,6 +3,7 @@
 
 #include "gpx/gpx_server.h"
 #include "gpx/gpx_loader.h"
+#include "gpx/gpx_index.h"
 #include "ui/ui_manager.h"
 #include "hardware/connectivity/wifi_manager.h"
 #include "core/arduino_compat.h"
@@ -190,14 +191,27 @@ static const char UPLOAD_HTML[] = R"rawliteral(
             color: #ff4444;
             display: block;
         }
-        .wp-status {
-            background: #1f1f1f;
-            border: 1px solid #333;
+        .progress {
+            margin-top: 14px;
             padding: 10px 14px;
             border-radius: 4px;
-            margin-top: 16px;
             font-size: 0.9em;
-            color: #e0e0e0;
+            background: #1f1f1f;
+            border: 1px solid #00aa44;
+            color: #00ff00;
+            display: none;
+        }
+        .progress.active { display: block; }
+        .progress .dots::after {
+            content: '';
+            animation: progress-dots 1.2s steps(4, end) infinite;
+        }
+        @keyframes progress-dots {
+            0%   { content: ''; }
+            25%  { content: '.'; }
+            50%  { content: '..'; }
+            75%  { content: '...'; }
+            100% { content: ''; }
         }
         .info-box {
             background: #1f1f1f;
@@ -257,10 +271,19 @@ static const char UPLOAD_HTML[] = R"rawliteral(
             <div class="storage-bar-track">
                 <div class="storage-bar-fill" id="storageBar"></div>
             </div>
+            <div class="storage-row" style="margin-top:8px; margin-bottom:0;">
+                <span>GPX files</span>
+                <span id="fileCountText">loading...</span>
+            </div>
         </div>
 
         <div class="info-box">
             <strong>Auto-load:</strong> Files are loaded automatically when uploaded. Reload the page to refresh the count.
+        </div>
+
+        <div class="info-box">
+            <strong>Note:</strong> The display will show brief visual interference during each file
+            upload or delete — a side effect of writing to flash storage, not a malfunction.
         </div>
 
         <div class="upload-area" id="uploadArea">
@@ -270,6 +293,7 @@ static const char UPLOAD_HTML[] = R"rawliteral(
         </div>
 
         <div class="status" id="status"></div>
+        <div class="progress" id="progress"><span id="progressText"></span><span class="dots"></span></div>
 
         <div class="bulk-actions" id="bulkActions" style="display:none;">
             <label class="select-all-label">
@@ -281,8 +305,6 @@ static const char UPLOAD_HTML[] = R"rawliteral(
         </div>
 
         <div class="file-list" id="fileList"></div>
-
-        <div id="wpStatus" class="wp-status">Waypoints: loading...</div>
     </div>
 
     <script>
@@ -295,9 +317,8 @@ static const char UPLOAD_HTML[] = R"rawliteral(
         const downloadSelectedBtn = document.getElementById('downloadSelectedBtn');
         const deleteSelectedBtn = document.getElementById('deleteSelectedBtn');
 
-        // Load existing files and waypoint count on page load
+        // Load existing files on page load
         loadFileList();
-        loadWaypointCount();
         loadStorageInfo();
         applyDevModeUI();
 
@@ -339,13 +360,16 @@ static const char UPLOAD_HTML[] = R"rawliteral(
         }
 
         async function handleFiles(files) {
-            let uploaded = 0, failed = 0;
+            let uploaded = 0, failed = 0, i = 0;
+            const total = files.length;
             for (let file of files) {
+                i++;
                 if (!file.name.toLowerCase().endsWith('.gpx')) {
                     showStatus('Only .gpx files are allowed', 'error');
                     continue;
                 }
 
+                showProgress(`Uploading ${i} / ${total}: ${file.name}`);
                 try {
                     const response = await fetch('/upload?filename=' + encodeURIComponent(file.name), {
                         method: 'POST',
@@ -366,7 +390,11 @@ static const char UPLOAD_HTML[] = R"rawliteral(
                 }
             }
 
-            if (uploaded > 0) await triggerReload();
+            if (uploaded > 0) {
+                showProgress('Rebuilding index');
+                await triggerReload();
+            }
+            hideProgress();
             if (failed === 0) {
                 showStatus(`+ ${uploaded} file(s) uploaded successfully`, 'success');
             } else if (uploaded === 0) {
@@ -375,13 +403,25 @@ static const char UPLOAD_HTML[] = R"rawliteral(
                 showStatus(`! ${uploaded} uploaded, ${failed} failed`, 'error');
             }
             loadFileList();
-            loadWaypointCount();
+        }
+
+        // Shared by loadFileList() (current count) and loadStorageInfo() (max,
+        // from gpx_index::MAX_INDEX_FILES) — independent async calls, so the
+        // display just reflects whichever pair of values has arrived so far.
+        let gFileCount = null, gFileMax = null;
+        function updateFileCountDisplay() {
+            const el = document.getElementById('fileCountText');
+            el.textContent = (gFileCount === null || gFileMax === null)
+                ? 'loading...' : `${gFileCount} / ${gFileMax}`;
         }
 
         async function loadFileList() {
             try {
                 const response = await fetch('/list');
                 const data = await response.json();
+
+                gFileCount = data.files ? data.files.length : 0;
+                updateFileCountDisplay();
 
                 fileList.innerHTML = '';
                 if (data.files && data.files.length > 0) {
@@ -452,8 +492,11 @@ static const char UPLOAD_HTML[] = R"rawliteral(
             if (filenames.length === 0) return;
             if (!confirm(`Delete ${filenames.length} selected file(s)?`)) return;
 
-            let failed = 0, deleted = 0;
+            let failed = 0, deleted = 0, i = 0;
+            const total = filenames.length;
             for (const filename of filenames) {
+                i++;
+                showProgress(`Deleting ${i} / ${total}: ${filename}`);
                 try {
                     const response = await fetch(`/delete/${encodeURIComponent(filename)}`, { method: 'DELETE' });
                     if (response.ok) deleted++; else failed++;
@@ -462,14 +505,17 @@ static const char UPLOAD_HTML[] = R"rawliteral(
                 }
             }
 
-            if (deleted > 0) await triggerReload();
+            if (deleted > 0) {
+                showProgress('Rebuilding index');
+                await triggerReload();
+            }
+            hideProgress();
             if (failed === 0) {
                 showStatus(`+ ${filenames.length} file(s) deleted`, 'success');
             } else {
                 showStatus(`! ${failed} of ${filenames.length} deletions failed`, 'error');
             }
             loadFileList();
-            loadWaypointCount();
         }
 
         function escapeHtml(s) {
@@ -498,23 +544,23 @@ static const char UPLOAD_HTML[] = R"rawliteral(
             }
         }
 
-        async function loadWaypointCount() {
-            try {
-                const r = await fetch('/waypoints');
-                const d = await r.json();
-                document.getElementById('wpStatus').textContent =
-                    `Waypoints loaded: ${d.count} / ${d.max}`;
-            } catch(e) {
-                document.getElementById('wpStatus').textContent = 'Waypoints: (unavailable)';
-            }
-        }
-
         function showStatus(message, type) {
             status.textContent = message;
             status.className = `status ${type}`;
             setTimeout(() => {
                 status.style.display = 'none';
             }, 5000);
+        }
+
+        // Separate from showStatus() on purpose — showStatus() auto-hides after
+        // 5s, which would fight a long-running batch's live updates. Explicit
+        // show/hide instead, so it stays visible for the whole operation.
+        function showProgress(text) {
+            document.getElementById('progressText').textContent = text;
+            document.getElementById('progress').classList.add('active');
+        }
+        function hideProgress() {
+            document.getElementById('progress').classList.remove('active');
         }
 
         async function loadStorageInfo() {
@@ -527,6 +573,8 @@ static const char UPLOAD_HTML[] = R"rawliteral(
                 bar.style.width = d.percent + '%';
                 bar.style.background = d.percent >= 90 ? '#ff4444' : (d.percent >= 70 ? '#ffaa00' : '#00aa44');
                 text.textContent = `${d.percent}% used (${formatBytes(d.used)} / ${formatBytes(d.total)})`;
+                gFileMax = d.file_max;
+                updateFileCountDisplay();
             } catch (e) {
                 text.textContent = '(unavailable)';
             }
@@ -1325,11 +1373,11 @@ static esp_err_t storage_handler(httpd_req_t* req) {
     uint64_t used_bytes = total_bytes - free_bytes;
     int percent = total_bytes > 0 ? (int)((used_bytes * 100) / total_bytes) : 0;
 
-    char buf[160];
+    char buf[192];
     int len = snprintf(buf, sizeof(buf),
-        "{\"total\":%llu,\"free\":%llu,\"used\":%llu,\"percent\":%d}",
+        "{\"total\":%llu,\"free\":%llu,\"used\":%llu,\"percent\":%d,\"file_max\":%d}",
         (unsigned long long)total_bytes, (unsigned long long)free_bytes,
-        (unsigned long long)used_bytes, percent);
+        (unsigned long long)used_bytes, percent, gpx_index::MAX_INDEX_FILES);
     httpd_resp_send(req, buf, len);
     return ESP_OK;
 }

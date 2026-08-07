@@ -71,7 +71,17 @@ introduce a new failure mode, only makes an already-safe path slightly more like
 
 ## Verification status
 
-Build-clean (`pio run`). **Not yet field-verified** — the change was made specifically so the
-remaining ~312 files of the original 512-file stress test could be uploaded/deleted with it in
-place; that run is the actual verification and hasn't happened yet as of this ADR being written.
-Update this section once it has.
+**Field-verified 2026-08-07.** Completed the remaining ~312 files of the original 512-file stress
+test with this change in place: an equal-sized 100-file batch that previously took 3m36s took 24s
+— roughly 9x faster, consistent with the O(N²)→O(N) fix. All 512 files uploaded successfully.
+Radar boot/render time was unaffected by the much larger file/waypoint count ("takes almost the
+exact same time it used to").
+
+**The `CONFIG_SPI_FLASH_AUTO_SUSPEND` flash-suspend change (also shipped alongside this) does not
+appear to have resolved the display corruption** — inferred from the fact that, after this test,
+the request was to add a persistent UI warning that uploads/deletes cause visible interference
+(see the web UI's added "Note" box), rather than to continue chasing the root cause. Flash-suspend
+may still be reducing frequency or severity to some degree; this wasn't isolated or measured
+separately from the O(N²) fix in the same test, so no claim is made either way. The corruption is
+now being treated as accepted, expected behavior (documented in the UI) rather than something to
+keep pursuing.
