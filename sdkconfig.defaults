@@ -7,6 +7,16 @@
 CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
 CONFIG_ESPTOOLPY_FLASHMODE_QIO=y
 CONFIG_ESPTOOLPY_FLASHFREQ_80M=y
+
+# Lets a flash erase/write be suspended mid-operation for higher-priority work (the RGB LCD
+# panel's continuous DMA refill) instead of blocking both cores for the operation's full
+# duration. Investigated 2026-08-07: repeated FFat writes/erases during GPX upload/delete
+# were producing visible display corruption (frame content shifted/wrapped), consistent with
+# the panel's DMA refill being starved during a flash op. CONFIG_SPI_FLASH_YIELD_DURING_ERASE
+# was already on (erase already chunks itself) but couldn't preempt mid-chunk; this can.
+# ESP32-S3 supports flash suspend/resume in hardware. See CHANGELOG.md for the before/after
+# field test this was validated against.
+CONFIG_SPI_FLASH_AUTO_SUSPEND=y
 CONFIG_SPIRAM=y
 CONFIG_SPIRAM_MODE_OCT=y
 CONFIG_SPIRAM_SPEED_80M=y

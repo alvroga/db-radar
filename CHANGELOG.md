@@ -11,6 +11,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+**GPX batch upload/delete: O(N²) reload cost fixed; flash-suspend enabled against display
+corruption during heavy FFat writes (2026-08-07) — implemented, not yet field-verified**
+
+Two findings from stress-testing `MAX_INDEX_FILES = 512` with a real 512-file upload/delete batch,
+done in chunks of 100: (1) timing was clearly non-linear — first 100 files took 1m22s, the next 100
+took 3m36s (>2.6x for an equal-sized batch) — and (2) the display showed visible "interference"
+(shifted/wrapped frame content) on every single upload and delete.
+
+**(1) Fixed the O(N²) reload.** `upload_handler()`/`delete_handler()` (`gpx_server.cpp`) each
+triggered a full `gpx_loader::refreshGPXFiles()` — reset the whole PSRAM index and rescan every file
+present — after every single request, so a batch of N files did N full rescans of an ever-growing
+folder. Removed the auto-reload from both handlers entirely; added `POST /reload` that does what the
+removed code did, called once by the client (`handleFiles()`/`deleteSelected()`/`deleteFile()`)
+after a batch finishes rather than after every file. Also moved the client's `/list` refresh (which
+itself reads every file's cached name) out of the per-file loop to run once. Converts total batch
+cost from O(N²) to O(N). Boot was never affected by this — it only ever calls `loadAllGPXFiles()`
+once. Full reasoning, including two rejected alternatives:
+[ADR-0028](docs/adr/0028-defer-gpx-reload-to-explicit-endpoint.md).
+
+**(2) Enabled `CONFIG_SPI_FLASH_AUTO_SUSPEND`** (`sdkconfig.defaults`). Every GPX upload/delete does
+a real FFat (internal SPI-NOR flash) write or erase; ESP-IDF's flash driver briefly disables both
+cores' cache/interrupts during that operation, which can starve the RGB LCD panel's continuous DMA
+refill — a plausible, structurally-consistent explanation for the observed corruption, though not
+confirmed by direct instrumentation. `CONFIG_SPI_FLASH_YIELD_DURING_ERASE` was already on (erase
+already chunks itself) but couldn't preempt mid-chunk; `AUTO_SUSPEND` (ESP32-S3 hardware feature)
+can pause a flash op for higher-priority work instead. `sdkconfig.cc-radar` regenerated and diffed —
+only the intended flag and its automatic Kconfig-dependency siblings changed, nothing else drifted.
+
+Both changes `pio run` clean. **Verification pending**: the remaining ~312 files of the original
+512-file stress test, to confirm both fixes empirically (timing should now scale linearly, and the
+display should no longer glitch, or glitch less, on each write).
+
 **SD→FFat GPX auto-migration removed — was silently restoring deleted files (2026-08-07)**
 
 Field-testing quest deletion (delete-all on 18 GPX files via the web manager) surfaced a real bug:

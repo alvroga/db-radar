@@ -325,7 +325,21 @@ static const char UPLOAD_HTML[] = R"rawliteral(
             handleFiles(e.dataTransfer.files);
         });
 
+        // Rebuilds the on-device index once. upload_handler()/delete_handler()
+        // no longer do this per-request (see gpx_server.cpp's reload_handler
+        // comment) — a batch of N files used to cost O(N^2) because every one
+        // of the N requests reloaded from scratch. Call this once after a
+        // batch instead, not from inside a per-file loop.
+        async function triggerReload() {
+            try {
+                await fetch('/reload', { method: 'POST' });
+            } catch (error) {
+                showStatus(`! Reload error: ${error.message}`, 'error');
+            }
+        }
+
         async function handleFiles(files) {
+            let uploaded = 0, failed = 0;
             for (let file of files) {
                 if (!file.name.toLowerCase().endsWith('.gpx')) {
                     showStatus('Only .gpx files are allowed', 'error');
@@ -340,17 +354,28 @@ static const char UPLOAD_HTML[] = R"rawliteral(
                     });
 
                     if (response.ok) {
-                        showStatus(`+ ${file.name} uploaded successfully`, 'success');
-                        loadFileList();
-                        loadWaypointCount();
+                        uploaded++;
                     } else {
+                        failed++;
                         const text = await response.text();
-                        showStatus(`! Upload failed: ${text}`, 'error');
+                        showStatus(`! ${file.name} failed: ${text}`, 'error');
                     }
                 } catch (error) {
-                    showStatus(`! Upload error: ${error.message}`, 'error');
+                    failed++;
+                    showStatus(`! ${file.name} error: ${error.message}`, 'error');
                 }
             }
+
+            if (uploaded > 0) await triggerReload();
+            if (failed === 0) {
+                showStatus(`+ ${uploaded} file(s) uploaded successfully`, 'success');
+            } else if (uploaded === 0) {
+                showStatus(`! ${failed} file(s) failed to upload`, 'error');
+            } else {
+                showStatus(`! ${uploaded} uploaded, ${failed} failed`, 'error');
+            }
+            loadFileList();
+            loadWaypointCount();
         }
 
         async function loadFileList() {
@@ -427,16 +452,17 @@ static const char UPLOAD_HTML[] = R"rawliteral(
             if (filenames.length === 0) return;
             if (!confirm(`Delete ${filenames.length} selected file(s)?`)) return;
 
-            let failed = 0;
+            let failed = 0, deleted = 0;
             for (const filename of filenames) {
                 try {
                     const response = await fetch(`/delete/${encodeURIComponent(filename)}`, { method: 'DELETE' });
-                    if (!response.ok) failed++;
+                    if (response.ok) deleted++; else failed++;
                 } catch (error) {
                     failed++;
                 }
             }
 
+            if (deleted > 0) await triggerReload();
             if (failed === 0) {
                 showStatus(`+ ${filenames.length} file(s) deleted`, 'success');
             } else {
@@ -461,6 +487,7 @@ static const char UPLOAD_HTML[] = R"rawliteral(
                 });
 
                 if (response.ok) {
+                    await triggerReload();
                     showStatus(`+ ${filename} deleted`, 'success');
                     loadFileList();
                 } else {
@@ -1205,16 +1232,33 @@ static esp_err_t upload_handler(httpd_req_t* req) {
 
     Serial.printf("[GPX_SERVER] Upload OK: %s (%d bytes)\n", filename, (int)req->content_len);
 
-    // Reload all GPX files so the new waypoints are immediately active
-    int reloaded = gpx_loader::refreshGPXFiles();
-    Serial.printf("[GPX_SERVER] Auto-reload after upload: %d waypoints\n", reloaded);
+    // Deliberately does NOT reload here — see reload_handler()'s comment. The
+    // client is responsible for POSTing /reload once after a batch completes.
+    httpd_resp_send(req, "OK", 2);
+    return ESP_OK;
+}
 
-    // Ask the UI Task to redraw the radar with updated waypoints
+// POST /reload — rebuilds the PSRAM index and re-materializes the working set
+// against the GPX folder's current contents. upload_handler()/delete_handler()
+// used to do this automatically after every single file; that made an
+// N-file batch (upload or delete) cost O(N^2) total, since every one of the N
+// requests re-scanned every file present at that point — confirmed on
+// hardware 2026-08-07 (100 files: 1m22s, next 100: 3m36s, non-linear as
+// predicted). The client now calls this once after a batch instead of relying
+// on a reload from inside every individual upload/delete. Safe to call any
+// number of times, including zero net-new files (e.g. after a failed upload).
+static esp_err_t reload_handler(httpd_req_t* req) {
+    int reloaded = gpx_loader::refreshGPXFiles();
+    Serial.printf("[GPX_SERVER] Manual reload: %d waypoints\n", reloaded);
+
     task_manager::UIUpdate upd = {};
     upd.type = task_manager::UIUpdateType::RADAR_REFRESH;
     task_manager::queueUIUpdate(upd);
 
-    httpd_resp_send(req, "OK", 2);
+    char buf[48];
+    int len = snprintf(buf, sizeof(buf), "{\"waypoints\":%d}", reloaded);
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_send(req, buf, len);
     return ESP_OK;
 }
 
@@ -1403,17 +1447,13 @@ static esp_err_t delete_handler(httpd_req_t* req) {
     if (remove(filepath) == 0) {
         Serial.printf("[GPX_SERVER] Deleted: %s\n", filepath);
 
-        // GPX deletes can leave the PSRAM index holding file_offsets into a
-        // now-gone file — reload before anything re-selects against it, same
-        // as upload_handler does after adding a file.
-        if (strncmp(uri, "/delete/", 8) == 0 && strncmp(uri, "/delete/logs/", 13) != 0) {
-            int reloaded = gpx_loader::refreshGPXFiles();
-            Serial.printf("[GPX_SERVER] Auto-reload after delete: %d waypoints\n", reloaded);
-
-            task_manager::UIUpdate upd = {};
-            upd.type = task_manager::UIUpdateType::RADAR_REFRESH;
-            task_manager::queueUIUpdate(upd);
-        }
+        // Deliberately does NOT reload here anymore (see reload_handler()'s
+        // comment) — the client POSTs /reload once after a batch. In the gap,
+        // the PSRAM index can hold file_offsets into this now-gone file; that's
+        // safe, not just deferred-risky: gpx_loader::reselect()/
+        // selectAndMaterialize() already treat a failed fopen() on a stale
+        // entry as "drop this one from the working set", not a crash — this
+        // predates this change (see their fopen-failure branches).
 
         httpd_resp_send(req, "Deleted", 7);
         return ESP_OK;
@@ -1552,7 +1592,7 @@ bool start() {
 
     httpd_config_t cfg = HTTPD_DEFAULT_CONFIG();
     cfg.uri_match_fn    = httpd_uri_match_wildcard;
-    cfg.max_uri_handlers = 14;  // 12 registered below, some headroom
+    cfg.max_uri_handlers = 15;  // 13 registered below, some headroom
     cfg.lru_purge_enable = true; // evict stuck half-open connections so httpd_start succeeds on retry
     // Default 4096B is too thin for upload_handler() -> refreshGPXFiles() -> parseGPXFile(),
     // which stacks ~2-3KB of local buffers (wp_desc[1024]+line[512]+...) on this same task
@@ -1569,6 +1609,7 @@ bool start() {
     const httpd_uri_t uris[] = {
         { "/",           HTTP_GET,    root_handler,       nullptr },
         { "/upload",     HTTP_POST,   upload_handler,     nullptr },
+        { "/reload",     HTTP_POST,   reload_handler,     nullptr },
         { "/list",       HTTP_GET,    list_handler,       nullptr },
         { "/waypoints",  HTTP_GET,    waypoints_handler,  nullptr },
         { "/storage",    HTTP_GET,    storage_handler,    nullptr },
