@@ -364,15 +364,30 @@ struct RadarConfig {
 
 ---
 
+## Touch Interaction and Distance Display
+
+**Status**: Implemented 2026-08-07, build-verified (not yet field-tested)
+
+Off-screen indicators are tappable, same as on-screen waypoint dots. `drawWaypoints()`
+(`navigation.cpp`) persists each drawn indicator's screen position, source waypoint index, and
+distance into a file-static `g_offscreen_tap[]` array (one slot per sector + one for the fixed
+waypoint) every frame; `handleTapAt()` hit-tests against it (24px radius) after checking on-screen
+dots, and opens the same waypoint detail screen a tapped on-screen dot would. No mutex is needed —
+both the draw callback and the touch callback run on the UI Task.
+
+The waypoint detail screen (`waypoint_screen.cpp`) now shows a DISTANCE row (Haversine via
+`utils/geo.h`, not this doc's equirectangular approximation — a tapped off-screen waypoint can be
+well outside that approximation's accurate range), formatted as meters under 1km and `"%.1f km"` at
+or above it. Hidden without a GPS fix. This makes the distance to any off-screen indicator (up to
+10km away at 1km zoom, per the multiplier above) visible on tap instead of requiring a guess.
+
 ## Future Enhancements
 
 ### Possible Improvements
 1. **Adaptive multiplier**: Change distance multiplier based on waypoint density
 2. **Priority waypoints**: Always show certain waypoints regardless of distance
-3. **Distance labels**: Show distance to off-screen waypoints on indicators
-4. **Sector heat map**: Color-code indicators by waypoint count in sector
-5. **Animation**: Pulse effect on indicators when new waypoints appear
-6. **Touch interaction**: Tap indicator to center map on that direction
+3. **Sector heat map**: Color-code indicators by waypoint count in sector
+4. **Animation**: Pulse effect on indicators when new waypoints appear
 
 ### Performance Optimizations
 1. **Spatial indexing**: Use quadtree for O(log n) distance queries (beneficial well before the
@@ -398,6 +413,8 @@ This dual-strategy approach balances **situational awareness** (knowing what's b
 
 ---
 
-**Last Updated**: 2026-08-05 (`MAX_WAYPOINTS` raised 50 → 500; Haversine replaced with equirectangular approximation — see [ADR-0022](adr/0022-waypoint-cap-raised-to-500-not-700.md))
+**Last Updated**: 2026-08-07 (off-screen indicators made tappable, distance display added — see
+Touch Interaction section above). Previously 2026-08-05 (`MAX_WAYPOINTS` raised 50 → 500; Haversine
+replaced with equirectangular approximation — see [ADR-0022](adr/0022-waypoint-cap-raised-to-500-not-700.md))
 **Author**: GPS Radar Development Team
 **Related Documentation**: `README.md`, `CLAUDE.md`, `docs/gps_settings_simplification.md`

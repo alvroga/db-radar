@@ -5,7 +5,13 @@
 namespace gpx_index {
 
 constexpr int MAX_INDEX_ENTRIES = 8192;   // ~128-156KB PSRAM — thousands, not millions
-constexpr int MAX_INDEX_FILES   = 512;
+// 512 -> 1024 2026-08-07: 512 loaded fast in the field test (docs/adr/0028), so raised the
+// ceiling for one more stress-test data point. IndexFile is 96B/slot -- +49,152B PSRAM
+// (512->1024), trivial. Not a design requirement: docs/quests_plan.md's badge worst-case
+// math is against <=512. Field-verified working at 1024 (2026-08-07, see CHANGELOG.md) --
+// the boot-time slowdown observed in that test was the loading-spinner-freeze bug (also
+// fixed 2026-08-07), not a real cost of the higher cap.
+constexpr int MAX_INDEX_FILES   = 1024;
 static_assert(MAX_INDEX_FILES < 0xFFFF, "0xFFFF is gpx_loader.cpp's open_file_id sentinel");
 
 // Lightweight per-waypoint record for the full (uncapped) PSRAM index.

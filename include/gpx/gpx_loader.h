@@ -15,7 +15,13 @@ bool init();
  * @brief Load all GPX files from /gpx/ folder and parse waypoints
  * @return Number of waypoints loaded (up to MAX_WAYPOINTS)
  */
-int loadAllGPXFiles();
+// show_boot_progress: pumps lv_task_handler() between files so the boot spinner
+// animates instead of freezing during the scan. Safe ONLY pre-task_manager::startTasks()
+// (LVGL still single-threaded — see main.cpp's boot sequence). Never pass true from
+// refreshGPXFiles()'s post-boot callers (web /reload, etc.) — the UI Task owns LVGL by then
+// and a second concurrent lv_task_handler() caller corrupts LVGL state (see standby_manager.cpp's
+// history of this exact bug).
+int loadAllGPXFiles(bool show_boot_progress = false);
 
 /**
  * @brief Refresh waypoints by re-scanning /gpx/ folder

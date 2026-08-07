@@ -29,6 +29,19 @@
 #include "utils/watchdog.h"
 #include "hardware/connectivity/beacon_proximity.h"
 
+// Pumps LVGL alongside a loading-screen status update, so the boot spinner keeps
+// animating between init phases instead of sitting on one frame for seconds at a
+// time. Safe ONLY here, before task_manager::startTasks() — every call site in this
+// file's boot sequence runs while LVGL is still single-threaded (see the "UI Task
+// owns LVGL after startTasks()" comment further down). Do not add a call site after
+// startTasks(), and do not move this pattern into ui_manager::updateLoadingStatus()
+// itself (see its own NOTE) since that function has callers whose threading context
+// it can't verify.
+static void setLoadingStatus(const char* message) {
+    ui_manager::updateLoadingStatus(message);
+    lv_task_handler();
+}
+
 extern "C" void app_main() {
     // Serial is USB CDC — begin() is a no-op in ESP-IDF
     Serial.begin(115200);
@@ -175,25 +188,25 @@ extern "C" void app_main() {
     lv_task_handler();
     Serial.println("[MAIN] Loading screen displayed");
 
-    ui_manager::updateLoadingStatus("Warming up circuits...");
+    setLoadingStatus("Warming up circuits...");
     delay(200);
 
     // Dedicated boot modes: create the appropriate full-screen UI
     {
         const auto& boot = settings_manager::getSettings();
         if (boot.wifi_ap_enabled) {
-            ui_manager::updateLoadingStatus("Starting upload mode...");
+            setLoadingStatus("Starting upload mode...");
             ui_manager::createAPScreen();
             Serial.println("[MAIN] AP upload screen created");
         } else if (boot.wifi_sta_boot) {
-            ui_manager::updateLoadingStatus("Starting WiFi mode...");
+            setLoadingStatus("Starting WiFi mode...");
             ui_manager::createWiFiScreen();
             Serial.println("[MAIN] WiFi STA screen created");
         }
     }
 
     // Pre-create settings screen (eliminates first-press delay)
-    ui_manager::updateLoadingStatus("Building control panels...");
+    setLoadingStatus("Building control panels...");
     Serial.println("[MAIN] Pre-creating settings screen...");
     uint32_t settings_start = millis();
     ui_manager::createSettingsScreen();
@@ -201,14 +214,14 @@ extern "C" void app_main() {
                   (millis() - settings_start) / 1000.0);
 
     // Initialize navigation system
-    ui_manager::updateLoadingStatus("Calibrating compass...");
+    setLoadingStatus("Calibrating compass...");
     if (!navigation::init()) {
         Serial.println("[ERROR] Navigation initialization failed");
         while (1) { delay(1000); }
     }
 
     // Initialize diagnostics
-    ui_manager::updateLoadingStatus("Running diagnostics...");
+    setLoadingStatus("Running diagnostics...");
     diagnostics::Config diag_config;
     if (!diagnostics::init(diag_config)) {
         Serial.println("[ERROR] Diagnostics initialization failed");
@@ -225,7 +238,7 @@ extern "C" void app_main() {
     // WiFi auto-connect (non-blocking)
     // Skip in wifi_sta_boot mode — Phase 5 already called autoConnect().
     // A second call here disconnects the already-established session.
-    ui_manager::updateLoadingStatus("Scanning for networks...");
+    setLoadingStatus("Scanning for networks...");
     {
         const auto& ws = settings_manager::getSettings();
         if (!ws.wifi_sta_boot && wifi_manager::isEnabled()) {
@@ -279,13 +292,13 @@ extern "C" void app_main() {
     }
 
     // Auto-load GPX files from FFat flash storage (moved off SD, see ADR-0024)
-    ui_manager::updateLoadingStatus("Loading waypoints...");
+    setLoadingStatus("Loading waypoints...");
     Serial.println("[GPX] Auto-loading waypoints from /ffat/gpx/ folder...");
     // gpx_loader::init() allocates the PSRAM two-tier index (gpx_index + selection
     // scratch) — was never called anywhere before this, so the two-tier path was
     // dead code and every load silently used the file-order legacy fallback.
     gpx_loader::init();
-    int waypoints_loaded = gpx_loader::loadAllGPXFiles();
+    int waypoints_loaded = gpx_loader::loadAllGPXFiles(true);  // show_boot_progress
     if (waypoints_loaded > 0) {
         navigation::updateRadarDisplay();
     } else {
@@ -293,7 +306,7 @@ extern "C" void app_main() {
     }
 
     // Initialize Task Watchdog Timer
-    ui_manager::updateLoadingStatus("Arming watchdog...");
+    setLoadingStatus("Arming watchdog...");
     Serial.println("[WATCHDOG] Initializing Task Watchdog Timer...");
     watchdog::Config wdt_config;
     wdt_config.timeout_seconds = 30;
@@ -335,7 +348,7 @@ extern "C" void app_main() {
 
     // BOOT PHASE 9: Task manager (FreeRTOS architecture)
     // updateLoadingStatus is safe here — UI Task not started yet, LVGL is single-threaded.
-    ui_manager::updateLoadingStatus(boot_messages[idx]);
+    setLoadingStatus(boot_messages[idx]);
     Serial.printf("[T+%08lu] BOOT: Phase 9 - Initializing task manager...\n", millis());
     system_logger::info("BOOT", "Phase 9 - Initializing FreeRTOS tasks");
     if (!task_manager::init()) {

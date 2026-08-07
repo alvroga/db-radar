@@ -2,6 +2,7 @@
 #include "ui/ui_manager.h"
 #include "ui/navigation.h"
 #include "utils/task_manager.h"
+#include "utils/geo.h"
 #include <lvgl.h>
 #include "core/arduino_compat.h"
 
@@ -110,6 +111,34 @@ void open() {
     lv_obj_set_style_text_font(lbl_title, &iosevka_16, 0);
     lv_obj_set_width(lbl_title, 330);
     lv_label_set_long_mode(lbl_title, LV_LABEL_LONG_WRAP);
+
+    // =========================================================================
+    // DISTANCE SECTION — live distance from current GPS position. Haversine, not
+    // the equirectangular approximation navigation.cpp uses for radar rendering —
+    // this is a one-shot compute on screen open, not a per-frame hot path, and a
+    // tapped off-screen waypoint can be well beyond the radar-scale accuracy range.
+    // =========================================================================
+    if (ui.center_lat != 0.0 && ui.center_lon != 0.0) {
+        double dist_m = geo::haversineMeters(ui.center_lat, ui.center_lon, wp.lat, wp.lon);
+
+        lv_obj_t* lbl_dist_hdr = lv_label_create(panel);
+        lv_label_set_text(lbl_dist_hdr, "DISTANCE");
+        lv_obj_set_style_text_color(lbl_dist_hdr, lv_color_hex(0x00AA00), 0);
+        lv_obj_set_style_text_font(lbl_dist_hdr, &iosevka_16, 0);
+        lv_obj_set_width(lbl_dist_hdr, 330);
+
+        char dist_buf[16];
+        if (dist_m < 1000.0) {
+            snprintf(dist_buf, sizeof(dist_buf), "%d m", (int)dist_m);
+        } else {
+            snprintf(dist_buf, sizeof(dist_buf), "%.1f km", dist_m / 1000.0);
+        }
+        lv_obj_t* lbl_dist = lv_label_create(panel);
+        lv_label_set_text(lbl_dist, dist_buf);
+        lv_obj_set_style_text_color(lbl_dist, lv_color_white(), 0);
+        lv_obj_set_style_text_font(lbl_dist, &iosevka_16, 0);
+        lv_obj_set_width(lbl_dist, 330);
+    }
 
     // =========================================================================
     // HINT SECTION — shown first so it's always reachable without scrolling

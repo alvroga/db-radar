@@ -540,6 +540,21 @@ static void drawBeaconProximityGauge(lv_draw_ctx_t* ctx, int screen_size) {
     }
 }
 
+// Off-screen indicator tap targets, persisted from the last draw so handleTapAt()
+// (fired from a separate touch event, not the draw callback) can hit-test against
+// where the triangles actually were. Both writer (drawWaypoints(), UI Task draw
+// callback) and reader (handleTapAt(), UI Task touch callback) run on the UI Task —
+// no mutex needed, unlike ui.waypoints[]/selected_waypoint_index which the System
+// Task's reselect also touches.
+struct OffScreenTapTarget {
+    bool active = false;
+    int waypoint_index = -1;
+    float x = 0.0f, y = 0.0f;
+    float distance_m = 0.0f;
+};
+static constexpr int MAX_OFFSCREEN_TAP_TARGETS = ui_manager::RadarConfig::INDICATOR_SECTORS + 1;  // sectors + fixed
+static OffScreenTapTarget g_offscreen_tap[MAX_OFFSCREEN_TAP_TARGETS];
+
 static void drawOffScreenIndicator(lv_draw_ctx_t* ctx, double bearing, int screen_size) {
     if (!ctx) return;
 
@@ -617,8 +632,12 @@ static void drawWaypoints(lv_draw_ctx_t* ctx, int screen_size) {
         bool has_waypoint = false;
         float closest_distance = FLT_MAX;
         double bearing = 0.0;
+        int waypoint_index = -1;
     };
     SectorWaypoint sectors[NUM_SECTORS];
+
+    // Reset tap targets for this frame — repopulated below as indicators are drawn.
+    for (int s = 0; s < MAX_OFFSCREEN_TAP_TARGETS; s++) g_offscreen_tap[s].active = false;
 
     // Get current color scheme (normal or daylight mode)
     const ColorScheme& colors = getColorScheme();
@@ -649,6 +668,7 @@ static void drawWaypoints(lv_draw_ctx_t* ctx, int screen_size) {
     // Track fixed waypoint if it ends up off-screen (drawn separately, bypasses clustering)
     bool fixed_off_screen = false;
     double fixed_off_bearing = 0.0;
+    float fixed_off_distance = 0.0f;
 
     // Process all waypoints
     for (int i = 0; i < ui.waypoint_count; i++) {
@@ -753,6 +773,7 @@ static void drawWaypoints(lv_draw_ctx_t* ctx, int screen_size) {
                 // Fixed waypoint off-screen: record bearing, draw separately with pulse
                 fixed_off_screen = true;
                 fixed_off_bearing = bearing;
+                fixed_off_distance = distance;
             } else {
                 // Off-screen: STRATEGY 2 - Sector clustering
                 // Bearing: -π to π, convert to 0-360 degrees
@@ -767,6 +788,7 @@ static void drawWaypoints(lv_draw_ctx_t* ctx, int screen_size) {
                     sectors[sector].has_waypoint = true;
                     sectors[sector].closest_distance = distance;
                     sectors[sector].bearing = bearing;
+                    sectors[sector].waypoint_index = i;
                 }
             }
         }
@@ -774,6 +796,11 @@ static void drawWaypoints(lv_draw_ctx_t* ctx, int screen_size) {
 
     // Draw off-screen indicators: one per sector (maximum 8 indicators)
     // Apply heading-up rotation to bearing so indicators rotate with the compass
+    int tap_center_x = screen_size / 2;
+    int tap_center_y = screen_size / 2;
+    int tap_radius = screen_size / 2;
+    int tap_inset = ui_manager::RadarConfig::INDICATOR_EDGE_INSET;
+
     for (int s = 0; s < NUM_SECTORS; s++) {
         if (sectors[s].has_waypoint) {
             double bearing = sectors[s].bearing;
@@ -781,6 +808,13 @@ static void drawWaypoints(lv_draw_ctx_t* ctx, int screen_size) {
                 bearing -= ui.current_heading * M_PI_LOCAL / 180.0;
             }
             drawOffScreenIndicator(ctx, bearing, screen_size);
+
+            // Persist the tap target at the same edge position the triangle was drawn at.
+            g_offscreen_tap[s].active = true;
+            g_offscreen_tap[s].waypoint_index = sectors[s].waypoint_index;
+            g_offscreen_tap[s].x = tap_center_x + (tap_radius - tap_inset) * sinf((float)bearing);
+            g_offscreen_tap[s].y = tap_center_y - (tap_radius - tap_inset) * cosf((float)bearing);
+            g_offscreen_tap[s].distance_m = sectors[s].closest_distance;
         }
     }
 
@@ -791,6 +825,13 @@ static void drawWaypoints(lv_draw_ctx_t* ctx, int screen_size) {
             bearing -= ui.current_heading * M_PI_LOCAL / 180.0;
         }
         drawOffScreenIndicator(ctx, bearing, screen_size);
+
+        int fixed_slot = NUM_SECTORS;  // last slot reserved for the fixed waypoint
+        g_offscreen_tap[fixed_slot].active = true;
+        g_offscreen_tap[fixed_slot].waypoint_index = ui.fixed_waypoint_index;
+        g_offscreen_tap[fixed_slot].x = tap_center_x + (tap_radius - tap_inset) * sinf((float)bearing);
+        g_offscreen_tap[fixed_slot].y = tap_center_y - (tap_radius - tap_inset) * cosf((float)bearing);
+        g_offscreen_tap[fixed_slot].distance_m = fixed_off_distance;
     }
 }
 
@@ -1446,6 +1487,31 @@ void handleTapAt(int screen_x, int screen_y) {
                 }
             }
 
+            goToWaypointScreen();
+            return;
+        }
+    }
+
+    // No on-screen dot hit — check off-screen arrow indicators, persisted from the
+    // last draw (see g_offscreen_tap[] / drawWaypoints()).
+    constexpr int OFFSCREEN_HIT_RADIUS = 24;  // Triangle is 15px, edge-inset 20px — generous like on-screen HIT_RADIUS
+    for (int s = 0; s < MAX_OFFSCREEN_TAP_TARGETS; s++) {
+        if (!g_offscreen_tap[s].active) continue;
+        int idx = g_offscreen_tap[s].waypoint_index;
+        // Slot can go stale between draw and touch (reselect recycled it) — same
+        // defensive check the on-screen path relies on via ui.waypoints[i].valid.
+        if (idx < 0 || idx >= ui.waypoint_count || !ui.waypoints[idx].valid) continue;
+        int dx = screen_x - (int)g_offscreen_tap[s].x;
+        int dy = screen_y - (int)g_offscreen_tap[s].y;
+        if (dx*dx + dy*dy <= OFFSCREEN_HIT_RADIUS*OFFSCREEN_HIT_RADIUS) {
+            Serial.printf("[NAVIGATION] Off-screen indicator tapped -> waypoint %d: %s (%.0fm)\n",
+                          idx, ui.waypoints[idx].display_name[0] ? ui.waypoints[idx].display_name
+                                                                  : ui.waypoints[idx].name,
+                          g_offscreen_tap[s].distance_m);
+            bool mx = (task_manager::ui_state_mutex != nullptr) &&
+                      (xSemaphoreTake(task_manager::ui_state_mutex, pdMS_TO_TICKS(100)) == pdTRUE);
+            ui.selected_waypoint_index = idx;
+            if (mx) xSemaphoreGive(task_manager::ui_state_mutex);
             goToWaypointScreen();
             return;
         }

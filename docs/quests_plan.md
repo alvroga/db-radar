@@ -376,6 +376,16 @@ Corrected design:
    `gpx_loader.cpp`/`gpx_index.h`/`navigation.cpp`/`gpx_server.cpp`) — treat the storage/parsing
    sketch above as a plausible shape, not a verified plan, until an explore pass confirms it
    against the actual code.
+5. **Found 2026-08-07, verified against code**: `buildFileIndex()`'s line reader
+   (`gpx_loader.cpp:316`, `char line[512]`) treats anything past 511 bytes as a line break
+   (`:326`). Both badge hex tags exceed that — 640 chars (24x24) and 1,088 chars (32x32), before
+   tag overhead — so a `<quest:badge>` line will arrive split across 2-3 reads. Harmless today
+   (nothing scans for the tag yet), but whoever implements §1's `<quest:badge>` extraction cannot
+   reuse the existing single-line `strstr()` pattern as-is — it needs to either accumulate the
+   split reads or read the badge tag with a dedicated larger buffer. Confirmed via a 512-file
+   stress-test batch with real 640/1,088-char bogus hex payloads (`gpx_test_512_badges.zip`,
+   2026-08-07) — file sizes: 893B (24x24) / 1,341B (32x32), ~558KB total for 512 files (256 of
+   each), well inside the ~7.69MB FFat budget either way.
 
 ---
 

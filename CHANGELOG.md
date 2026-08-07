@@ -11,6 +11,81 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+**Off-screen waypoint indicators: tappable, and distance now shown on the detail screen
+(2026-08-07) — build-verified, not yet field-tested**
+
+Two related gaps in `docs/waypoint_filtering.md`'s own "Future Enhancements" list (#3 "Distance
+labels", #6 "Touch interaction") — the orange off-screen triangles were pure decoration: no tap
+handler, and no distance shown anywhere, even for on-screen waypoints, once opened. Fixed both:
+
+- `drawWaypoints()` (`navigation.cpp`) now persists each drawn indicator's screen position,
+  source waypoint index, and distance into a new file-static `g_offscreen_tap[]` array (8 sector
+  slots + 1 for the fixed waypoint) every frame. `handleTapAt()` hit-tests against it (24px radius)
+  after the existing on-screen-dot loop finds no hit, and opens the same waypoint detail screen a
+  tapped on-screen dot would. No mutex needed — both the draw callback and the touch callback run
+  on the UI Task, unlike `ui.waypoints[]`/`selected_waypoint_index`, which the System Task's
+  reselect also touches (existing mutex use there is unchanged). A tap target whose waypoint slot
+  got recycled between draw and touch is dropped defensively, same pattern the on-screen path
+  already used.
+- `waypoint_screen.cpp` now shows a DISTANCE row (Haversine via the existing `utils/geo.h` helper,
+  not navigation.cpp's radar-scale equirectangular approximation — this is a one-shot compute on
+  screen open, and an off-screen-tapped waypoint can be well outside that approximation's accurate
+  range) formatted as `"820 m"` under 1km, `"%.1f km"` at or above it — so a 5/10/15km+ waypoint
+  reads as a real distance instead of not being shown at all. Hidden if there's no GPS fix yet
+  (`center_lat`/`center_lon` both 0), matching the existing guard pattern used elsewhere in this file.
+
+At 1km zoom the existing `DISTANCE_FILTER_MULTIPLIER = 10.0` means off-screen indicators can appear
+for waypoints up to 10km away (zoom_radius × 10, unchanged by this fix, see
+`docs/waypoint_filtering.md`) — the distance now shown on tap makes that reachable-or-not distinction
+visible at a glance instead of requiring a guess. `pio run` clean, RAM +176B / Flash +1,084B (new
+static array + UI code, no PSRAM/SRAM budget concern). Not yet tested on hardware.
+
+**Boot loading screen: spinner no longer freezes for the whole GPX index scan (2026-08-07) —
+build-verified, not yet field-tested**
+
+Field-reported after the `MAX_INDEX_FILES` 512→1024 test below: boot took visibly longer, and the
+loading spinner appeared stuck (not animating) for the last few seconds despite serial output still
+advancing — the device wasn't actually hung, but had no way to show that. Root cause:
+`ui_manager::updateLoadingStatus()` deliberately never calls `lv_task_handler()` (see its own NOTE —
+doing so *after* `task_manager::startTasks()` is the exact bug `standby_manager.cpp` hit once before,
+UI Task freeze from a second concurrent LVGL caller), and `main.cpp`'s boot sequence itself only calls
+`lv_task_handler()` once, right after the loading screen is first shown. Every phase between then and
+`startTasks()` — including the single largest one, the GPX folder scan — ran with LVGL never given
+another chance to paint a frame, so the spinner animation and status text both sat frozen even though
+real work was progressing underneath.
+
+Fixed narrowly rather than touching the shared function's guarded behavior: added a local
+`setLoadingStatus()` wrapper in `main.cpp` (pumps `lv_task_handler()` right after each status
+update) used for every boot-sequence call site, all of which run before `startTasks()` — the same
+single-threaded-LVGL window `main.cpp` already relied on for its one existing `lv_task_handler()`
+call. For the GPX scan specifically — the one phase with no intermediate status update at all —
+`gpx_loader::loadAllGPXFiles()` gained an opt-in `show_boot_progress` parameter (default `false`,
+explicitly documented in `gpx_loader.h` as boot-only) that makes `loadAllGPXFilesIndexed()` pump a
+live `"Loading waypoints... (N)"` status + `lv_task_handler()` every ~150ms during the per-file scan
+loop. Only `main.cpp`'s boot call passes `true`; `refreshGPXFiles()` (the post-boot `/reload` HTTP
+path, running while the UI Task owns LVGL) is untouched and still defaults to `false` — passing `true`
+there would reintroduce exactly the concurrent-caller bug this avoided. `pio run` clean, RAM/Flash
+usage unchanged from the pre-fix build (logic-only change). Not yet tested on hardware — the actual
+animation smoothness and whether 150ms is a good throttle interval need a real boot to confirm.
+
+**`MAX_INDEX_FILES` raised 512 → 1024 — field-verified working, kept (2026-08-07)**
+
+Follow-up to the 512 raise below: 512 loaded fast on hardware in the prior field test, so raised to
+1024 as one more stress-test data point rather than a documented design requirement (the current
+real-world file count is nowhere near either number; `docs/quests_plan.md`'s badge worst-case math is
+computed against ≤512, still valid as a subset). PSRAM-only cost — `IndexFile` is 96B/slot, so the
+change is +49,152B PSRAM, no static SRAM/Flash impact, confirmed via `pio run` (RAM 49.3%/Flash 40.6%,
+unchanged). **Field-verified**: boots successfully at 1024, no reported functional regression — boot
+did take visibly longer, which turned out to be the loading-spinner-freeze bug above (now fixed)
+making an already-longer scan look stuck, not a new performance problem at 1024 itself. Kept at 1024.
+Also generated a 512-file test batch with realistic future badge payloads (bogus `<quest:badge>` hex,
+640/1,088 chars matching the 24×24/32×32 tiers in `docs/quests_plan.md` §7) to see real file-size
+growth: 893B (24×24) / 1,341B (32×32) per file, ~558KB for all 512 — trivial against the ~7.69MB FFat
+budget. That exercise also surfaced a real future landmine, documented in `docs/quests_plan.md` §7's
+open-items list rather than fixed now (nothing parses `<quest:badge>` yet): `buildFileIndex()`'s
+512-byte line buffer (`gpx_loader.cpp`) will split both badge hex tags across 2-3 reads, so whoever
+implements badge extraction can't reuse the existing single-line `strstr()` pattern as-is.
+
 **GPX batch upload/delete: O(N²) reload cost fixed; flash-suspend enabled against display
 corruption during heavy FFat writes (2026-08-07) — field-verified**
 

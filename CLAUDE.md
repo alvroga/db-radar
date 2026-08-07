@@ -466,6 +466,8 @@ indicators, one per compass sector, closest-per-sector — 50 off-screen waypoin
 triangles, not 50). The on/off-screen boundary test is **circular, not square** — see FT-09 in
 ROADMAP.md for why that distinction mattered. Read `wpt_us` off the `perf` HUD for current cost rather
 than trusting a fixed estimate — a "<2ms" figure once quoted here was never actually measured.
+Off-screen indicators are tappable (2026-08-07) — opens the same waypoint detail screen an on-screen
+dot would, now showing a live distance (meters/km via Haversine).
 
 **Full guide**: [`docs/waypoint_filtering.md`](docs/waypoint_filtering.md).
 
@@ -790,4 +792,4 @@ belongs at the link, not duplicated above it.
 
 *This document serves as the master reference for ESP32-S3 Touch LCD projects. Keep it updated as the architecture evolves.*
 
-**Last updated**: 2026-08-06 — see [CHANGELOG.md](CHANGELOG.md) for the full history.
+**Last updated**: 2026-08-07 — see [CHANGELOG.md](CHANGELOG.md) for the full history.

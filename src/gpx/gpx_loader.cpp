@@ -45,7 +45,7 @@ static int buildFileIndex(const char* filepath, uint16_t file_id);
 static int selectAndMaterialize(double center_lat, double center_lon);
 static bool parseOneWaypointAt(FILE* file, ui_manager::Waypoint& out_wp);
 static int loadAllGPXFilesLegacy();
-static int loadAllGPXFilesIndexed();
+static int loadAllGPXFilesIndexed(bool show_boot_progress);
 
 bool init() {
     Serial.println("[GPX_LOADER] Initializing...");
@@ -78,15 +78,15 @@ bool init() {
     return true;
 }
 
-int loadAllGPXFiles() {
+int loadAllGPXFiles(bool show_boot_progress) {
     clearWaypoints();
     if (g_index_available) {
-        return loadAllGPXFilesIndexed();
+        return loadAllGPXFilesIndexed(show_boot_progress);
     }
     return loadAllGPXFilesLegacy();
 }
 
-static int loadAllGPXFilesIndexed() {
+static int loadAllGPXFilesIndexed(bool show_boot_progress) {
     Serial.println("[GPX_LOADER] Loading all GPX files from /gpx/ (indexed)...");
 
     gpx_index::reset();
@@ -98,6 +98,7 @@ static int loadAllGPXFilesIndexed() {
     }
 
     files_loaded = 0;
+    uint32_t last_progress_ms = millis();
 
     struct dirent* entry;
     while ((entry = readdir(dir)) != nullptr) {
@@ -116,6 +117,18 @@ static int loadAllGPXFilesIndexed() {
                 files_loaded++;
             } else {
                 Serial.printf("[GPX_LOADER] WARNING: %s yielded 0 waypoints\n", fname);
+            }
+
+            // Boot-only: pump LVGL so the loading spinner keeps animating and the
+            // status label shows real progress instead of sitting frozen for the
+            // whole scan (worse now that MAX_INDEX_FILES=1024 makes this loop longer).
+            // See the show_boot_progress contract in gpx_loader.h — never true post-boot.
+            if (show_boot_progress && (millis() - last_progress_ms >= 150)) {
+                last_progress_ms = millis();
+                char msg[48];
+                snprintf(msg, sizeof(msg), "Loading waypoints... (%d)", files_loaded);
+                ui_manager::updateLoadingStatus(msg);
+                lv_task_handler();
             }
         }
     }
