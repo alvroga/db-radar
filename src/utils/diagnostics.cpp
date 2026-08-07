@@ -224,8 +224,8 @@ void handleDiagCommand(const char* args) {
         i2c_manager::scanBus();
 
         // Per-device forensic breakdown, added 2026-08-02 for the FT-06 freeze
-        // investigation — see docs/i2c_bus_freeze_investigation.md, "Things to
-        // try" #7. Same data the heartbeat writes to SD every 60s, on demand.
+        // investigation — see docs/i2c.md. Same data the heartbeat writes to
+        // SD every 60s, on demand.
         i2c_manager::DeviceStatSnapshot snap[i2c_manager::NUM_DEVICES];
         i2c_manager::getDeviceStats(snap);
         Serial.println("==== I2C Per-Device Stats ====");

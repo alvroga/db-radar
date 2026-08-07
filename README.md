@@ -278,7 +278,7 @@ diag freeze on|off      Freeze/unfreeze LVGL (testing)
 - **[docs/navigation_modes.md](docs/navigation_modes.md)** — Heading-up vs north-up navigation
 - **[docs/beacon_proximity.md](docs/beacon_proximity.md)** — BLE beacon proximity system
 - **[docs/battery_monitoring.md](docs/battery_monitoring.md)** — Battery ADC and display
-- **[docs/compass_i2c_constraint.md](docs/compass_i2c_constraint.md)** — Why compass reads from System Task
+- **[docs/compass_i2c_constraint.md](docs/compass_i2c_constraint.md)** — Compass-on-System-Task: stale reasoning, unconfirmed constraint
 - **[docs/troubleshooting.md](docs/troubleshooting.md)** — Common issues and solutions
 
 ---

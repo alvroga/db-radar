@@ -76,6 +76,7 @@ BUZZER  = 7
 ## Known Historical Issues (Resolved)
 
 - **I2C NACK hang** — a real ESP-IDF driver bug (unbounded busy-wait after a NACK, matching upstream `espressif/esp-idf#17720`), not application logic. Patched at build time. See [`i2c_bus_freeze_investigation.md`](i2c_bus_freeze_investigation.md) and [ADR-0021](adr/0021-i2c-nack-hang-build-time-backport.md).
+  - **Still open, lower priority**: *why* the bus produces NACKs at all is unconfirmed. Field data narrows it though — failures are compass-only (the one device reached over a cable) and front-loaded in the first hour after boot, then clean for the rest of the session (a warm-up transient, not wear-out). See the freeze investigation doc's [Open Questions](i2c_bus_freeze_investigation.md#open-questions).
 - **`I2C_PROCESS_MS` floor** — 20ms is a tuned hard floor, not an arbitrary value; halving it broke the button and buzzer via bus contention with the touch driver. See [ADR-0013](adr/0013-i2c-process-ms-tuned-floor.md).
 - **Critical pin-mapping history**: during the original consolidation into `i2c_manager`, the EXIO pin map was briefly wrong (`BUZZER = 0, LCD_CS = 1, LCD_RST = 2`), causing the buzzer to stick on and boot failures. The pin map documented above under "IO Expander" is the corrected, current mapping.
 

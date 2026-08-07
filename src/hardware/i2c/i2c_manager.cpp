@@ -298,7 +298,7 @@ bool read(DeviceHandle& dev, uint8_t reg, uint8_t* data, size_t len, int retries
 
     // Latency watch: a transaction taking >20ms is the earliest signal of a
     // degrading (not yet fully wedged) bus — log it regardless of outcome.
-    // See docs/i2c_bus_freeze_investigation.md, "Things to try" #6.
+    // See docs/i2c.md, "Known Historical Issues" (FT-06 freeze investigation).
     if (total_us > 20000) {
         system_logger::logf(system_logger::Level::WARN, "I2C",
             "SLOW %s reg=0x%02X %s dur=%luus task=%s",

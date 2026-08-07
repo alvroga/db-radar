@@ -595,8 +595,8 @@ static void systemTask(void* parameter) {
 
             system_logger::info("HEALTH", heartbeat_msg);
 
-            // Per-device breakdown, same cadence — see docs/i2c_bus_freeze_investigation.md
-            // "Things to try" #7. Cheap: getDeviceStats() only reads counters, no I2C traffic.
+            // Per-device breakdown, same cadence — see docs/i2c.md. Cheap:
+            // getDeviceStats() only reads counters, no I2C traffic.
             logDeviceStatsSummary("I2C_STATS");
         }
 
@@ -1100,7 +1100,7 @@ static void checkTaskHealth() {
 // detector below (captured at the moment recovery triggers) and by the
 // periodic heartbeat, so a postmortem on the SD log can see which device
 // started failing first and whether it was a ramp or a cliff.
-// See docs/i2c_bus_freeze_investigation.md, "Things to try" #7.
+// See docs/i2c.md, "Known Historical Issues" (FT-06 freeze investigation).
 static void logDeviceStatsSummary(const char* context) {
     i2c_manager::DeviceStatSnapshot snap[i2c_manager::NUM_DEVICES];
     i2c_manager::getDeviceStats(snap);
