@@ -11,6 +11,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+**Hoisted per-waypoint `cos`/`sin` out of the radar render loop (2026-08-07) — backlog §3.6**
+
+`rotatePoint()` recomputed `cos()`/`sin()` (double-precision) for every waypoint, every frame, even
+though every waypoint in a frame rotates by the same `ui.current_heading`. Split into
+`rotatePointFast(cos_a, sin_a, ...)` and hoisted the single `cosf`/`sinf` call to once per frame in
+`drawWaypoints()`; `rotatePoint()` survives as a thin wrapper for the single-point call sites
+(`latLonToScreen()`, tap hit-testing) where there's nothing to hoist. Pure de-duplication, no behavior
+change — `pio run` clean, RAM/flash unchanged (51.2% / 40.7%). See
+[`docs/performance_optimization_backlog.md`](docs/performance_optimization_backlog.md) §3.6.
+`getColorScheme()` caching, filed alongside this in the same backlog item, turned out to be a false
+lead — it already gates its only I/O behind a 1s `millis()` check, so there was nothing to fix.
+
 **GPX web manager: storage gauge and file count now refresh after upload/delete, not just on page
 reload (2026-08-07) — field-verified**
 

@@ -104,7 +104,8 @@ each other, so anything further built before this session lands on an unverified
       session — it's independent of §0's audio/beacon checks, so a regression is still attributable.
 - [x] **§3.6 recompute less per frame (Haversine → equirectangular)** — ✅ **done 2026-08-05**, and
       `MAX_WAYPOINTS` raised to 500 in the same change. See [ADR-0022](adr/0022-waypoint-cap-raised-to-500-not-700.md).
-      `rotatePoint()`'s per-waypoint `cos`/`sin` hoist and `getColorScheme()` caching remain open, see §3.6 below.
+      `rotatePoint()`'s per-waypoint `cos`/`sin` hoist done 2026-08-07, see §3.6 below. `getColorScheme()`
+      caching turned out to be a false lead — already gated behind a 1s `millis()` check, not a real cost.
 - [ ] **§8.2 decouple touch polling** *(M)* — ~11.7 Hz, fine for taps, coarse for drags. **Weakest
       claim in the audit — justify by actual annoyance before paying for it.**
 - [ ] **§8.1c buzzer EXIO read-modify-write** — 2 transactions per edge. Only worth it if the tick
@@ -1965,10 +1966,15 @@ Minor next to the above, but nearly free:
   + 1 `sqrtf`, plus `atan2f` only for waypoints that end up off-screen. This was the blocking risk for
   raising the waypoint cap (10 double transcendentals × N waypoints), not just frame-time hygiene.
   `handleTapAt()` inherits the fix for free since it calls the same `latLonToScreen()`.
-- **Still open**: `rotatePoint()` calls `cos()`/`sin()` (double-precision) **per waypoint per frame**
-  with the same angle. Hoist `cos_a`/`sin_a` out of the loop and use `cosf`/`sinf`.
-- **Still open**: `getColorScheme()` is called 4–6 times per frame; each call re-checks `millis()` and
-  reaches into settings. Fetch it once per `updateRadarDisplay()` and pass it down.
+- ✅ **Done (2026-08-07).** `rotatePoint()` called `cos()`/`sin()` (double-precision) per waypoint per
+  frame with the same angle. Split into `rotatePointFast()` (takes precomputed `cos_a`/`sin_a`) and
+  hoisted the `cosf`/`sinf` call out of `drawWaypoints()`'s loop to run once per frame instead of once
+  per waypoint. `rotatePoint()` itself is kept as a thin wrapper for the single-point call sites
+  (`latLonToScreen()`, `handleTapAt()`) where hoisting doesn't apply. Pure de-dup — build-verified
+  identical RAM/flash (51.2% / 40.7%).
+- **Rejected as a false lead**: `getColorScheme()` looked like it was called 4–6 times per frame doing
+  real work, but it already gates its only I/O (a `settings_manager` read) behind a 1s `millis()`
+  compare — every other call is just a `millis()` read + a static bool branch. Nothing to hoist.
 
 ---
 

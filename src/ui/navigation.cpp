@@ -234,26 +234,31 @@ float smoothHeading(float current_heading, float target_heading, float smoothing
     return new_heading;
 }
 
-// Rotate point around radar center based on heading
-// heading: GPS course in degrees (0=North, 90=East, 180=South, 270=West)
-// For heading-up mode: rotates map so heading points "up" (negative rotation)
-void rotatePoint(int& screen_x, int& screen_y, float heading, int center_x, int center_y) {
-    // Translate to origin (center of radar)
+// Rotate point around radar center given a precomputed cos/sin — lets a caller that
+// rotates many points by the same heading in one frame (drawWaypoints()) hoist the
+// transcendental calls out of its loop instead of paying for them per point.
+static inline void rotatePointFast(int& screen_x, int& screen_y, float cos_a, float sin_a,
+                                    int center_x, int center_y) {
     int rel_x = screen_x - center_x;
     int rel_y = screen_y - center_y;
-
-    // Rotate by -heading (counterclockwise) to make heading point "up"
-    // In navigation: if heading is 90° (East), we rotate map -90° so East points up
-    float angle_rad = -heading * M_PI_LOCAL / 180.0f;
-    float cos_a = cos(angle_rad);
-    float sin_a = sin(angle_rad);
 
     int rotated_x = (int)(rel_x * cos_a - rel_y * sin_a);
     int rotated_y = (int)(rel_x * sin_a + rel_y * cos_a);
 
-    // Translate back
     screen_x = rotated_x + center_x;
     screen_y = rotated_y + center_y;
+}
+
+// Rotate point around radar center based on heading
+// heading: GPS course in degrees (0=North, 90=East, 180=South, 270=West)
+// For heading-up mode: rotates map so heading points "up" (negative rotation)
+void rotatePoint(int& screen_x, int& screen_y, float heading, int center_x, int center_y) {
+    // Rotate by -heading (counterclockwise) to make heading point "up"
+    // In navigation: if heading is 90° (East), we rotate map -90° so East points up
+    float angle_rad = -heading * M_PI_LOCAL / 180.0f;
+    float cos_a = cosf(angle_rad);
+    float sin_a = sinf(angle_rad);
+    rotatePointFast(screen_x, screen_y, cos_a, sin_a, center_x, center_y);
 }
 
 void latLonToScreen(double lat, double lon, int& x, int& y, int screen_size) {
@@ -667,6 +672,17 @@ static void drawWaypoints(lv_draw_ctx_t* ctx, int screen_size) {
     double lat1      = ui.center_lat * M_PI_LOCAL / 180.0;
     double cos_lat1  = cos(lat1);
 
+    // Pre-compute heading-up rotation once per frame — every waypoint below rotates by
+    // the same ui.current_heading, so hoisting this out of the loop turns up to
+    // MAX_WAYPOINTS redundant cosf/sinf calls per frame into exactly one.
+    bool do_rotate = ui.heading_up_mode && ui.current_heading != 0.0f;
+    float rot_cos_a = 1.0f, rot_sin_a = 0.0f;
+    if (do_rotate) {
+        float angle_rad = -ui.current_heading * M_PI_LOCAL / 180.0f;
+        rot_cos_a = cosf(angle_rad);
+        rot_sin_a = sinf(angle_rad);
+    }
+
     // Track fixed waypoint if it ends up off-screen (drawn separately, bypasses clustering)
     bool fixed_off_screen = false;
     double fixed_off_bearing = 0.0;
@@ -710,8 +726,8 @@ static void drawWaypoints(lv_draw_ctx_t* ctx, int screen_size) {
         y = center_y + (int)dy_pixels;
 
         // Apply heading-up rotation if enabled (CRITICAL: rotate waypoints with heading!)
-        if (ui.heading_up_mode && ui.current_heading != 0.0f) {
-            rotatePoint(x, y, ui.current_heading, center_x, center_y);
+        if (do_rotate) {
+            rotatePointFast(x, y, rot_cos_a, rot_sin_a, center_x, center_y);
         }
 
         // Check if waypoint is on-screen or off-screen. The glass is round, not
