@@ -395,6 +395,7 @@ Detailed component documentation is available in the `docs/` directory:
 - [`docs/memory_management.md`](docs/memory_management.md) - Advanced memory management system guide
 - [`docs/peripherals.md`](docs/peripherals.md) - RTC and GPS integration guides
 - [`docs/wifi_implementation_guide.md`](docs/wifi_implementation_guide.md) / [`docs/wifi_power_management.md`](docs/wifi_power_management.md) - WiFi implementation and power patterns (BLE: see Beacon Proximity below)
+- [`docs/standby_mode.md`](docs/standby_mode.md) - Low-power standby: entry/wake, power settings, thread-safety history
 - [`docs/troubleshooting.md`](docs/troubleshooting.md) - Common issues and solutions
 - [`docs/documentation_standards.md`](docs/documentation_standards.md) - Full documentation process (see also Documentation Standards below)
 
@@ -433,6 +434,25 @@ see ROADMAP.md).
 **Serial Commands**: `battery status`, `battery monitor on|off`, `battery history`, `battery raw`
 
 **Full guide** (hardware, display, power, troubleshooting): [`docs/battery_monitoring.md`](docs/battery_monitoring.md).
+
+---
+
+## Standby Mode
+
+**Status**: Complete ✅ | [Complete Guide](docs/standby_mode.md)
+
+Low-power sleep: 4-second GPIO0 hold (or an optional inactivity timeout, Settings > Display > Auto
+Sleep) turns backlight off, drops CPU 240MHz→80MHz, disables WiFi/AP, and stops polling touch
+entirely, while GPS stays on at a reduced power mode for continuous track logging. Any button press
+wakes (touch isn't read during standby, so it can't). **`enterStandby()`/`wakeFromStandby()` must
+never be called directly from a button callback** — they make LVGL calls, callbacks run outside
+`display_mutex`, and calling them directly is exactly the shipped bug that froze UI_Task after 7+
+hours of runtime. Both are routed through `task_manager::queueUIUpdate()`
+(`ENTER_STANDBY`/`WAKE_STANDBY`) and only fall back to a direct call if the queue is full.
+
+**Full guide** (power settings, wake sequence and the I2C/touch-controller reset it performs, why an
+LVGL overlay instead of a screen switch, and a known cosmetic bug in the standby screen's battery
+readout): [`docs/standby_mode.md`](docs/standby_mode.md).
 
 ---
 

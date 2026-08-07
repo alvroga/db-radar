@@ -2213,7 +2213,7 @@ lv_obj_del(g_standby_screen);  // Current screen reappears
 
 **Serial Commands**: None (future: `standby stats`, `standby enter`, `standby wake`)
 
-**Reference Documentation**: [`docs/standby_mode.md`](docs/standby_mode.md) - Complete technical guide (to be created)
+**Reference Documentation**: [`docs/standby_mode.md`](docs/standby_mode.md) - Complete technical guide
 
 ---
 
