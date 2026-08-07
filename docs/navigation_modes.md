@@ -1,8 +1,10 @@
 # Navigation Modes - GPS Radar
 
 **Status**: Complete ✅
-**Implemented**: 2025-10-20
-**Version**: v0.10.0
+**Heading source**: compass (QMC5883L), **not GPS** — see "How It Works" below. This page was
+originally written around GPS-heading-fusion (NMEA RMC, 1Hz, unreliable when stationary) and was
+rewritten to match the current architecture after that mismatch was found during a documentation
+audit — the GPS-based design it originally described was replaced by [ADR-0017](adr/0017-compass-sole-heading-source.md).
 
 ## Overview
 
@@ -21,11 +23,11 @@ Think of it like Google Maps:
 
 | Feature | Heading-Up Mode | North-Up Mode |
 |---------|----------------|---------------|
-| **Orientation** | Rotates with your walking direction | Fixed (north always up) |
+| **Orientation** | Rotates with your compass heading | Fixed (north always up) |
 | **Best For** | Active navigation, walking to waypoints | Map reading, planning routes |
 | **Cognitive Load** | Low (you always move "forward") | Higher (requires mental rotation) |
 | **North Indicator** | Red circle with "N" shows where north is | Not shown (north is always up) |
-| **When Stationary** | Maintains last heading for 10 seconds | Always shows north |
+| **When Stationary** | Works identically — a compass doesn't need motion | Always shows north |
 | **Industry Standard** | Google Maps, Waze, car GPS default | Hiking GPS, aviation charts, marine charts |
 
 ---
@@ -47,7 +49,7 @@ When following a path with multiple waypoints - easier to see "next waypoint is 
 More intuitive for users unfamiliar with traditional map reading.
 
 **Example Scenario**:
-"I'm walking east toward a waypoint 200m away. On the radar, the waypoint appears directly ahead. When I turn left to go north, the radar rotates and the waypoint now appears to my right. I always know my relative position without thinking."
+"I'm facing east toward a waypoint 200m away. On the radar, the waypoint appears directly ahead. When I turn left to face north, the radar rotates and the waypoint now appears to my right. I always know my relative position without thinking — this works exactly the same whether I'm walking or standing still, since the compass tracks which way I'm *facing*, not which way I'm *moving*."
 
 ---
 
@@ -65,9 +67,6 @@ When you need to know absolute cardinal directions (N/S/E/W) at a glance.
 ✅ **Surveying/Professional Use**
 When documenting locations or coordinates where absolute orientation matters.
 
-✅ **Stationary Operation**
-When standing still and observing waypoint positions - heading-up mode times out after 10 seconds anyway.
-
 **Example Scenario**:
 "I have three waypoints forming a triangle north of my position. I want to plan which order to visit them. North-up mode lets me see their absolute positions without the display rotating as I turn around."
 
@@ -81,7 +80,7 @@ When standing still and observing waypoint positions - heading-up mode times out
 2. Navigate to **Display** tab
 3. Find **Navigation Mode** dropdown
 4. Select:
-   - **Heading-Up** - Radar rotates with walking direction (default)
+   - **Heading-Up** - Radar rotates with your compass heading (default)
    - **North-Up** - North always points up (classic mode)
 5. Setting is saved to NVS (persists across reboots)
 6. Radar updates immediately (no restart required)
@@ -102,10 +101,10 @@ When heading-up mode is active, a **north indicator** appears on the radar:
 - **Purpose**: Shows absolute orientation while radar rotates with heading
 
 **Why It's Needed**:
-In heading-up mode, the radar rotates so "up" matches your walking direction. The north indicator lets you know where true north is at any time.
+In heading-up mode, the radar rotates so "up" matches your compass heading. The north indicator lets you know where true north is at any time.
 
 **Example**:
-- You're walking **east** (heading = 90°)
+- You're facing **east** (heading = 90°)
 - Radar rotates so **east points up**
 - North indicator appears on the **left side** of the screen (90° counterclockwise from up)
 
@@ -119,18 +118,24 @@ In heading-up mode, the radar rotates so "up" matches your walking direction. Th
 
 ## How It Works
 
-### GPS Heading Data
+### Compass Heading Data
 
-The GPS module (BH-880) provides heading information via UBX NAV-PVT messages:
+**Heading comes solely from the QMC5883L compass**, not GPS. GPS still supplies *position* (over UBX
+NAV-PVT, not NMEA), but heading fusion from GPS course-over-ground was removed entirely — see
+[ADR-0017](adr/0017-compass-sole-heading-source.md).
 
-- **RMC Sentence** (Recommended Minimum Coordinates) includes:
-  - **Course**: Direction of movement (0-360°, true north)
-  - **Speed**: Speed over ground (knots)
-- **Heading is reliable only when moving** (speed > 0.5 knots / ~1 km/h)
-- **Stationary GPS heading is invalid** (gyro drift, no motion reference)
+- The System Task reads the compass at **10Hz** and queues a `COMPASS_UPDATE` for the UI Task, which
+  applies an EMA (`navigation::smoothHeading`, α=0.15, τ≈0.62s) and writes `ui.current_heading`.
+- Tilt compensation (accelerometer-based, not gyro) corrects the heading past ~31.5° of tilt — see
+  [ADR-0020](adr/0020-tilt-compensation-formula-and-sign-from-bench-data.md) and `docs/compass.md`.
+- **A compass has no minimum-speed requirement.** This is the whole reason the GPS-heading design was
+  replaced: GPS course-over-ground genuinely is unreliable at low speed (no position delta to derive
+  direction from), but a magnetometer measures which way the device is *pointed*, which works
+  identically standing still or walking.
 
-**Why Movement Matters**:
-GPS determines heading by comparing your current position to previous positions. When stationary, there's no position change, so heading becomes unreliable (can drift randomly).
+**Why this matters for navigation mode design**: the original design's entire "stationary fallback"
+mechanism (below) existed to paper over GPS heading's stationary weakness. With a compass, that
+weakness doesn't exist, so the fallback isn't needed and isn't present in the current code.
 
 ---
 
@@ -138,7 +143,8 @@ GPS determines heading by comparing your current position to previous positions.
 
 In heading-up mode, the radar performs **2D coordinate rotation**:
 
-1. Calculate waypoint position relative to you (using Haversine distance)
+1. Calculate waypoint position relative to you (equirectangular approximation, not Haversine — see
+   [ADR-0022](adr/0022-waypoint-cap-raised-to-500-not-700.md))
 2. Rotate coordinates by `-heading` radians (counterclockwise)
 3. Display rotated position on screen
 
@@ -154,27 +160,16 @@ Where `θ = heading in radians`
 
 ---
 
-### Stationary Mode Fallback
+### No Stationary Fallback (By Design)
 
-**Behavior When You Stop Moving**:
+Earlier revisions of this radar (and of this doc) had a 10-second stationary timeout that reverted
+heading-up mode to north-up, because GPS course-over-ground couldn't be trusted at rest. **That
+mechanism doesn't exist in the current code** — `ui.last_valid_heading` and `ui.last_heading_update`
+are still declared (`include/ui/ui_manager.h`) but nothing writes to them anymore; they're dead
+fields left over from the removed design, not a subtle behavior to rediscover.
 
-1. **First 10 seconds**: Radar maintains your last valid heading
-   - Prevents erratic rotation from unreliable stationary GPS data
-   - Useful when pausing briefly during navigation
-2. **After 10 seconds**: Radar reverts to north-up orientation
-   - Assumes you're no longer actively navigating
-   - Provides stable reference while stationary
-
-**Example**:
-- You're walking east (heading = 90°) → Radar shows east pointing up
-- You stop to check map → Radar keeps east pointing up for 10 seconds
-- After 10 seconds → Radar rotates back to north-up (heading = 0°)
-- You start walking again → Radar immediately updates to new heading
-
-**Why 10 Seconds?**
-Balance between:
-- Too short (1-2 sec): Annoying rotation when pausing briefly
-- Too long (30+ sec): Confusing when stationary and turning around
+Heading-up mode now simply tracks `ui.current_heading` continuously, moving or not, because the
+compass supplies a valid reading either way.
 
 ---
 
@@ -184,35 +179,27 @@ Balance between:
 
 - **Per-waypoint overhead**: equirectangular dx/dy + `sqrtf` (rotation on top), replacing the earlier
   Haversine — see [ADR-0022](adr/0022-waypoint-cap-raised-to-500-not-700.md), 2026-08-05
-- **At the current `MAX_WAYPOINTS` (500, was 50)**: see `docs/waypoint_filtering.md` for the
-  up-to-date per-waypoint cost breakdown
-- **Frame time**: negligible; read `wpt_us` off the `perf` HUD for the current measured figure rather
-  than trusting a fixed estimate
-- **Display refresh**: 60 FPS maintained
+- **At the current `MAX_WAYPOINTS` (200, working-set size — see the Waypoint Two-Tier Index section of
+  CLAUDE.md)**: see `docs/waypoint_filtering.md` for the up-to-date per-waypoint cost breakdown
+- **Frame time**: read `wpt_us` off the `perf` HUD for the current measured figure rather than
+  trusting a fixed estimate
+- **Heading update rate**: 10Hz (compass), independent of GPS fix rate
 
 ### Memory Usage
 
-- **Flash**: +1,848 bytes for entire navigation mode system
-- **RAM**: 16 bytes (heading state: `current_heading`, `last_valid_heading`, `last_heading_update`, `heading_up_mode`)
+- **RAM**: heading state lives in `g_ui_state` (`current_heading`, plus the now-dead
+  `last_valid_heading`/`last_heading_update` fields noted above)
 - **No heap allocation** during rotation (stack-based calculations)
 
-### Battery Impact
+### Power Impact
 
-- **Negligible**: Rotation is pure calculation (no I/O, no radio)
-- **Same GPS power**: Heading data comes from existing RMC sentence parsing
-- **No additional sensors**: Uses GPS only (IMU fusion not yet implemented)
+- **Negligible**: rotation is pure calculation (no I/O, no radio)
+- **Compass read cost**: one I2C transaction per 100ms sample (10Hz), through the shared bus — see
+  [`i2c.md`](i2c.md)
 
 ---
 
 ## Troubleshooting
-
-### "Why does the radar point north when I stop?"
-
-**Expected behavior**. GPS heading is unreliable when stationary, so the radar reverts to north-up mode after 10 seconds to provide a stable reference.
-
-**Solution**: Start moving again (>0.5 knots / ~1 km/h) and the radar will resume heading-up mode.
-
----
 
 ### "North indicator not showing"
 
@@ -221,9 +208,8 @@ Balance between:
 2. Verify **Navigation Mode** is set to **Heading-Up**
 3. North indicator only appears in heading-up mode (not needed in north-up)
 
-**If heading-up is selected but indicator still missing**:
-- GPS may not have valid heading data (speed < 0.5 knots)
-- Start walking and indicator should appear within 1-2 seconds
+If heading-up is selected and the indicator is still missing, this points to a compass read/calibration
+issue rather than a GPS one — see `docs/compass.md` and `docs/compass_calibration_foundation.md`.
 
 ---
 
@@ -231,45 +217,14 @@ Balance between:
 
 **Causes**:
 
-1. **Walking too slowly** (< 0.5 knots / ~1 km/h)
-   - GPS heading becomes unreliable at very low speeds
-   - **Solution**: Walk at normal pace (3-5 km/h)
-
-2. **Poor GPS signal**
-   - Weak signal causes position jitter → erratic heading
-   - **Solution**: Move to area with clear sky view, wait for satellite lock
-
-3. **Rapid direction changes**
-   - GPS heading updates at 1 Hz (once per second)
-   - Very sharp turns may cause brief lag
-   - **Solution**: This is normal GPS limitation (consider IMU fusion future upgrade)
-
----
-
-### "I want faster heading updates"
-
-**Current limitation**: GPS heading updates at 1 Hz (once per second).
-
-**Future enhancement**: IMU sensor fusion (planned):
-- QMI8658 gyroscope provides 60+ Hz rotation data
-- Smooths heading between GPS updates
-- Instant response to direction changes
-- See ROADMAP.md for implementation timeline
-
----
-
-### "Can I change the 10-second timeout?"
-
-**Not currently user-configurable**. The 10-second stationary timeout is hardcoded for optimal balance.
-
-**Developer note**: Timeout is defined in `src/ui/navigation.cpp:537`:
-```cpp
-if (millis() - ui.last_heading_update > 10000) {  // 10 seconds
-    ui.current_heading = 0.0f;  // Revert to north-up
-}
-```
-
-Modify this value if needed for your application (e.g., 5000 for 5 seconds).
+1. **Compass calibration** — an uncalibrated or recently-disturbed compass (see
+   [`compass_calibration_foundation.md`](compass_calibration_foundation.md) for when recalibration is
+   needed — even opening the enclosure can invalidate it) is the most likely cause now that heading
+   doesn't come from GPS at all.
+2. **Fast tilt transitions** — a quick flat→vertical tilt can produce a brief (~1s, self-correcting)
+   heading bounce from the gravity-EMA lag; accepted behavior, see CLAUDE.md's Compass Calibration &
+   Tilt entry in ROADMAP.md's Resolved section.
+3. **Magnetic interference** — nearby ferrous metal or electronics can distort the local field.
 
 ---
 
@@ -311,40 +266,23 @@ Modify this value if needed for your application (e.g., 5000 for 5 seconds).
 
 For developers and those curious about how it works under the hood.
 
-### GPS Heading Parsing
+### Compass Heading Pipeline
 
-**Source**: NMEA RMC sentence (Recommended Minimum Coordinates)
+**Source**: QMC5883L on the shared I2C bus, address `0x0D` (`COMPASS_DEVICE`) — see [`i2c.md`](i2c.md).
 
-**Fields Used**:
-- **Field 7**: Speed over ground (knots)
-- **Field 8**: Course over ground (degrees, 0-360° true north)
+**Read + smoothing flow**:
+1. System Task reads the compass at 10Hz, applies tilt compensation
+   ([ADR-0020](adr/0020-tilt-compensation-formula-and-sign-from-bench-data.md)) and WMM declination
+   (`docs/wmm_declination.md`), and queues a `COMPASS_UPDATE` with the raw heading.
+2. UI Task applies an EMA (`navigation::smoothHeading`, α=0.15, τ≈0.62s) on receipt and writes
+   `ui.current_heading`.
+3. A small render deadband (0.5°) on the *smoothed* value avoids redundant redraws from sub-noise-floor
+   jitter while still catching genuine turns — see the `COMPASS_UPDATE` handler in
+   `src/utils/task_manager.cpp` for the full reasoning (it's commented in detail there since the
+   threshold has been re-derived twice as the compass rate changed).
 
-**Code Location**: `src/hardware/sensors/gps_bh880.cpp:94-143`
-
-**Parsing Logic**:
-```cpp
-// Speed and Course
-if (f_speed && *f_speed) {
-    g.speed = atof(f_speed);  // Speed in knots
-}
-if (f_course && *f_course) {
-    g.course = atof(f_course);  // Course in degrees (0-360, true north)
-}
-
-// hasHeading is true only if we have valid speed and course, and speed > 0.5 knots
-g.hasHeading = (f_speed && *f_speed && f_course && *f_course && g.speed > 0.5);
-```
-
-**Data Structure**: `include/hardware/sensors/gps_bh880.h:12-15`
-```cpp
-struct GPSData {
-    // ...
-    float  course = NAN;    // Track made good (degrees true north, 0-360°)
-    float  speed = NAN;     // Speed over ground (knots)
-    bool   hasHeading = false; // True if course is valid (requires movement > 0.5 knots)
-    // ...
-};
-```
+**Code Location**: `src/utils/task_manager.cpp` — `COMPASS_UPDATE` case; `src/ui/navigation.cpp` —
+`smoothHeading()`
 
 ---
 
@@ -373,13 +311,13 @@ void rotatePoint(int& screen_x, int& screen_y, float heading, int center_x, int 
 }
 ```
 
-**Applied In**: `src/ui/navigation.cpp:158-161` (inside `latLonToScreen()`)
+**Applied In**: `src/ui/navigation.cpp` (inside `latLonToScreen()`)
 
 ---
 
 ### North Indicator Rendering
 
-**Code Location**: `src/ui/navigation.cpp:248-286`
+**Code Location**: `src/ui/navigation.cpp` — `drawNorthIndicator()`
 
 **Drawing Process**:
 1. Calculate north position relative to current heading
@@ -399,7 +337,7 @@ int north_y = center_y - (int)(north_distance * cos(north_angle));
 
 ### Settings Integration
 
-**NVS Persistence**: `include/settings_manager.h:37`
+**NVS Persistence**: `include/settings_manager.h`
 ```cpp
 struct RadarSettings {
     // ...
@@ -408,12 +346,12 @@ struct RadarSettings {
 };
 ```
 
-**Settings UI**: `src/ui/settings_screen.cpp:1012-1051`
+**Settings UI**: `src/ui/settings_screen.cpp`
 - Dropdown with options: "Heading-Up" / "North-Up"
 - Immediate effect (no restart required)
 - Saves to NVS on change
 
-**Startup Loading**: `src/ui/ui_manager.cpp:54-59`
+**Startup Loading**: `src/ui/ui_manager.cpp`
 ```cpp
 settings_manager::RadarSettings settings;
 settings_manager::loadSettings(settings);
@@ -422,56 +360,7 @@ g_ui_state.heading_up_mode = settings.heading_up_mode;  // Apply from NVS
 
 ---
 
-### Update Logic
-
-**Code Location**: `src/ui/navigation.cpp:528-541` (inside `updateRadarDisplay()`)
-
-**State Machine**:
-```cpp
-if (dev.last_gps_data.hasHeading && dev.last_gps_data.speed > 0.5f) {
-    // State: MOVING - update heading from GPS
-    ui.current_heading = dev.last_gps_data.course;
-    ui.last_valid_heading = dev.last_gps_data.course;
-    ui.last_heading_update = millis();
-} else {
-    // State: STATIONARY
-    if (millis() - ui.last_heading_update > 10000) {
-        // Substate: TIMEOUT - revert to north-up
-        ui.current_heading = 0.0f;
-    } else {
-        // Substate: HOLD - maintain last heading
-        ui.current_heading = ui.last_valid_heading;
-    }
-}
-```
-
----
-
 ## Future Enhancements
-
-### IMU Sensor Fusion (Planned)
-
-**Hardware**: QMI8658 6-axis IMU (already on board)
-
-**Benefits**:
-- **60+ Hz rotation updates** (vs 1 Hz GPS)
-- **Instant response** to direction changes
-- **Works when stationary** (gyroscope detects rotation even without movement)
-- **Smooth animation** between GPS heading updates
-
-**Implementation Approach**:
-1. Use GPS heading as absolute reference (corrects gyro drift)
-2. Use IMU gyro for high-frequency updates between GPS fixes
-3. Complementary filter: `heading = 0.98 * (heading + gyro_delta) + 0.02 * gps_heading`
-
-**Challenges**:
-- Gyroscope drift accumulation (requires periodic GPS correction)
-- Magnetometer needed for absolute heading when stationary (QMI8658 has no magnetometer)
-- Sensor fusion complexity (Kalman filter or complementary filter)
-
-**Timeline**: See ROADMAP.md for prioritization
-
----
 
 ### Waypoint-Up Mode (Advanced)
 
@@ -479,7 +368,7 @@ if (dev.last_gps_data.hasHeading && dev.last_gps_data.speed > 0.5f) {
 
 **Use Case**: Single-waypoint navigation (hiking to one destination)
 
-**Implementation**: Similar to heading-up, but rotation based on bearing to waypoint instead of GPS heading
+**Implementation**: Similar to heading-up, but rotation based on bearing to waypoint instead of compass heading
 
 **Status**: Not planned (heading-up mode covers most use cases)
 
@@ -487,12 +376,7 @@ if (dev.last_gps_data.hasHeading && dev.last_gps_data.speed > 0.5f) {
 
 ## Reference Documentation
 
-- **Architecture Details**: See `CLAUDE.md` navigation modes section
-- **Implementation History**: See `CHANGELOG.md` v0.10.0 entry
+- **Architecture Details**: See CLAUDE.md's Navigation Modes System section
+- **Heading source decision**: [ADR-0017](adr/0017-compass-sole-heading-source.md)
+- **Tilt compensation**: [ADR-0020](adr/0020-tilt-compensation-formula-and-sign-from-bench-data.md), `docs/compass_calibration_foundation.md`
 - **Code References**: All locations listed in Technical Implementation section above
-
----
-
-**Last Updated**: 2025-10-20
-**Version**: v0.10.0
-**Author**: GPS Radar Development Team

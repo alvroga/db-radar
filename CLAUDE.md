@@ -20,47 +20,14 @@ This is a **production-ready PlatformIO template** for ESP32-S3 touch LCD develo
 
 ## Key Configuration
 
-### **✅ ENHANCED CONFIGURATION SYSTEM** (Priority 2.4 Complete)
+### **Configuration System**
 
-The project now features a comprehensive configuration management system that consolidates all magic numbers and provides runtime control via serial commands.
+All magic numbers/timing/pins consolidate into `include/core/system_config.h`, organized by namespace
+(`display`, `pins`, `communication`, `timing`, `ui`, `backlight`, `memory`, `features`), with runtime
+inspection via serial (`config show|display|timing|pins`). Hardware variant selection (this board vs.
+custom 320×240/240×320) is a single `#define` swap.
 
-**Central Configuration** (`include/core/system_config.h`):
-- **Hardware Variants**: Support for multiple display configurations (480x480, 320x240, 240x320)
-- **Organized Namespaces**: display, pins, communication, timing, ui, backlight, memory, features
-- **Compile-time Validation**: Static assertions ensure configuration consistency
-- **Easy Customization**: Change one header to adapt entire project
-
-```cpp
-// Hardware variant selection
-#define HARDWARE_WAVESHARE_ESP32_S3_TOUCH_LCD_2_1  // Default: 2.1" 480x480
-
-namespace system_config {
-    namespace display {
-        constexpr int SCREEN_WIDTH = 480;
-        constexpr int SCREEN_HEIGHT = 480;
-        constexpr int PCLK_HZ = 10000000;      // 10MHz - proven stable
-    }
-
-    namespace timing {
-        constexpr uint32_t WIFI_SCAN_INTERVAL_MS = 15000;    // WiFi scan every 15 seconds
-        constexpr uint32_t BLE_SCAN_INTERVAL_MS = 10000;     // BLE scan every 10 seconds
-        constexpr uint32_t RTC_READ_INTERVAL_MS = 5000;      // RTC read every 5 seconds
-    }
-
-    namespace features {
-        constexpr bool ENABLE_WIFI_SCANNING = true;
-        constexpr bool ENABLE_BLE_SCANNING = true;
-        constexpr bool ENABLE_DEBUG_LOGGING = true;
-    }
-}
-```
-
-**Runtime Configuration** (via serial commands):
-- `config show` - Display all current configuration values
-- `config display` - Show display-specific parameters
-- `config timing` - Show timing intervals and delays
-- `config pins` - Show GPIO pin assignments
-- Future: Runtime parameter changes with SD card persistence
+**Full guide**: [`docs/configuration.md`](docs/configuration.md).
 
 ### **✅ PROFESSIONAL TASK MANAGEMENT SYSTEM** (Priority 3.7 Complete)
 
@@ -104,81 +71,9 @@ difference, and the docs said 3 well after the code said 5.
 - `task enable ui|i2c|network|system on|off` - Enable/disable specific tasks
 - Task statistics include loop counts, runtime, stack usage, and health status
 
-**Performance Improvements Achieved:**
-- ✅ **Zero UI freezes** - Legacy blocking I2C operations eliminated
-- ✅ **Improved responsiveness** - UI runs on dedicated Core 1 with highest priority
-- ✅ **System stability** - No more heap corruption or reboots
-- ✅ **Modular architecture** - Template-level solution for ESP32-S3 projects
-
-**Critical Fix Applied:**
-The legacy `timer1sCallback` in navigation.cpp was performing direct I2C operations (RTC reads every 5 seconds) that created bus contention. This has been completely eliminated in favor of the queued task system, with RTC updates now occurring every 30 seconds through proper I2C task requests.
-
-**Backwards Compatibility:**
-The system includes a fallback mode that can switch to legacy loop-based architecture if needed, ensuring project compatibility while providing the benefits of advanced multitasking.
-
-### **⚠️ OPTIMIZED DISPLAY PERFORMANCE** (Priority 3.6 — SUPERSEDED, kept as history)
-
-> **Read the Render Pipeline section near the end of this file instead.** This section predates the
-> ESP-IDF migration and the 2026-07-28 render work, and three of its claims are now false:
-> - *"ESP-IDF version doesn't support bounce buffer"* — **wrong.** A 10-line SRAM bounce buffer is
->   configured and active (`system_config.h` `BOUNCE_BUFFER_LINES = 10`, 18.75KB;
->   `device_manager.cpp` `cfg.bounce_buffer_size_px`).
-> - *"`full_refresh = 0` / partial refresh"* — **inverted.** It is `1` in the default TILED rotation
->   mode and must be, or the transpose leaves stale pixels. See load-bearing constraint #3.
-> - *"software rotation"* — replaced by a tiled transpose in the flush callback; LVGL `sw_rotate` is
->   off in the default mode.
->
-> What is still true: the 10MHz PCLK boundary, `BUFFER_LINES = 480`, and the tearing analysis.
-
-The project now features **enhanced display performance** through careful optimization while maintaining the rock-solid stability of the proven 10MHz PCLK timing. Comprehensive testing revealed critical stability boundaries that guided the final optimization approach.
-
-**Display Configuration Optimizations** (`include/core/system_config.h` and `src/core/device_manager.cpp`):
-- **Full-Frame LVGL Buffers**: Optimized from 40 → 50 → 120 → 160 → **480 lines** (full frame — eliminates transition wipe artifact with software rotation)
-- **Partial Refresh for Performance**: Enabled selective screen updates for fast rendering
-- **Critical Timing Preserved**: 10MHz PCLK maintained as the proven stable frequency
-
-**Key Findings from Optimization Testing:**
-- **10MHz PCLK is Critical**: Testing 12MHz caused screen jitter - this timing is hardware-specific and sacred
-- **Extra-Large Buffers Minimize Tearing**: 160-line buffers reduce flush operations to just 3 per frame
-- **Partial Refresh is Faster**: LVGL `full_refresh = 0` only redraws changed areas (much faster than full screen)
-- **Buffer Size vs Tearing**: Fewer flush operations = fewer visible tearing artifacts
-- **Hardware Limitation**: ESP-IDF version doesn't support bounce buffer - large buffers are best alternative
-- **Critical Path Sensitivity**: Even simple operations in the flush callback can cause performance regression
-
-```cpp
-// Final optimized display configuration
-namespace display {
-    constexpr int PCLK_HZ = 10000000;      // 10MHz - proven stable (critical)
-    constexpr int BUFFER_LINES = 480;      // Full-frame buffer — 1 flush per frame, eliminates rotation wipe artifact
-}
-
-// LVGL driver optimization
-disp_drv.full_refresh = 0;          // Partial refresh for fast rendering
-```
-
-**Performance Improvements Achieved:**
-- ✅ **Full-frame buffers** - Complete frame rendered before flush, eliminates screen wipe during transitions
-- ✅ **1 flush per frame** - Maximum efficiency (was 3 at 160 lines, 10 at 50 lines)
-- ✅ **Transition artifacts eliminated** - Software rotation wipe artifact gone with full-frame buffers
-- ✅ **Maintained stability** - Zero jitter or visual artifacts
-- ✅ **Template-ready optimization** - Demonstrates proper ESP32-S3 display tuning methodology
-
-**Memory Trade-off**:
-- Buffer size: 921KB PSRAM (480 lines × 480 pixels × 2 bytes × 2 buffers)
-- Impact: +829KB over 50-line configuration (11.5% of 8MB PSRAM — still 85%+ free with all features active)
-
-**Screen Tearing Root Cause and Limitations**:
-- **Problem**: Display DMA scans pixels from PSRAM while LVGL writes new pixels (asynchronous)
-- **Ideal Solution**: Hardware bounce buffer (SRAM staging area) - NOT supported in this ESP-IDF version
-- **Practical Solution**: Extra-large LVGL buffers (160 lines) minimize visible tearing
-- **Limitation**: Cannot completely eliminate tearing without VSYNC callback or hardware bounce buffer
-- **Trade-off**: Larger buffers use more PSRAM but provide smoother visual experience
-
-**Critical Optimization Lessons:**
-- **Hardware-specific timing constraints** must be respected (10MHz PCLK boundary)
-- **Incremental testing approach** prevents regressions and isolates problematic changes
-- **User perception validation** is essential - even microsecond optimizations can cause noticeable regression
-- **Critical path optimization** requires extreme care in interrupt-driven callbacks
+All I2C-device access (RTC, EXIO, etc.) goes through queued requests to the I2C Task rather than
+direct calls from other tasks — this is what eliminated the original bus-contention-driven UI freezes
+this architecture replaced. See [`docs/i2c.md`](docs/i2c.md) for the current queue/device model.
 
 ### **PlatformIO Settings**
 
@@ -272,88 +167,38 @@ cfg.timings.vsync_front_porch = 10;  // Critical: was 8, now 10
 
 ### **Display Rotation**
 
-**Physical Orientation**: 90° CCW (counter-clockwise) rotation due to enclosure design
-**Software Compensation**: 90° CW (clockwise) LVGL rotation to make UI appear upright
+**Physical Orientation**: 90° CCW (counter-clockwise) rotation due to enclosure design, compensated 90° CW.
 
-The display is physically rotated 90° CCW in the enclosure. LVGL automatically compensates with a 90° CW software rotation, ensuring the UI appears correctly oriented to the user.
+**The default compensation path is a tiled transpose in the flush callback, not LVGL's `sw_rotate`** —
+`disp_drv.sw_rotate = 0` in the default (TILED) mode, with `full_refresh = 1` required alongside it
+(see load-bearing constraint #3 in the Render Pipeline section — this is not a free choice). Rotation
+must still be configured **before** `lv_disp_drv_register()` for ESP32 RGB panels; post-registration
+rotation only affects touch input, not graphics.
 
-**Configuration** (`include/core/system_config.h`):
-```cpp
-namespace display {
-    constexpr int ROTATION_DEGREES = 90;   // 90° CW software rotation
-}
-```
+**Full detail** (why not `sw_rotate`, the SRAM scratch-tile mechanism, the `rot on|off|tiled` runtime
+toggle for A/B measurement): [`docs/display.md`](docs/display.md) and
+[ADR-0004](docs/adr/0004-tiled-transpose-display-rotation.md).
 
-**Implementation** (`src/core/device_manager.cpp:453-477`):
-```cpp
-// Enable software rotation BEFORE registration (critical for RGB panels)
-#if LV_VERSION_CHECK(8,0,0)
-    if (system_config::display::ROTATION_DEGREES == 90) {
-        disp_drv.sw_rotate = 1;              // Enable software rotation
-        disp_drv.rotated = LV_DISP_ROT_90;  // 90° CW rotation
-        Serial.println("[LVGL] Software rotation enabled: 90° CW");
-    }
-#endif
-
-lv_disp_t* disp = lv_disp_drv_register(&disp_drv);
-```
-
-**Critical**: For ESP32 RGB panels, rotation must be configured **before** calling `lv_disp_drv_register()`. Post-registration rotation (`lv_disp_set_rotation()`) only affects touch input, not graphics.
-
-**LVGL Automatic Handling**:
-- ✅ All UI elements rotated automatically
-- ✅ Touch input coordinates transformed automatically
-- ✅ No application code changes needed
-- ✅ Zero performance impact (hardware-accelerated)
-
-**Testing**: After upload, verify touch alignment by tapping screen corners and testing UI interactions.
+**Testing**: After any display/rotation change, verify touch alignment by tapping screen corners.
 
 ### **I2C Bus Architecture**
-**✅ UNIFIED I2C MANAGER** (Priority 1.2 Complete)
 
-The project now uses a **unified `i2c_manager.cpp`** that consolidates all I2C operations with enterprise-grade error handling.
-
-**Shared I2C Bus** (SDA=15, SCL=7) @ 400kHz hosts multiple devices:
-- Touch Controller (CST820) @ 0x15
-- RTC (PCF85063) @ 0x51
-- IO Expander (TCA9554) @ 0x20
-
-**I2C Manager Features:**
-- **Device handle abstraction** - Type-safe device management
-- **Automatic retry logic** - Configurable retries with intelligent delays
-- **Error reporting** - Detailed logging with device names and register info
-- **Statistics tracking** - Monitor I2C health and performance
-- **Vendor compatibility** - Legacy I2C_Driver.cpp redirects to unified manager
+All I2C traffic goes through one unified manager (`i2c_manager.cpp`/`.h`, ESP-IDF 5.x
+`driver/i2c_master.h`) — device handles, retry logic, per-device and cross-device failure stats, and
+bus-recovery (`reinit()`, not `resetBus()` — see the doc for why). **Shared I2C Bus** (SDA=15, SCL=7)
+@ 400kHz hosts **six** devices: Touch (CST820, 0x15), RTC (PCF85063, 0x51), IO Expander (TCA9554,
+0x20), Compass (QMC5883L, 0x0D), and the IMU (QMI8658, two addresses 0x6A/0x6B) — the IMU is genuinely
+present and in active use for tilt compensation; an older note elsewhere claiming it was removed for
+bus contention is stale (GPS is UART, not I2C, so there was never a contention issue between the two).
 
 ```cpp
-// Modern I2C usage
 #include "i2c_manager.h"
-
-// Read from device with automatic retries
-uint8_t data;
-bool success = i2c_manager::readByte(i2c_manager::RTC_DEVICE, 0x01, data);
-
-// EXIO operations (TCA9554)
-i2c_manager::exio::State exio_state;
-i2c_manager::exio::begin(exio_state);
+i2c_manager::readByte(i2c_manager::RTC_DEVICE, 0x01, data);
 i2c_manager::exio::set(i2c_manager::exio::BUZZER, false, exio_state);
 ```
 
-**Legacy Elimination:**
-- ❌ **Removed**: `TCA9554PWR.cpp` (5044 bytes dead code)
-- ❌ **Removed**: `exio.cpp` (absorbed into i2c_manager)
-- ✅ **Modernized**: `I2C_Driver.cpp` (now compatibility layer)
-
-**🚨 Critical Fix Applied:**
-During consolidation, a critical pin mapping error was discovered and fixed:
-```cpp
-// WRONG (caused buzzer stuck ON):
-BUZZER = 0, LCD_CS = 1, LCD_RST = 2
-
-// CORRECT (matches hardware):
-LCD_RST = 0, TP_RST = 1, LCD_CS = 2, BUZZER = 7
-```
-This fix resolved system boot failures and hardware control issues.
+**Full guide** (API, device table, stats/recovery, and the historical EXIO pin-mapping bug that once
+stuck the buzzer on): [`docs/i2c.md`](docs/i2c.md).
 
 ### **GPIO Pin Assignments**
 ```cpp
@@ -412,43 +257,14 @@ src/
 - **Memory**: Direct framebuffer access with dual buffers, `BUFFER_LINES = 480` (full frame)
 - **Performance**: 10-line SRAM bounce buffer (18.75KB), 64-byte PSRAM alignment
 
-### **✅ PROFESSIONAL MEMORY MANAGEMENT** (Priority 2.3 Complete)
+### **Memory Management**
 
-The template includes enterprise-grade memory management that prevents crashes, detects leaks, and provides powerful debugging tools.
+Real-time heap/PSRAM/LVGL/DMA monitoring, ultra-conservative fixed-size pools (768 bytes total — an
+earlier 12KB+ design caused boot loops, see the doc for why smaller was the fix), automatic heap
+corruption checks, and a full serial diagnostic interface (`memory stats|info|report|pools|cleanup|
+integrity|leak|stress`).
 
-**Key Features:**
-- **Real-Time Monitoring**: Tracks heap, PSRAM, LVGL, and DMA memory usage with statistics
-- **Memory Pools**: Ultra-conservative fixed-size pools (2×256B + 2×128B = 768 bytes) for fragmentation prevention
-- **Automatic Health Checks**: Periodic heap corruption detection and low-memory warnings
-- **Diagnostic Interface**: Complete serial command system for memory analysis and debugging
-- **Crash Prevention**: Robust error handling prevents memory-related system failures
-
-**Available Commands:**
-```bash
-memory stats          # Current memory statistics
-memory info           # Memory layout information
-memory report         # Comprehensive system report
-memory pools          # Pool usage and statistics
-memory cleanup        # Force cleanup (screens+LVGL)
-memory integrity      # Check heap integrity
-memory leak start/stop/report  # Leak detection tools
-memory stress         # Comprehensive stability test
-```
-
-**For Developers:**
-- Debug memory issues in real-time during development
-- Catch memory leaks before they reach production
-- Understand memory usage patterns of different features
-- Advanced tools for embedded system optimization
-
-**For End Users:**
-- Rock-solid stability - no random freezes or reboots
-- Long-term reliability for 24/7 operation
-- Responsive UI performance without memory fragmentation
-- Commercial-grade reliability for production products
-
-**Recovery Story:**
-The system was initially designed with larger pools (12KB+) which caused boot loops. Through careful analysis, we implemented ultra-conservative settings (768 bytes) that provide all benefits with perfect stability. This demonstrates proper embedded memory management - conservative, safe, and scalable.
+**Full guide**: [`docs/memory_management.md`](docs/memory_management.md).
 
 ## Development Best Practices
 
@@ -497,9 +313,10 @@ cfg.psram_trans_align = 64;             // PSRAM alignment
 **Post-Modularization Performance Notes** (Priority 1.1 Complete):
 - **General responsiveness**: Excellent for typical UI interactions
 - **Root causes of past issues**: I2C bus contention (RTC + IO Expander), LVGL object update frequency
-- **Optimization approach**:
-  - Priority 1.2 (I2C consolidation) improved performance
-  - IMU removed to eliminate I2C bus contention with GPS
+- **Optimization approach**: I2C consolidation into `i2c_manager` (see I2C Bus Architecture above)
+  improved performance. The IMU (QMI8658) is **not** removed — it's on the shared I2C bus and actively
+  used for compass tilt compensation; GPS is a UART peripheral, so there was never bus contention
+  between the two. An earlier version of this note claimed otherwise; that was wrong.
 
 **Performance Trade-offs Made**:
 - Modular architecture prioritized over maximum real-time performance
@@ -566,15 +383,16 @@ cc-radar/
 Detailed component documentation is available in the `docs/` directory:
 
 - [`docs/configuration.md`](docs/configuration.md) - Central configuration system and hardware variants
-- [`docs/display.md`](docs/display.md) - ST7701 display configuration and timing
+- [`docs/display.md`](docs/display.md) - ST7701 display configuration, timing, and rotation
 - [`docs/touch.md`](docs/touch.md) - CST820 touch controller integration
-- [`docs/waypoint_filtering.md`](docs/waypoint_filtering.md) - **NEW**: Waypoint filtering system and off-screen indicators
-- [`docs/beacon_direction_finding.md`](docs/beacon_direction_finding.md) - **NEW**: can we tell the direction to the beacon? (yes, via body-shadow DF — blocked on BLE rate work)
+- [`docs/waypoint_filtering.md`](docs/waypoint_filtering.md) - Waypoint filtering system and off-screen indicators
+- [`docs/beacon_direction_finding.md`](docs/beacon_direction_finding.md) - can we tell the direction to the beacon? (yes, via body-shadow DF)
 - [`docs/i2c.md`](docs/i2c.md) - I2C bus management and device communication
 - [`docs/memory_management.md`](docs/memory_management.md) - Advanced memory management system guide
-- [`docs/peripherals.md`](docs/peripherals.md) - RTC, GPS integration guides
-- [`docs/connectivity.md`](docs/connectivity.md) - WiFi/BLE implementation patterns
+- [`docs/peripherals.md`](docs/peripherals.md) - RTC and GPS integration guides
+- [`docs/wifi_implementation_guide.md`](docs/wifi_implementation_guide.md) / [`docs/wifi_power_management.md`](docs/wifi_power_management.md) - WiFi implementation and power patterns (BLE: see Beacon Proximity below)
 - [`docs/troubleshooting.md`](docs/troubleshooting.md) - Common issues and solutions
+- [`docs/documentation_standards.md`](docs/documentation_standards.md) - Full documentation process (see also Documentation Standards below)
 
 ## Development Environment
 
@@ -583,30 +401,17 @@ Detailed component documentation is available in the `docs/` directory:
 - **Serial Communication**: USB CDC (no external USB-to-serial required)
 - **Upload Speed**: 460800 baud (can increase to 921600 if stable)
 
-## Memory and Performance
-
-### **Memory Usage**
-- **PSRAM**: Used for LVGL framebuffers and large data structures
-- **SRAM**: Reserved for time-critical operations and interrupt handlers
-- **Flash**: 3MB available for application code
-
-### **Performance Characteristics**
-- **Display Refresh**: ~60 FPS with optimized timings
-- **Touch Responsiveness**: <50ms latency
-- **I2C Operations**: 400kHz bus speed (can reduce to 100kHz if unstable)
-- **WiFi Scanning**: Every 15 seconds (async)
-- **BLE Scanning**: Every 10 seconds (3-second active scan)
-
----
-
 ## Important Build Flags
 
 ```cpp
--DARDUINO_USB_MODE=1           // Enable USB mode
--DARDUINO_USB_CDC_ON_BOOT=1    // Enable USB CDC on boot
 -DLV_CONF_INCLUDE_SIMPLE       // LVGL simple configuration
 -Iinclude                      // Project headers
 ```
+
+USB CDC is configured via `sdkconfig.defaults`, not a build flag — the old Arduino-framework flags
+(`-DARDUINO_USB_MODE=1`, `-DARDUINO_USB_CDC_ON_BOOT=1`) that used to live here are gone; this is an
+ESP-IDF build (see PlatformIO Settings above). Flash is 16MB, running 4MB OTA app slots (see Memory
+Layout above) — not the 3MB figure this section previously stated, which was stale.
 
 ---
 
@@ -614,30 +419,16 @@ Detailed component documentation is available in the `docs/` directory:
 
 **Status**: Complete ✅ | [Complete Guide](docs/battery_monitoring.md)
 
-Visual battery percentage display on radar screen with comprehensive monitoring system.
-
-**Key Architecture**:
-- **Two Systems**: Monitoring (GPIO4 ADC sampling) + Display (UI label updates)
-- **Display Position**: Top-right at `-150px` offset (critical for circular clipping)
-- **Update Rate**: 5-second intervals via System Task
-- **Color Coding**: Green (>70%) → Yellow (50-70%) → Red (<50%)
-
-**Hardware**: GPIO4 (BAT_ADC), ETA6098 charging IC, 1:3 voltage divider (R5+R9)
+Visual battery percentage on the radar screen (GPIO4 ADC, ETA6098 charging IC, 1:3 divider), updated
+every 5s via the System Task, green/yellow/red at 70%/50% thresholds. **Display offset is `-150px`,
+not a smaller value** — `-50px` caused text cutoff and crashes near the circular display boundary.
+The display is round; any absolute-position UI element needs enough margin to stay inside the visible
+circle, not just inside the square 480×480 framebuffer (the same class of bug FT-09 hit for waypoints —
+see ROADMAP.md).
 
 **Serial Commands**: `battery status`, `battery monitor on|off`, `battery history`, `battery raw`
 
-**Critical Implementation Note**: Initial `-50px` offset caused text cutoff ("Ba" instead of full text) and system crashes. `-150px` provides safe margin from circular display boundary.
-
-**Code References**:
-- Display: `src/ui/ui_manager.cpp:204-210` - Label creation with safe positioning
-- Update: `src/utils/task_manager.cpp:695-714` - System Task battery updates
-- Monitoring: `src/hardware/sensors/battery.cpp` - ADC sampling and trend analysis
-- Interface: `include/hardware/sensors/battery.h` - BatteryStatus structure
-
-**Reference Documentation**:
-- Complete guide: [`docs/battery_monitoring.md`](docs/battery_monitoring.md)
-- Power management: [`docs/battery_power_management_implementation.md`](docs/battery_power_management_implementation.md)
-- Display summary: [`docs/battery_display_summary.md`](docs/battery_display_summary.md)
+**Full guide** (hardware, display, power, troubleshooting): [`docs/battery_monitoring.md`](docs/battery_monitoring.md).
 
 ---
 
@@ -645,33 +436,14 @@ Visual battery percentage display on radar screen with comprehensive monitoring 
 
 **Status**: Complete ✅ | [Complete Guide](docs/waypoint_filtering.md)
 
-Dual-strategy intelligent filtering system that prevents visual clutter while maintaining situational awareness.
+Dual-strategy filtering against clutter: **distance filtering** (shows waypoints within 10× the
+current zoom radius — adaptive, not a fixed cutoff) and **sector clustering** (max 8 off-screen
+indicators, one per compass sector, closest-per-sector — 50 off-screen waypoints collapse to 8
+triangles, not 50). The on/off-screen boundary test is **circular, not square** — see FT-09 in
+ROADMAP.md for why that distinction mattered. Read `wpt_us` off the `perf` HUD for current cost rather
+than trusting a fixed estimate — a "<2ms" figure once quoted here was never actually measured.
 
-**Key Architecture**:
-- **Strategy 1: Distance Filtering** - Shows waypoints within 10× zoom radius (adaptive threshold)
-- **Strategy 2: Sector Clustering** - Maximum 8 directional off-screen indicators (N, NE, E, SE, S, SW, W, NW)
-
-**Distance Examples**:
-- 10km zoom → shows waypoints within 100km (allows navigation planning beyond visible area)
-- 1km zoom → shows waypoints within 10km
-- 100m zoom → shows waypoints within 1km
-
-**Off-Screen Indicators**:
-- Orange triangles at screen edge (15px, 20px inset)
-- Maximum 8 indicators (one per compass sector)
-- Keeps only closest waypoint per sector
-- **Result**: 50 waypoints off-screen → only 8 indicators (prevents clutter)
-
-**Performance**: O(n) complexity, 128 bytes stack allocation. The "<2ms for 50 waypoints" figure once
-quoted here was never measured — waypoint drawing is ~5ms in the instrumented frame breakdown. Read
-`wpt_us` off the `perf` HUD rather than trusting either number.
-
-**Code References**:
-- Algorithm: `src/ui/navigation.cpp:291-395` - `drawWaypoints()` function
-- Config: `include/ui/ui_manager.h:54-81` - `RadarConfig::DISTANCE_FILTER_MULTIPLIER = 10.0f`
-- Off-screen drawing: `src/ui/navigation.cpp:250-289` - `drawOffScreenIndicator()`
-
-**Reference Documentation**: [`docs/waypoint_filtering.md`](docs/waypoint_filtering.md) - Complete technical deep-dive
+**Full guide**: [`docs/waypoint_filtering.md`](docs/waypoint_filtering.md).
 
 ---
 
@@ -679,105 +451,49 @@ quoted here was never measured — waypoint drawing is ~5ms in the instrumented 
 
 **Status**: Complete ✅ (2026-07-31) | [ADR-0001](docs/adr/0001-waypoint-detail-psram-cache.md)
 
-`Waypoint::desc`/`hint` (1024B + 256B each, × `MAX_WAYPOINTS`) live in **PSRAM**, not SRAM — they were
-the single largest firmware symbol (70,992 B, ~37% of static RAM at the `MAX_WAYPOINTS = 50` this
-migration was measured against) despite being read in exactly one place (the detail screen, one
-waypoint at a time). `MAX_WAYPOINTS` is now **500** (see [ADR-0022](docs/adr/0022-waypoint-cap-raised-to-500-not-700.md))
-— the 70,992 B figure is historical, from before this PSRAM move, not the current PSRAM block size.
+`Waypoint::desc`/`hint` live in a `WaypointDetail` block allocated once in **PSRAM**
+(`heap_caps_calloc(..., MALLOC_CAP_SPIRAM)` in `ui_manager::init()` — never a section attribute,
+`.ext_ram_noinit` boot-crashes on this IDF since constructors don't run for objects placed there);
+`Waypoint::desc`/`hint` are pointers into it, `nullptr`-guarded against a failed allocation.
 
-```cpp
-// include/ui/ui_manager.h
-struct WaypointDetail {           // allocated as one PSRAM block, MAX_WAYPOINTS entries
-    char desc[1024] = {};
-    char hint[256] = {};
-};
-struct Waypoint {
-    // ... lat/lon/valid/found/name/display_name stay in SRAM (hot, small) ...
-    char* desc = nullptr;         // points into the PSRAM WaypointDetail block
-    char* hint = nullptr;         // nullptr if PSRAM allocation failed — guard before use
-};
-```
+**⚠️ `sizeof(wp.desc)` is now `sizeof(char*)` (8), not the old buffer size.** Any code touching these
+fields must use `WaypointDetail::DESC_SIZE`/`HINT_SIZE` explicitly — this is a bitten-once footgun, not
+a hypothetical one.
 
-**Allocation**: `heap_caps_calloc(MAX_WAYPOINTS, sizeof(WaypointDetail), MALLOC_CAP_SPIRAM)` in
-`ui_manager::init()` — never a section attribute (`.ext_ram_noinit` boot-crashes on this IDF, since
-constructors aren't run for objects placed there).
+**Full reasoning** (the ~64KB SRAM-and-flash saving, and how the flash saving was confirmed via a
+`readelf` section diff rather than assumed): [ADR-0001](docs/adr/0001-waypoint-detail-psram-cache.md).
 
-**⚠️ `sizeof(wp.desc)` is now `sizeof(char*)` (8), not 1024.** Any code touching these fields must use
-`WaypointDetail::DESC_SIZE`/`HINT_SIZE` explicitly — this bitten-once footgun is why the guard exists.
-
-**Frees ~64KB SRAM — and flash too**, confirmed via a `readelf -S` section diff, not assumed:
-`g_ui_state` has non-zero-initialized fields (e.g. `current_zoom`'s default), so the whole object was
-placed in `.dram0.data` (a PROGBITS section — its zero bytes are literal zeros stored in flash and
-copied to RAM at boot) rather than the free `.dram0.bss`. `.dram0.bss` was byte-identical before/after
-the change; the entire saving came out of `.dram0.data`.
-
-This freed the SRAM headroom that made raising `MAX_WAYPOINTS` (50 → 500) affordable — see
-[ADR-0022](docs/adr/0022-waypoint-cap-raised-to-500-not-700.md) and ROADMAP.md.
-
-**Code References**:
-- Struct: `include/ui/ui_manager.h` - `WaypointDetail`, `Waypoint::desc`/`hint`
-- Allocation: `src/ui/ui_manager.cpp` - `init()`
-- Write site: `src/gpx/gpx_loader.cpp` - waypoint commit on `</wpt>`
-- Read site: `src/ui/waypoint_screen.cpp` - `open()`
+**Code References**: struct + allocation in `include/ui/ui_manager.h` / `src/ui/ui_manager.cpp`
+(`init()`); write site `src/gpx/gpx_loader.cpp` (waypoint commit on `</wpt>`); read site
+`src/ui/waypoint_screen.cpp` (`open()`).
 
 ---
 
 ## Waypoint Two-Tier Index
 
-**Status**: Implemented and field-verified on hardware 2026-08-05, against an independent Haversine oracle (cold selection, forced high-churn reselect, HDOP gating, live end-to-end nearby-waypoints test) | [ADR-0023](docs/adr/0023-two-tier-waypoint-index.md) | [Design doc](docs/waypoint_two_tier_index_plan.md)
+**Status**: Implemented and field-verified on hardware 2026-08-05 | [ADR-0023](docs/adr/0023-two-tier-waypoint-index.md) | [Design doc](docs/waypoint_two_tier_index_plan.md)
 
-`MAX_WAYPOINTS` (200, see above) is a **working-set** size, not a limit on how many waypoints the
-device knows about. Every waypoint across every GPX file is indexed separately in PSRAM
-(`gpx_index`, new module — `include/gpx/gpx_index.h`/`src/gpx/gpx_index.cpp`, up to 8192 lightweight
-`{lat, lon, file_offset, file_id, found}` entries), and `ui.waypoints[]` holds the 200 closest to the
-user's actual position, not whichever 200 happened to load first in filesystem order.
+`MAX_WAYPOINTS` (200) is a **working-set** size, not a cap on how many waypoints the device knows
+about. Every waypoint across every GPX file is indexed in PSRAM (`gpx_index`, up to 8192 lightweight
+entries), and `ui.waypoints[]` holds the 200 closest to the user's actual position — reselected via a
+**delta** update (`gpx_loader::reselect()`, System Task, >150m movement) that only re-parses slots
+whose occupant actually changed, not the whole set. Skipped while the waypoint detail screen is open,
+so a slot can't be recycled out from under it.
 
-**Selection**: `gpx_loader::selectAndMaterialize()` — Haversine (`utils/geo.h`, deliberately *not* the
-equirectangular approximation `navigation.cpp` uses for rendering, since index candidates can be
-globally distributed) + `std::partial_sort` over the PSRAM index, then `fseek` + re-parse only the
-winning entries, grouped by file to minimize SD reopens.
+**Concurrency note, still relevant**: `ui.waypoints[]` now has two writers (UI Task taps, System Task
+reselect), so three UI-Task write sites picked up `ui_state_mutex` protection. Render-path *reads*
+remain unprotected — a deliberate, narrow risk accepted in ADR-0023, not an oversight.
 
-**Kept current as the user moves**: `gpx_loader::reselect()`, called from the System Task
-(`task_manager.cpp::updateStatusLabels()`) when GPS has moved >150m *and* the index holds more entries
-than the working set. It's a **delta** reselect — a surviving entry never changes slots, so only the
-few slots whose occupant actually changed get `fseek`+re-parsed, not the whole set. Skipped entirely
-while the waypoint detail screen is open (`ui.screen_waypoint != nullptr`), so a slot can't be recycled
-out from under a screen the user is looking at.
+**Still open** (unresolved, not just historical): the automatic GPS-driven reselect trigger hasn't been
+observed firing from real non-injected movement, and concurrent SD access during a reselect is
+unverified — no SD-access mutex exists anywhere in this codebase.
 
-**Working-set stability** (the new correctness concern this design introduces): `fixed_waypoint_index`
-survives a reselect if its slot's source index-entry is unchanged before/after — reselect never moves a
-survivor, so this is an equality check, not a lat/lon re-resolve. `selected_waypoint_index` is cleared
-defensively on every reselect. `Waypoint::found` now has `IndexEntry.found` (keyed by PSRAM index
-entry, not SRAM slot) as its source of truth, written through via `gpx_loader::markWaypointFound()` so
-it survives the slot being recycled later. Three UI-Task write sites
-(`navigation.cpp::handleTapAt()`'s selection/found writes, `waypoint_screen.cpp`'s fix/unfix button)
-picked up `ui_state_mutex` protection for their `Waypoint` struct writes, since `ui.waypoints[]` is no
-longer written only at discrete load events — the System Task's reselect is now a second, ongoing
-writer. Render-path *reads* remain unprotected, matching this codebase's pre-existing writer-takes-it/
-reader-mostly-doesn't convention (see ADR-0023's Consequences for why that's an accepted, narrow risk
-rather than an oversight).
+**Full detail** (selection algorithm, measured SRAM/PSRAM cost, field-verification methodology against
+an independent Haversine oracle): [ADR-0023](docs/adr/0023-two-tier-waypoint-index.md).
 
-**Measured cost**: +3,640 B static SRAM for the whole feature (`MAX_WAYPOINTS` held at 200 throughout,
-isolated from ADR-0022's unrelated cap history via a `readelf -S` diff, not the `pio run` summary
-percentage alone). PSRAM: index + selection scratch ≈ 250KB, well under 16% of the 8MB chip.
-
-**Field verification**: cold selection and a forced high-churn reselect (174/200 slots, Sydney-area
-synthetic center) both matched an independent Haversine oracle exactly on real hardware; HDOP gating
-and the 150m movement threshold's stationary-silence both behaved correctly; a live end-to-end test
-writing 50 fresh waypoints near the real GPS position and reloading put them correctly at the top of
-the working set. This pass also caught two real bugs — `gpx_loader::init()` was never called anywhere
-(the whole feature was silently dead until fixed), and a test-file generator violated the parser's
-one-element-per-line assumption. **Still open**: the automatic GPS-driven reselect call site wasn't
-observed firing from real (non-injected) movement, and concurrent SD access during a reselect is
-unverified (no SD-access mutex exists anywhere in this codebase). Full detail in ADR-0023.
-
-**Code References**:
-- Index: `include/gpx/gpx_index.h` / `src/gpx/gpx_index.cpp`
-- Selection/reselect: `src/gpx/gpx_loader.cpp` - `selectAndMaterialize()`, `reselect()`, `buildFileIndex()`
-- Movement trigger: `src/utils/task_manager.cpp` - `updateStatusLabels()`
-- Haversine helper: `include/utils/geo.h` / `src/utils/geo.cpp`
-- Stability audit: `src/ui/navigation.cpp` (`handleTapAt()`), `src/ui/waypoint_screen.cpp` (fix/unfix)
-- Debug verification commands: `src/utils/diagnostics.cpp` - `gpx index list/reselect/gentest`
+**Code References**: `include/gpx/gpx_index.h`/`src/gpx/gpx_index.cpp` (index); `src/gpx/gpx_loader.cpp`
+(`selectAndMaterialize()`, `reselect()`); `src/utils/task_manager.cpp` (movement trigger);
+`src/utils/diagnostics.cpp` (`gpx index list/reselect/gentest` debug commands).
 
 ---
 
@@ -785,51 +501,18 @@ unverified (no SD-access mutex exists anywhere in this codebase). Full detail in
 
 **Status**: Complete ✅ | [Complete Guide](docs/navigation_modes.md)
 
-Dual-mode navigation system allowing users to choose between heading-up (walking direction always points "up") and north-up (fixed north orientation).
+Dual-mode: **heading-up** (default — radar rotates so the user always moves "forward") and
+**north-up** (fixed orientation). Solves the reported "when I turn left the radar moved left"
+disorientation.
 
-**Key Architecture**:
-- **Heading-Up Mode** (Default) - Radar rotates to match GPS heading, user always moves "forward"
-- **North-Up Mode** (Classic) - North fixed at top, traditional map orientation
-- **Stationary Handling** - 10-second timeout, then revert to north-up (GPS heading unreliable when stopped)
+**Heading Source — the compass (QMC5883L), not GPS.** GPS heading fusion was removed entirely; the
+compass is read at 10Hz and is the sole source of `ui.current_heading`. GPS still supplies *position*
+(UBX NAV-PVT), not heading. **There is no stationary fallback/timeout anymore** — a compass works
+standing still, so the old "10s then revert to north-up" behavior this project once had doesn't exist
+in current code (two struct fields survive as dead leftovers — see the doc for which ones, don't
+resurrect logic around them without checking first).
 
-**User Problem Solved**: "when I turn left my brain was expecting to move forward but in the radar I was moving left" - cognitive dissonance eliminated
-
-**Heading Source** — ⚠️ **this is now the compass, not GPS.** GPS heading fusion was removed from
-`navigation.cpp` entirely; the QMC5883L is the sole heading source, read at 10Hz by the System Task
-and applied via `ui.current_heading`. GPS still supplies *position*, over **UBX** (NAV-PVT), not NMEA.
-The description below is retained only to explain the older design:
-- ~~NMEA RMC sentence fields 7-8 (speed + course)~~ — GPS is UBX binary; RMC is not parsed
-- ~~Reliability threshold: 0.5 knots minimum speed~~ — no longer applicable, a compass works at rest
-- ~~Update rate: 1 Hz~~ — heading updates at 10Hz from the compass
-
-**Coordinate Rotation**:
-- 2D rotation matrix: `-heading` radians (counterclockwise)
-- Applied in `latLonToScreen()` after Haversine calculation
-- All waypoints/indicators rotate around user position
-
-**North Indicator** (Heading-Up Mode Only):
-- Red circle (30px) with white "N" text
-- Position: 50px from screen edge
-- Rotates to always point toward true north
-- Shows absolute orientation while radar rotates
-
-**Settings Integration**:
-- NVS persistence: `heading_up_mode` (default: true)
-- Settings UI: Settings > Display > Navigation Mode dropdown
-- Real-time switching (no restart required)
-
-**Performance**: <1ms rotation overhead for 50 waypoints @ 240MHz, +1,848 bytes flash
-
-**Code References**:
-- GPS parsing: `src/hardware/sensors/gps_bh880.cpp:37-90` - UBX NAV-PVT course/speed extraction
-- Rotation: `src/ui/navigation.cpp:98-118` - `rotatePoint()` function
-- North indicator: `src/ui/navigation.cpp:248-286` - `drawNorthIndicator()`
-- Update logic: `src/ui/navigation.cpp:528-541` - Three-state heading management
-- Settings: `src/ui/settings_screen.cpp:1012-1051` - Navigation mode dropdown
-
-**Industry Standard**: Found in aviation GPS (3 modes), marine chart plotters, automotive navigation (Google Maps, Waze), hiking GPS (Garmin), and professional surveying equipment.
-
-**Reference Documentation**: [`docs/navigation_modes.md`](docs/navigation_modes.md) - Complete user guide and technical details
+**Full guide** (rotation math, settings persistence, code references): [`docs/navigation_modes.md`](docs/navigation_modes.md).
 
 ---
 
@@ -837,95 +520,35 @@ The description below is retained only to explain the older design:
 
 **Status**: Complete ✅ | [Complete Guide](docs/beacon_proximity.md)
 
-BLE-based item finder that activates at 50m zoom. Scans for a configured beacon MAC address and provides real-time visual arc gauge + sonar audio feedback.
+BLE item finder, active at 50m zoom only: cyan arc gauge + buzzer sonar (tempo continuous and linear
+in dBm, not zoned — RSSI ≈ C − 20·log₁₀(d), so equal dBm steps are equal distance ratios) as a
+configured beacon MAC gets closer. NimBLE stack, ~25KB SRAM.
 
-**Key Architecture**:
-- **Visual**: Cyan arc fills clockwise around radar edge (0° = no signal, 355° = full at -45 dBm EMA RSSI)
-- **Audio**: Buzzer sonar pulses at 1800ms → 200ms as beacon gets closer
-- **Zoom-gated**: Only activates at 50m zoom — stops when zooming out
-- **RSSI Processing**: EMA (α=0.4) + zone hysteresis (±3 dBm) + trend detection over 10 samples
-- **BLE Stack**: NimBLE (`h2zero/NimBLE-Arduino@^1.4.0`) — ~25KB SRAM (was ~65KB with Bluedroid)
+**Three load-bearing warnings, easy to re-break**:
+- **The tag must advertise in Legacy (BLE 4.0) mode.** Extended Advertisement/PHY Coded (BLE 5.0) is
+  completely invisible — indistinguishable from a dead tag (-127 dBm, silent). `beacon status`
+  disambiguates: high `Scan callbacks` with `0 matched target` means the scan is healthy and the tag
+  is the problem.
+- **Passive scanning is load-bearing, not a power choice** — active scanning defers NimBLE's
+  `onResult` callback until the scan response arrives for a legacy `ADV_IND` advertiser; passive
+  delivers on the advertisement itself.
+- **`setAdvertisedDeviceCallbacks(cb, wantDuplicates)` silently re-enables the duplicate filter** if
+  called after an explicit `setDuplicateFilter(false)` — this exact footgun already broke
+  `debugScanAll()` once.
 
-**Zone Thresholds** — the zone decides *whether* to beep and whether to show the solid CLOSE fill.
-It no longer decides the tempo:
-- OUT_OF_RANGE: < -90 dBm (silent, no ring)
-- VERY_FAR / FAR / MEDIUM: -90 / -85 / -75 dBm
-- CLOSE: ≥ -65 dBm (solid fill + ball + star)
+**Beacon has absolute priority over the waypoint sonar** — `isInRange()` releases any fixed waypoint
+outright rather than just yielding the buzzer, since a fix would otherwise re-take the sonar the
+moment the beacon dipped out of range.
 
-**Sonar tempo is continuous and linear in dBm** — 1500 ms at -90 dBm → 150 ms at -50 dBm, driven by
-`rssi_display` (the slow EMA), **not** `rssi_ema`. A first cut used `rssi_ema` and it beat audibly
-unsteady — RSSI wobbles ±3-5 dB standing still, and over this 40 dB span that's a ~25% swing in beat
-period. A continuous tempo only glides if the value driving it is itself smooth. Four discrete rates
-made a search unnavigable before that: most of it happens inside one zone, where moving produced no
-audible change, and someone hunting listens for *change in response to their own movement*, not
-absolute level. Linear in dBm is exact, not approximate — RSSI ≈ C − 20·log₁₀(d), so equal dBm steps
-are equal distance *ratios*.
+**Settings**: target MAC, measured power (dBm @ 1m), path loss exponent — NVS-persistent (`bcn_*`).
+**Serial**: `beacon status|scan|test|zone|trend`.
 
-**Beep duration encodes trend, continuously** — interpolated from the raw regression slope
-(`trend_slope_dbm_s`), saturating at ±2 dBm/s: 30 ms neutral ± up to 30 ms, floored at 12 ms. A first
-cut switched on the 3-state `MovementTrend` enum instead, and it was the worst part of the result —
-standing still the slope hovers near zero, so the classifier flipped
-APPROACHING/STABLE/DEPARTING at random and the beep length jumped 60→30→12 ms beat to beat. The buzzer
-has no pitch, but duration was already a free parameter, and "warmer/colder" beats absolute level when
-the environment, tag orientation and your own body all shift the absolute.
+**Direction finding** ("which way do I walk?") is unblocked (was rate-limited at 2Hz, now 4.24-4.37Hz)
+but not yet built — body-shadow DF via the compass, since true BT 5.1 AoA needs hardware this board
+doesn't have. Design: [`docs/beacon_direction_finding.md`](docs/beacon_direction_finding.md).
 
-**Beacon has absolute priority over the waypoint sonar.** When `beacon_proximity::isInRange()` is
-true, `updateWaypointFixSonar()` **releases the fixed waypoint** outright — a beacon is a thing to
-find, a fixed waypoint is an area you walk into. Merely yielding the buzzer wasn't enough: a fix keeps
-every other waypoint hidden and would re-take the sonar as soon as the beacon dipped out of range.
-
-**Settings**: Target MAC, measured power (dBm @ 1m), path loss exponent — all NVS-persistent (`bcn_*` keys)
-
-**Serial Commands**: `beacon status`, `beacon scan`, `beacon test`, `beacon zone`, `beacon trend`
-
-**✅ The 2 Hz rate starvation is fixed and verified on hardware** (§7.3a–d, built 2026-07-31). The feed
-was capped at one RSSI sample per 500 ms by three independent things — NimBLE's duplicate filtering, a
-`g_pScan->stop()` on first hit, and a 500 ms poll loop — while the tag advertised at 200 ms. It is now
-**one continuous passive scan** running forever, duplicates off, results not stored. Measured live on
-device: **4.24–4.37 Hz** (mean gap ~230 ms), up from 2.0 Hz — ~89 advertisements/sec delivered across
-~30 nearby devices, 69 matching the target MAC in one sample window. **This was never a CPU problem —
-240 MHz bought it nothing.**
-
-Everything derived from that feed was re-derived with it, which is the actual lesson: both EMAs are
-now **τ-based off measured elapsed time** (0.5 s fast / 2.0 s slow) rather than fixed per-sample α,
-zone confirmation is a **duration** (1000 ms) rather than a sample count, and the trend slope is
-regressed against **real time** in dBm/s rather than per-cycle. Left alone, every one of those would
-have silently changed meaning by 2.5–5× the moment the rate moved.
-
-The two τ constants split **decision vs presentation**, not just "fast vs slow": `rssi_ema` (0.5 s)
-feeds zone classification and trend, which have their own hysteresis/confirmation downstream, so
-latency hurts more than noise there. `rssi_display` (2.0 s, raised from an initial 1.0 s after the
-tempo it drives came out choppy) feeds the ring width and sonar tempo, which are shown/heard **raw** —
-there noise is the whole problem, and rhythm error is far more perceptible than visual lag.
-
-**⚠️ The tag must advertise in Legacy (BLE 4.0) mode.** `CONFIG_BT_NIMBLE_EXT_ADV` is not set, so the
-firmware only receives legacy advertisements. A tag switched to *Extend Advertisement* or *PHY Coded*
-(BLE 5.0) is **completely invisible**, and the symptom is indistinguishable from a dead tag: -127 dBm,
-OUT_OF_RANGE, silent. `beacon status` distinguishes them — a large `Scan callbacks: N total` with
-`0 matched target` means the scan is healthy and the tag is the problem.
-
-**Passive scanning is load-bearing, not just a power choice.** With active scanning and a legacy
-`ADV_IND` advertiser, NimBLE withholds the `onResult` callback until the scan response arrives
-(`NimBLEScan.cpp`). Passive short-circuits that and delivers on the advertisement itself.
-
-⚠️ **`setAdvertisedDeviceCallbacks(cb, wantDuplicates)` calls `setDuplicateFilter(!wantDuplicates)`
-internally** — calling it after the explicit `setDuplicateFilter(false)` silently puts the feed back
-to 2 Hz. `debugScanAll()` did exactly this and is now fixed. See
-[`docs/beacon_proximity.md`](docs/beacon_proximity.md).
-
-**Direction finding** ("which way do I walk?") was **blocked on that rate work and is now unblocked** —
-at 2 Hz a rotation yielded 1.7 samples per 30° bin (noise); at 5–10 Hz it yields 4–8, which is usable.
-Body-shadow DF using the compass; true BT 5.1 AoA is impossible on this hardware (single antenna, no
-CTE IQ). Design: [`docs/beacon_direction_finding.md`](docs/beacon_direction_finding.md).
-
-**Code References**:
-- Arc drawing: `src/ui/navigation.cpp:390-420` - `drawBeaconProximityGauge()`
-- BLE module: `src/hardware/connectivity/beacon_proximity.cpp` - scanning, EMA, zones
-- Zoom gating: `src/utils/task_manager.cpp:79-94`
-- Serial commands: `src/utils/diagnostics.cpp:1255-1403`
-- Settings UI: `src/ui/settings_screen.cpp:1241-1310`
-
-**Reference Documentation**: [`docs/beacon_proximity.md`](docs/beacon_proximity.md)
+**Full guide** (RSSI EMA/τ derivation, zone thresholds, the 2Hz→4.24Hz rate-starvation fix, code
+references): [`docs/beacon_proximity.md`](docs/beacon_proximity.md).
 
 ---
 
@@ -1136,22 +759,4 @@ belongs at the link, not duplicated above it.
 
 *This document serves as the master reference for ESP32-S3 Touch LCD projects. Keep it updated as the architecture evolves.*
 
-**Last updated**: 2026-08-06 (`FW_VERSION` changed from `vYY.MM.DD` to `vYY.MM.##`, a per-build
-counter within the month recovered by parsing the previously committed `fw_version_gen.h` rather than
-a separate state file — see ADR-0025. Same day, earlier: GPX storage moved from SD to FFat, with a
-one-time boot migration for already-uploaded files and a storage-usage gauge on the web GPX manager;
-the web `/logs` page and its endpoints are now gated behind `dev_mode` (404 when off), and its info
-text now states plainly that logs live on SD while GPX now lives on flash — **field-verified
-2026-08-06**, pre-migration waypoints survived and load correctly from FFat (the logs-page gating and
-bulk select/download UI not specifically exercised), see ROADMAP.md's
-"GPX Storage: Move from SD to FFat" and CHANGELOG.md. Same day, earlier: OTA partitions grown 2MB →
-4MB/slot, reclaimed from the previously-unused 11.7MB FFat partition — revised same day from an
-initial 3.5MB pass once the reflash-vs-web-portal recoverability asymmetry was weighed against FFat's
-already-oversupplied headroom, see ADR-0024's addendum. Found in the same investigation: `field_log`
-has no teardown path, so dev-mode-off doesn't fully stop it — tracked as FT-08 in ROADMAP.md.
-Previously: 2026-08-05, two-tier waypoint index added
-— PSRAM full index + SRAM closest-N working set, `MAX_WAYPOINTS` stays 200, see ADR-0023. Same day,
-earlier: `MAX_WAYPOINTS` raised 50 → 500 then rolled back to 200 after a boot failure; Haversine
-replaced with equirectangular approximation in `drawWaypoints()`/`latLonToScreen()`, see ADR-0022.
-Previously: 2026-07-31, waypoint desc/hint moved to PSRAM, freeing ~64KB SRAM and flash; full-subsystem
-performance audit: beacon BLE rate, sonar rhythm, direction-finding feasibility)
+**Last updated**: 2026-08-06 — see [CHANGELOG.md](CHANGELOG.md) for the full history.

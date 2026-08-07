@@ -37,7 +37,10 @@ cfg.timings.flags.pclk_idle_high = 0;
 cfg.psram_trans_align = 64;
 
 // Full-frame LVGL buffer (480 lines = 1 flush/frame, eliminates screen wipe artifact)
-// cfg.bounce_buffer_size_px not used — full-frame buffers in PSRAM instead
+// A 10-line SRAM bounce buffer IS configured and active (BOUNCE_BUFFER_LINES = 10,
+// system_config.h) — this ESP-IDF version supports it despite an older, incorrect
+// note elsewhere claiming otherwise.
+cfg.bounce_buffer_size_px = 10 * 480; // ~10 lines, ~18.75KB
 
 // Framebuffer in PSRAM
 cfg.flags.fb_in_psram = 1;
@@ -68,6 +71,36 @@ static const int DATA_PINS[16] = {
 #define LCD_CLK_PIN    2  // SPI Clock
 // LCD_CS controlled via IO expander (software CS)
 ```
+
+## Rotation — Tiled Transpose, Not `sw_rotate`
+
+The panel is physically mounted 90° CCW in the enclosure; software must compensate 90° CW. **The
+default rotation path is a tiled transpose performed inside the flush callback
+(`rotate90_tiled`, `src/core/device_manager.cpp`), not LVGL's built-in `sw_rotate`.** This is a
+deliberate rewrite, not the original approach — see [ADR-0004](adr/0004-tiled-transpose-display-rotation.md).
+
+```cpp
+disp_drv.sw_rotate = 0;              // OFF in the default (TILED) mode
+disp_drv.rotated   = LV_DISP_ROT_90; // still set — drives the pixel-order transpose
+disp_drv.full_refresh = 1;           // REQUIRED in TILED mode — see below
+```
+
+**Why not `sw_rotate`**: LVGL's built-in software rotation works but was measurably slower than a
+transpose written for this project's specific memory layout (PSRAM framebuffer, SRAM scratch tile).
+The transpose scatters into a small internal-SRAM tile so both PSRAM streams it reads/writes stay
+sequential, rather than doing a naive strided copy.
+
+**`full_refresh` is not a free choice in this mode.** The transpose rewrites the *entire* back
+framebuffer every flush; a partial-area flush would leave the rest of the frame holding two-frames-old
+pixels. `full_refresh` is derived from the active rotation mode at both init and any runtime rotation
+switch, and must move with it — see load-bearing constraint #3 in CLAUDE.md's Render Pipeline section.
+
+**Runtime-switchable for comparison/measurement**: `rot on|off|tiled` (serial command) toggles between
+the tiled path, LVGL's `sw_rotate`, and no rotation at all — useful for A/B performance checks, not
+something to leave off `tiled` in normal operation.
+
+Full measured cost breakdown and the four render-pipeline invariants this interacts with: CLAUDE.md's
+Render Pipeline section and [ADR-0008](adr/0008-zero-copy-render-path-invariants.md).
 
 ## Initialization Sequence
 
