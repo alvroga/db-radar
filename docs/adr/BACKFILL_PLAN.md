@@ -9,7 +9,8 @@ Everything from here to "Outcome" is the original pre-run spec, unedited.
 ## Why this is a backward pass, and why it's low-priority
 
 The project has months of decisions recorded in prose — CHANGELOG.md (2070 lines), ROADMAP.md,
-`docs/performance_optimization_backlog.md` (1925 lines), and git history — but not in the ADR format.
+`docs/performance_optimization_backlog.md` (trimmed to ~1,100 lines 2026-08-07, still ~1,925 in git
+history before that), and git history — but not in the ADR format.
 Going forward, new decisions get an ADR at the time they're made (see CLAUDE.md → Documentation
 Standards), so this backlog stops growing today. Reconstructing the old ones is pure archaeology: it
 makes the index faster to scan later but blocks nothing, so it's a good candidate for an overnight /

@@ -9,17 +9,16 @@ Decided by: Claude (backfilled from project history 2026-07-31)
 The panel is mounted 90° CCW in the enclosure — required so the GPS module clears the enclosure
 indent and has sky visibility (ROADMAP, commit `ff82116` message) — so the image must be rotated 90°
 before it reaches glass. That rotation cannot happen in the display hardware: the ST7701 in RGB mode
-has no line buffer for MADCTL `MV`, so it can do a 180° flip but not a 90° swap
-(`docs/performance_optimization_backlog.md:1727-1729`; confirmed independently in the `ff82116`
-commit message: "ST7701 in RGB mode cannot do 90 in hardware"). Software rotation was therefore not
-one option among several from the start — it was the only one available — and shipped as
-`disp_drv.sw_rotate = 1` / `LV_DISP_ROT_90` in v0.11.0 (2025-10-21, CHANGELOG).
+has no line buffer for MADCTL `MV`, so it can do a 180° flip but not a 90° swap (confirmed
+independently in the `ff82116` commit message: "ST7701 in RGB mode cannot do 90 in hardware").
+Software rotation was therefore not one option among several from the start — it was the only one
+available — and shipped as `disp_drv.sw_rotate = 1` / `LV_DISP_ROT_90` in v0.11.0 (2025-10-21,
+CHANGELOG).
 
 By 2026-07-28 that software rotation was the single largest cost in a 499ms frame. LVGL's
 `draw_buf_rotate_90_sqr` walks points 960 bytes apart, missing the data cache on ~3 of 4 accesses —
-measured at 162ms/frame by A/B (284ms refresh with `sw_rotate=1` vs 122ms without,
-`docs/performance_optimization_backlog.md:1722-1725`, `ff82116`). Three real alternatives were
-weighed at that point, not two:
+measured at 162ms/frame by A/B (284ms refresh with `sw_rotate=1` vs 122ms without, `ff82116`). Three
+real alternatives were weighed at that point, not two:
 - **Option A — tiled transpose in the flush callback**, keeping source rows and destination columns
   resident in the 32KB dcache instead of striding.
 - **Option B — pre-rotate the drawn geometry** instead of the pixels. Free for the radar's
@@ -27,8 +26,9 @@ weighed at that point, not two:
   would render sideways. Ruled out.
 - **Option C — remount the panel** in its native orientation. Zero software cost, but blocked by the
   same enclosure/GPS constraint that caused the 90° mount in the first place. Ruled out.
-(`docs/performance_optimization_backlog.md:1713-1748`, explicitly: "Neither is available; do not
-re-propose them.")
+(Options B and C were explicitly closed as "not available; do not re-propose them" — the original
+proposal text lived in `docs/performance_optimization_backlog.md`'s pre-measurement analysis, trimmed
+2026-08-07; preserved in git history as of that date.)
 
 ## Decision
 

@@ -11,6 +11,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+**Trimmed `docs/performance_optimization_backlog.md` from 2,116 to ~1,140 lines (2026-08-07)**
+
+Condensed the repeated stage-by-stage `perf` HUD capture tables (superseded by CLAUDE.md's Render
+Pipeline section and the C1–C7 completed-work entries) and removed the original 2026-07-27
+pre-measurement analysis (Tiers 0–3, the "measure first" section) outright — it predated every real
+measurement in the document and two of its confident conclusions were wrong, in ways already
+corrected inline elsewhere. Preserved in full in git history as of this date; the architectural
+decisions it led to are recorded properly in ADR-0004, ADR-0005, ADR-0007, ADR-0008. Kept intact:
+the live work queue (with its stale "I2C freeze root cause unsupported" bullet corrected to point at
+the actual fix, ADR-0021), the "residual trap" methodology section (referenced from CLAUDE.md), §7/§8
+(beacon and sonar/buzzer audits — ROADMAP.md's "Full analysis" link targets), and the all-steps status
+table. `ADR-0004`'s citations into the removed section were also decoupled from exact line numbers so
+the removal doesn't strand them. No code changes.
+
 **Hoisted per-waypoint `cos`/`sin` out of the radar render loop (2026-08-07) — backlog §3.6**
 
 `rotatePoint()` recomputed `cos()`/`sin()` (double-precision) for every waypoint, every frame, even
