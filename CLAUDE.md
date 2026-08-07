@@ -469,8 +469,9 @@ for current cost rather than trusting a fixed estimate — a "<2ms" figure once 
 actually measured. Off-screen indicators are tappable (2026-08-07) — opens the same waypoint detail
 screen an on-screen dot would, showing a one-shot live distance (meters/km via Haversine). **Fixing**
 a waypoint (on- or off-screen) shows a separate, continuously-updating distance readout + "locked on"
-icon — auto-releases past `RadarConfig::FIXED_WAYPOINT_MAX_DISTANCE_M` (100km), a safety net, not a
-normal-use limit.
+icon (hand-drawn `lv_canvas`, not an LVGL symbol — see [ADR-0029](docs/adr/0029-custom-canvas-fixed-waypoint-icon.md))
+— auto-releases past `RadarConfig::FIXED_WAYPOINT_MAX_DISTANCE_M` (100km), a safety net, not a
+normal-use limit. Field-verified 2026-08-07.
 
 **Full guide**: [`docs/waypoint_filtering.md`](docs/waypoint_filtering.md).
 

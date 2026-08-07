@@ -381,7 +381,11 @@ struct RadarConfig {
 
 ## Touch Interaction and Distance Display
 
-**Status**: Implemented 2026-08-07, extended same day, build-verified (not yet field-tested)
+**Status**: Implemented 2026-08-07, extended same day. The "Live tracking while fixed" extension
+below (auto-unfix cap raise, `fixed_waypoint_icon`, `DISTANCE_FILTER_MULTIPLIER` 10×→100×) is
+**field-verified 2026-08-07** — confirmed working on hardware, including fixing a waypoint beyond the
+old 20km cap. The base tappable-off-screen-indicator feature it builds on was build-verified only as
+of this writing.
 
 Off-screen indicators are tappable, same as on-screen waypoint dots. `drawWaypoints()`
 (`navigation.cpp`) persists each drawn indicator's screen position, source waypoint index, and
@@ -399,9 +403,13 @@ feature conflated them, so the distinction is worth stating explicitly:
   under 1km and `"%.1f km"` at or above it. Computed once when the screen opens — cheap (a single
   Haversine call), not a per-frame cost. Hidden without a GPS fix.
 - **Live tracking while fixed**: the existing middle-left `waypoint_distance_label` ("Fixed: Xm"/"Fixed:
-  X.X km") and its `fixed_waypoint_icon` (a small dot-in-ring canvas above the label, matching the
-  on-radar waypoint beacon's own color, tap target for the same action) update continuously while a
-  waypoint is fixed — same widgets whether the fixed waypoint is on-screen or off-screen. Previously
+  X.X km") and its `fixed_waypoint_icon` (a 45×45 dot-in-ring canvas above the label, monochrome
+  white/black matching the rest of the HUD — not the on-radar waypoint beacon's yellow/dark-orange,
+  an early pass used that color but it read as "same color as a map object" rather than a status
+  icon; hand-drawn on `lv_canvas` rather than an LVGL symbol or image asset, see
+  [ADR-0029](adr/0029-custom-canvas-fixed-waypoint-icon.md) — tap target for the same action) update
+  continuously while a waypoint is fixed — same widgets whether the fixed waypoint is on-screen or
+  off-screen. Previously
   this auto-unfixed at a hardcoded 1km regardless of how far the fixed waypoint was, which made fixing
   anything off-screen effectively non-functional (it would fix and immediately auto-release next
   frame). The cap is now `RadarConfig::FIXED_WAYPOINT_MAX_DISTANCE_M` (100km, raised from an initial

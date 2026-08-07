@@ -12,7 +12,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 **GPX web manager: storage gauge and file count now refresh after upload/delete, not just on page
-reload (2026-08-07) — build-verified, not yet field-tested**
+reload (2026-08-07) — field-verified**
 
 The "Flash storage (GPX)" gauge and "GPX files" count are already live reads (`esp_vfs_fat_info("/ffat")`
 and a directory listing, both queried fresh per request — no reboot or device-side caching was ever
@@ -25,10 +25,11 @@ refresh the count" line from the page's own Auto-load info box, and added a smal
 `.`/`..`/`...` ellipsis (`data-loading` attribute + a 400ms interval) to the "loading" placeholder text
 on `storageText`/`fileCountText` so the initial fetch doesn't read as stalled.
 
-`pio run` clean. Flash +1,072 B (embedded HTML/JS string), RAM unchanged. Not yet tested on hardware.
+`pio run` clean. Flash +1,072 B (embedded HTML/JS string), RAM unchanged. **Field-verified 2026-08-07**:
+confirmed working on hardware.
 
 **Fixed-waypoint live distance now works for off-screen waypoints; added a "locked on" icon;
-off-screen indicator range raised 10×→100× (2026-08-07) — build-verified, not yet field-tested**
+off-screen indicator range raised 10×→100× (2026-08-07) — field-verified**
 
 Follow-up to the "Off-screen waypoint indicators: tappable" change directly below. That change added
 a one-shot DISTANCE row to the waypoint detail screen, but the actually-requested behavior — the same
@@ -63,7 +64,8 @@ a farther/off-screen waypoint would show "Fixed:" for one frame and then immedia
   own addendum) and then superseded by the two-tier PSRAM index (ADR-0023).
 
 `pio run` clean. RAM +6,072 B (dominated by the 45×45 `TRUE_COLOR_ALPHA` canvas buffer, ~6,075 B at
-`LV_COLOR_DEPTH=16`) / Flash +724 B. Not yet tested on hardware.
+`LV_COLOR_DEPTH=16`) / Flash +724 B. **Field-verified 2026-08-07**: confirmed working on hardware,
+including fixing an off-screen waypoint beyond the old 20km cap.
 
 **Off-screen waypoint indicators: tappable, and distance now shown on the detail screen
 (2026-08-07) — build-verified, not yet field-tested**

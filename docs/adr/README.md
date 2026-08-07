@@ -57,11 +57,14 @@ date — sort on that for chronology, not on the filename.
 | [0024](0024-ota-partitions-grown-from-unused-ffat.md) | OTA partitions grown to 4MB by reclaiming unused FFat; GPX storage moving off SD | 2026-08-06 | Accepted, revised same day (3.5MB → 4MB) |
 | [0025](0025-version-scheme-monthly-build-counter.md) | `FW_VERSION` monthly build counter recovered from the committed header, not a separate state file | 2026-08-06 | Accepted |
 | [0026](0026-crt-scanline-brightness-rejected.md) | CRT scanline effect built and measured, rejected on brightness | 2026-08-06 | Rejected — reverted, no code shipped |
+| [0027](0027-remove-sd-ffat-gpx-migration.md) | Remove SD→FFat GPX auto-migration entirely | 2026-08-07 | Accepted |
+| [0028](0028-defer-gpx-reload-to-explicit-endpoint.md) | GPX upload/delete no longer auto-reload; client calls `/reload` once per batch | 2026-08-07 | Accepted |
+| [0029](0029-custom-canvas-fixed-waypoint-icon.md) | Custom `lv_canvas` icon for the fixed-waypoint status indicator, not an `LV_SYMBOL_*` glyph or image asset | 2026-08-07 | Accepted |
 
 ## Status
 
 - **Going forward**: new architectural decisions get an ADR at the time they're made (see CLAUDE.md
-  → Documentation Standards). Next free number: **0027**.
+  → Documentation Standards). Next free number: **0030**.
 - **Historical backfill**: ✅ complete (2026-08-01). ADRs 0004–0017 were reconstructed from
   CHANGELOG.md, ROADMAP.md, `docs/performance_optimization_backlog.md`, the component docs and git
   history, following [`BACKFILL_PLAN.md`](BACKFILL_PLAN.md). They carry
