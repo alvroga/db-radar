@@ -11,6 +11,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+**SD→FFat GPX auto-migration removed — was silently restoring deleted files (2026-08-07)**
+
+Field-testing quest deletion (delete-all on 18 GPX files via the web manager) surfaced a real bug:
+files reappeared, unchanged, on the very next reboot, and again on a second reboot. Root cause:
+`gpx_loader::migrateFromSDIfNeeded()` (shipped same-day as ADR-0024) decided whether to copy files
+from the old SD location into FFat based on "is the FFat gpx folder currently empty" — a heuristic
+that can't tell "never migrated" apart from "user just deleted everything on purpose." The original
+migration copied from SD, never deleting the SD source, so an intentional delete-all made FFat empty
+again and the next boot silently re-copied every "deleted" file straight back. Fixed in two passes:
+first replaced with an NVS-flag-gated one-time purge that also deleted the stale SD copies (field-
+verified — deleted files stayed deleted across reboots), then removed entirely at your request, since
+dormant automatic-delete logic has no reason to keep living in the firmware once it's done its job.
+FFat is now the sole, permanent source of truth for GPX files — no migration path exists in either
+direction. Files: `src/gpx/gpx_loader.cpp`, `CLAUDE.md`, `ROADMAP.md`.
+Full reasoning: [ADR-0027](docs/adr/0027-remove-sd-ffat-gpx-migration.md).
+
+**`gpx_index` file capacity raised for quests: `file_id` widened to `uint16_t`, `MAX_INDEX_FILES` 64
+→ 512 (2026-08-07)**
+
+Prep work ahead of the Quests feature (see `docs/quests_plan.md`), which will make many more,
+smaller GPX files realistic than the current handful of large ones. `gpx_loader.cpp`'s two
+`open_file_id = 0xFF` sentinels made any `uint8_t`-typed `file_id` cap unsafe past 254 (255 collides
+with the sentinel). Rather than just raising the byte-frugal cap again, re-examined the type itself:
+a compiled struct-layout test confirmed widening `file_id` to `uint16_t` costs **zero** extra PSRAM
+per `IndexEntry` (absorbed by existing 4-byte struct alignment padding, since `float`/`uint32_t`
+members already force the struct to that boundary), while `uint32_t` would have cost +32KB for no
+benefit. Sentinels widened to `uint16_t open_file_id = 0xFFFF` to match, `MAX_INDEX_FILES` raised to
+512 (a `static_assert` now pins it below `0xFFFF`). Also added `gpx index genfiles <lat> <lon>
+[count]` / `genfiles clean` debug commands (`diagnostics.cpp`) — the existing `gentest` command only
+ever stress-tested `MAX_INDEX_ENTRIES` (many waypoints in one file); there was no existing way to
+stress-test `MAX_INDEX_FILES` (many separate files) at all. `pio run` clean; RAM/Flash static usage
+unaffected (the file table is PSRAM-only). Hardware stress test at 512 files not yet run.
+Full reasoning: `docs/quests_plan.md` §0.5.
+
 **CRT scanline render effect built, measured on hardware, and reverted — rejected on brightness, not
 performance (2026-08-06)**
 

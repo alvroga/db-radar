@@ -52,12 +52,16 @@ that quests happen to need. Treat it as its own change, landed before or alongsi
   found-silencing) is reused, but the target selection changes from "the fixed waypoint" to
   "the nearest in-range waypoint, fixed or not." 50m is purely the sonar gate/tempo range — it
   does not affect whether a tap can mark found.
-- **Tap-to-confirm generalizes the same way, but keeps its own separate, stricter gate: 15m.**
+- **Tap-to-confirm generalizes the same way, and the gate is being tightened: 15m → 10m.**
   Tapping any waypoint (fixed or not) only marks it found if the live GPS distance to it is
-  ≤15m — same hard threshold as today's fixed-waypoint-only code (`found_dist <= 15.0f`,
-  `:1421`), just no longer conditioned on `i == ui.fixed_waypoint_index`. Being anywhere in the
-  50m sonar range is not sufficient by itself; the tap only confirms inside 15m. This is not the
-  user's recalled 10m — verified against the actual constant.
+  ≤10m — a deliberate reduction from today's fixed-waypoint-only threshold
+  (`found_dist <= 15.0f`, `:1421`, changes to `10.0f`), no longer conditioned on
+  `i == ui.fixed_waypoint_index`. **RESOLVED 2026-08-06**: chosen over 5m or leaving it at 15m
+  because 10m already exists as a breakpoint in the proximity-star zone tiers (10m/25m/50m,
+  `:708-737`) — tightening to it reuses an existing constant instead of introducing a new magic
+  number, and stays above realistic outdoor GPS noise (~3-5m CEP, worse under canopy) where 5m
+  risked frustrating near-misses. Being anywhere in the 50m sonar range is not sufficient by
+  itself; the tap only confirms inside 10m.
 
 **RESOLVED — sonar target selection:** presence of *any* waypoint within 50m gates the sound on;
 tempo is driven by `min(distance)` across all in-range waypoints, re-evaluated continuously. This
@@ -66,13 +70,124 @@ off-screen clustering, `:758-761`), just framed as "range gates, nearest-distanc
 whichever one is currently nearest naturally drives the tempo each update, with no separate
 target-lock step. This is independent of tap-to-confirm: which waypoint gets marked found is
 decided by the existing screen-coordinate hit-test in `handleTapAt()` (whichever pin was actually
-tapped), not by proximity ranking — no conflict even if two waypoints both sit inside the 15m
+tapped), not by proximity ranking — no conflict even if two waypoints both sit inside the 10m
 confirm radius at once.
 
-**OPEN — needs a decision before implementation:**
-1. **Does the proximity star generalize too?** i.e. does *any* nearby waypoint show the pulsing
-   zone star, or does the star stay reserved for the explicitly-fixed one while sonar/tap-confirm
-   go general? Not yet decided.
+**RESOLVED 2026-08-06 — proximity star generalizes too.** The pulsing zone star is no longer
+reserved for the explicitly-fixed waypoint; it follows the same "nearest in-range waypoint" target
+selection as sonar, so fixing a waypoint is purely a UX convenience (declutter + distance label +
+unfix-by-tap), not a precondition for any proximity feedback.
+
+---
+
+## 0.5 Prerequisite: `gpx_index` file-capacity headroom
+
+Not quest-specific in origin — `gpx_index` (the two-tier waypoint index, ADR-0023, built
+2026-08-05) predates the quest brainstorm entirely and was never discussed in it before this pass.
+It resurfaced 2026-08-06 while scoping quest capacity, because quests turn out to be the worst
+case for one of its two independent budgets.
+
+**The two budgets, verified against `include/gpx/gpx_index.h`:**
+- `MAX_INDEX_ENTRIES = 8192` — one slot per **waypoint**, shared across every file.
+- `MAX_INDEX_FILES = 64` — one slot per **GPX file**, regardless of how many waypoints it holds.
+  A quest file with 10 waypoints costs exactly the same 1 file-slot as a 500-waypoint pocket
+  query.
+
+**Problem — quests are file-level (§2), so they hit the file budget, not the entry budget:**
+
+| File type | Typical waypoints/file | Files to exhaust 8192 entries | What actually binds |
+|---|---|---|---|
+| Heavyweight geocaching pocket query | ~500 | ~16 | Entry cap (16 ≪ 64 files) |
+| Lightweight personal waypoint sets | ~50 | ~164 | File cap (64×50 = 3,200 entries — 39% of budget, then hard stop) |
+| Quests (one small file per quest) | ~5 | ~1,638 | File cap, massively (64×5 = 320 entries — **3.9%** of budget, then hard stop) |
+
+At today's cap, a user could have thousands of unused entry-slots left in PSRAM and still be
+refused the next quest purely because file-slots ran out. This is a real bug-in-waiting for
+quests specifically, caught only because capacity was checked before implementation, not after.
+
+**RESOLVED 2026-08-06 — first pass: raise `MAX_INDEX_FILES` 64 → 254, keep `file_id` as
+`uint8_t`.** `file_id`s are assigned sequentially from 0 (`gpx_index.cpp` `addFile()`).
+`gpx_loader.cpp:279` and `:466` both use `uint8_t open_file_id = 0xFF` as a sentinel meaning "no
+file open yet." At a cap of 256, the 256th file would get `file_id = 255 = 0xFF`, colliding with
+that sentinel — its waypoints would silently misbehave in the materialize pass. 254 kept every
+real id in `[0, 253]`, safely clear of the sentinel, enforced via `static_assert`. This closed the
+immediate collision risk, but left `uint8_t`'s 254-id ceiling as a hard wall — any future growth
+past it would hit the exact same collision problem again, with no headroom to expand into.
+
+**REVISED 2026-08-07 — widen `file_id` to `uint16_t`, raise `MAX_INDEX_FILES` to 512.** Reopened
+because 254 was itself an unexamined byte-frugality habit, not a hardware limit — the ESP32-S3
+(Xtensa LX7) is a 32-bit core with 32-bit registers; loading/comparing a `uint8_t`, `uint16_t`, or
+`uint32_t` costs the same one cycle. There is no CPU ceiling anywhere near this range. The only
+real question was PSRAM cost, so it was measured directly (compiled `IndexEntry` with each
+candidate type and checked `sizeof`/`offsetof` on this toolchain's alignment rules — float/
+`uint32_t` members force 4-byte struct alignment, matching what `gpx_index.cpp` already assumes):
+
+| `file_id` type | `sizeof(IndexEntry)` | Extra PSRAM (×8192 entries) |
+|---|---|---|
+| `uint8_t` (254-file plan) | 16 B | — |
+| `uint16_t` | 16 B | **+0 B — absorbed by existing padding** |
+| `uint32_t` | 20 B | +32,768 B |
+
+`IndexEntry` already pads `file_id`+`found` out to a 4-byte boundary, so `uint16_t` is a **free**
+upgrade — it fills padding that's already being spent and does nothing today. `uint32_t` would
+cost 32KB for a ceiling (4 billion files) nobody will ever approach; `uint16_t`'s own ceiling
+(65,535 files) is already three orders of magnitude past anything this project's storage could
+hold, so there's no reason to pay for the bigger type.
+
+```cpp
+constexpr int MAX_INDEX_FILES = 512;
+static_assert(MAX_INDEX_FILES < 0xFFFF, "0xFFFF is gpx_loader.cpp's open_file_id sentinel");
+```
+`gpx_loader.cpp`'s two sentinels become `uint16_t open_file_id = 0xFFFF;`. This makes the cap a
+pure capacity/PSRAM-cost choice again (matching how `MAX_INDEX_ENTRIES` already works), not
+something dictated by an accidental type ceiling. 512 was chosen as a round number well past any
+realistic quest/waypoint file count, not because it's close to any limit — PSRAM cost and the
+graceful-degradation bounds check (below) mean there's no cliff to size against, unlike
+`MAX_WAYPOINTS`'s real SRAM boot-failure cliff in ADR-0022.
+
+PSRAM cost at the new numbers: entries table unchanged (`uint16_t` is free, per above); file
+table = 512 × `sizeof(IndexFile)` (96B) = 49,152B (~48KB) vs the original 64-file baseline's
+6,144B (~6KB) — a ~42KB delta, trivial against PSRAM's already-abundant budget (ADR-0001/
+ADR-0023 framing).
+
+**`MAX_INDEX_ENTRIES` is untouched by any of this — still 8192, and still an independent
+budget.** `file_id` is only a per-file tag stamped onto each waypoint entry; widening its type or
+raising the file count has no effect on how many total waypoints the entry table holds. The two
+budgets still fail independently in either direction — many nearly-empty files can exhaust the
+file budget while entries sit mostly unused, or a few huge files can exhaust entries while the
+file budget sits mostly unused — which is the mismatch this section exists to track.
+
+**Checked, no other landmine found — for both the cap raise and the type widening:** `file_id`
+is used *only* inside `gpx_index.{h,cpp}` and 5 sites in `gpx_loader.cpp` (forward decl,
+`addFile()`/`buildFileIndex()` call, and the two sentinel blocks) — no other fixed-size array or
+format string is keyed to it, and it's never serialized over the web API (the `/list` endpoint
+identifies files by filename via `readdir()`, not by `file_id`), so widening the type doesn't
+touch `gpx_server.cpp` at all. The web `/list` endpoint (`gpx_server.cpp:1221`) already streams
+per-file via `httpd_resp_send_chunk`, no fixed buffer, scales to any count. FFat/FAT32
+subdirectories handle far more than 512 entries. One pre-existing, unrelated-but-adjacent
+observation: `/list` reads the FFat directory directly via `readdir()`, independent of
+`gpx_index`'s cap — so today, files beyond whatever the index could track are already invisible
+to the on-device index while still listed on the web page. Raising the cap narrows that gap,
+doesn't create it.
+
+**One real, unmeasured cost (not a blocker):** boot/full-rescan I/O time scales with how many
+files *actually* exist, not with the ceiling itself. Never measured at 200+ small files — the
+stress test (see Verification) is the first real data point, and it's a single measurement at the
+target count, not a search for a breaking point: PSRAM cost is cheap and `addFile()` already
+degrades gracefully past the cap (returns -1, logs, doesn't crash), so unlike ADR-0022's
+`MAX_WAYPOINTS` there's no hidden allocation cliff to hunt for.
+
+**REJECTED — separate `quests/` and `waypoints/` indexes (two independent PSRAM pools).** Same
+failure mode ADR-0023 already rejected once for alternative (b), "per-file caps": that was
+*geography*-blind ("a single dense local file would starve out every other file's waypoints");
+splitting the full index by category would be *category*-blind the same way — whichever pool
+fills first wins, regardless of which files are actually more relevant, and a fixed split can't
+adapt to a usage ratio (quest files vs. regular files) nobody knows yet. It would also add real
+complexity: since quest waypoints must compete with regular ones for the same 200-slot working
+set purely by distance (§0 — quests render like any other waypoint, no distance-filter
+interaction), `reselect()` would have to merge-sort across two PSRAM pools instead of one, just
+to get back to behavior the single shared index already gives for free. One shared index, bigger
+cap — chosen.
 
 ---
 
@@ -110,7 +225,7 @@ struct IndexFile {
 struct IndexEntry {
     float    lat, lon;
     uint32_t file_offset;
-    uint8_t  file_id;
+    uint16_t file_id;         // widened from uint8_t 2026-08-07 — see §0.5, free (padding-absorbed)
     bool     found;
     uint32_t name_hash = 0;   // new — FNV-1a of <name>, stable persistence key
 };
@@ -149,13 +264,12 @@ every rescan/reboot — but that's explicitly not this pass's problem to fix).
 
 ### 5. Completion feedback
 
-**OPEN — reconsider vs. earlier default.** Original default (text + chirp, zero new
-infrastructure) still stands: `buzzer::doubleBeep()` plus a temporary `lv_label` on the radar
-screen (same construction as the existing FOUND banner in `waypoint_screen.cpp`, auto-deleted
-via `lv_timer`). But LVGL pixel art turns out to be cheap — a small indexed-format icon (e.g.
-32×32 1-bit = 128 bytes) can be hand-authored as a `const lv_img_dsc_t` living in flash, no
-conversion tool or PSRAM/heap allocation needed. Worth a real decision, not defaulting to text
-just because "image" sounded expensive — it isn't, at this size.
+**RESOLVED 2026-08-06 — text placeholder now, icon later.** For this pass: `buzzer::doubleBeep()`
+plus a temporary `lv_label` reading "Quest Completed" (or similar — exact copy TBD) on the radar
+screen, same construction as the existing FOUND banner in `waypoint_screen.cpp`, auto-deleted via
+`lv_timer`. Zero new infrastructure. The pixel-art icon idea isn't dropped — it's superseded by
+the badge system (§7 below), which now has firmer headroom to justify it, so the pop-up will grow
+an icon once badge decoding exists rather than as a standalone effort.
 
 ### 6. Web GPX manager (`src/gpx/gpx_server.cpp`)
 
@@ -170,6 +284,113 @@ just because "image" sounded expensive — it isn't, at this size.
   from the new `gpx_index` helpers.
 - `UPLOAD_HTML`'s file-list rendering gets a small quest badge + "X/N found" next to quest
   entries.
+
+### 7. Badges (quest completion reward) — raised 2026-08-06, needs its own scoping pass
+
+Concept: completing a quest doesn't just fire a one-shot toast (§5) — it unlocks a small icon
+("badge") tied to that quest's name, kept permanently as a collection. Author's intent: the badge
+should be as simple as possible to *create* — small enough to write by hand as a hex string
+directly inside the quest's GPX file, no build tooling required, mirroring how `<quest:group>`
+already keeps quest authoring to "edit a text file."
+
+**RESOLVED 2026-08-06 — icon format, validated against a real reference badge, then tested.** User
+supplied an actual pixilart-style achievement badge; measured directly (PIL): **32×32 px, RGBA, 6
+unique colors** (transparent + white + near-black + 3 shading tones), 52% transparent pixels. That
+established the *shape* of the format:
+- **4bpp / 16-color indexed palette, with one slot reserved transparent.** LVGL's indexed formats
+  only exist in 1/2/4/8-bit steps; the reference badge's 6 colors don't fit in 2-bit (4 colors),
+  so 4-bit is the floor, not a stylistic pick — and 16 slots against real-world 4-6 colors used
+  leaves headroom for more elaborate badges without a format change.
+- Model is SNES-style palette discipline (small fixed per-sprite palette + index-per-pixel), not
+  SNES-style tile/OAM composition — no sprite-layering or tilemap system is needed, just this one
+  static indexed bitmap per badge. Maps directly onto LVGL's native `LV_IMG_CF_INDEXED_4BIT`,
+  where the palette is stored immediately before the pixel data in the same buffer — no custom
+  on-device decoder beyond "parse hex into that byte layout."
+
+**RESOLVED 2026-08-06 — resolution: 24×24 is the standard, not 32×32.** Two real test badges were
+built to check whether shrinking below the 32×32 reference loses legibility: a broad-shape badge
+(5-point star, circular ring) and a controlled same-glyph test at both sizes using 百 ("hundred") —
+deliberately a harder case than the star, dense fine strokes rather than a broad shape. Both stayed
+legible at 24×24; 百 got a bit blockier (less breathing room between strokes) but remained
+unambiguously readable. Since storage was never the real constraint (§0.5/below confirm this at
+either size), the choice came down to visual quality only, and 24×24 held up even for the hard
+case — so it's the default. Sizes at 4bpp:
+- **24×24 (standard): 288 bytes pixel data (576px × 4 bits) + 32 bytes palette (16 × RGB565) =
+  320 bytes = 640 hex characters.**
+- **32×32 (optional, larger tier): 512 + 32 = 544 bytes = 1,088 hex characters.** Kept available
+  for a rare/legendary badge that genuinely needs more room — two overlapping design elements, not
+  just one dense glyph — not as the default.
+- RGB565 matches the display's native pixel format directly, no per-draw conversion, at either
+  size.
+
+**Encoding**: a second tag alongside `<quest:group>` in the same `<extensions>` block, e.g.
+`<quest:badge>`, containing the hex string above. **§1's `buildFileIndex()` extension already
+visits `<extensions>` once per file** (it's adding `<quest:group>` parsing there this pass) —
+`<quest:badge>` would piggyback on that same scan rather than being a second pass.
+
+**RESOLVED 2026-08-06 — storage, corrected from an earlier wrong assumption.** This section
+originally claimed badge pixel data "doesn't need duplicating — it lives in the GPX file already,
+re-decoded on demand." **That's wrong and has been superseded**: an earned badge must survive
+independent of the source quest file's fate (edited, re-uploaded, or deleted) — it's a trophy, not
+a cached view of the file. Re-decoding on demand would mean deleting a completed quest's GPX also
+deletes the achievement, which defeats the point of a permanent collection.
+
+Corrected design:
+- On quest completion, decode the badge once from `<quest:badge>` and write it as its own file
+  into a **new, dedicated `/ffat/badges/` directory** — separate from `/ffat/gpx`, the directory
+  `gpx_index::buildFileIndex()` scans.
+- **`/ffat/badges/` is deliberately NOT registered with `gpx_index` at all** — no file-table slot,
+  no entry-table slots. This keeps badge storage fully decoupled from §0.5's file-capacity budget;
+  earning badges can never compete with quest/waypoint file capacity, and vice versa.
+- On-disk format: the same 320B (24×24) / 544B (32×32) palette+packed-pixel layout used in the
+  `<quest:badge>` hex tag, stored as raw binary — no need to keep the hex-text encoding once it's
+  off the human-authored GPX file and onto internal device storage.
+- Listing: a plain `readdir()` over `/ffat/badges/` when a badge collection view is opened — no
+  PSRAM index needed; realistic badge counts are bounded by however many quest files can ever
+  exist (≤512 after §0.5's 2026-08-07 revision), and even that worst case is cheap (below).
+- **Recomputed cost, corrected model** (this is now a real allocation, not "free" reuse of the
+  source file — but still trivial in absolute terms): worst case, all 512 quest-capable files earn
+  a badge → 512 × 320B (24×24, the standard) ≈ 160KB, or 512 × 544B (32×32, the larger tier) ≈
+  272KB. Both ≈2–3.5% of the ~7.69MB FFat budget. Storage still isn't the real constraint — it
+  just needed the honest mechanism.
+- §4's NVS quest-scoped persistence (found `name_hash`es, per-waypoint progress within an
+  *in-progress* quest) is unchanged by this — it's still tied to the source GPX file's continued
+  existence, for tracking partial progress. The new `/ffat/badges/` file is the separate,
+  permanent record created once at completion, independent of §4 from that point on.
+- **Collection UI**: naturally belongs on the deferred dedicated quest-tracking screen (see
+  "Explicitly out of scope" below) as a badge shelf/gallery — not this pass, but this data model
+  (badge is its own file, completion is a bool) shouldn't need to change when that screen gets
+  built.
+
+**Open, not yet resolved:**
+1. At 640 hex characters (24×24 standard) or 1,088 (32×32 tier), hand-typing a badge is
+   unrealistic — this needs a small PNG→hex encoder (script now, ideally folded into the web
+   quest/waypoint creator once that's scoped, so authoring is "draw pixels" not "write hex"). Not
+   a blocker for the on-device decode/render side, which doesn't care how the hex was produced.
+2. Whether §5's completion pop-up icon and the "permanent badge" are literally the same asset
+   (one `<quest:badge>` tag drives both) or conceptually separate.
+3. Badge filename scheme on `/ffat/badges/` — needs a stable, collision-safe name (candidate: a
+   hash of `quest_name`, mirroring §4's `name_hash` pattern for waypoints, or a sanitized slug).
+   Not nailed down.
+4. No code has been read for this section yet (unlike §0.5 and §1-6, which were verified against
+   `gpx_loader.cpp`/`gpx_index.h`/`navigation.cpp`/`gpx_server.cpp`) — treat the storage/parsing
+   sketch above as a plausible shape, not a verified plan, until an explore pass confirms it
+   against the actual code.
+
+---
+
+## Design philosophy: web = preparation, radar = the vessel
+
+Raised 2026-08-06, framing note for all quest-related web work (§6, §7, and the future-ideas
+items below), not a new technical decision. The device's round 480×480 display is a poor place to
+read text or do rich input — so the intent is to push as much of the "game" (browsing quests,
+picking what to load, seeing badges collected, authoring new content) into the web UI, and keep
+the radar itself as the in-field execution surface: walk, watch the sonar/star, tap to confirm.
+**The existing web GPX manager (§6) and the not-yet-built web quest/waypoint creator (future
+ideas, below) need to share a visual identity** — same look and feel — so moving between "manage
+what I have" and "create something new" reads as one continuous tool, not two unrelated pages.
+This has no code implication yet; flagging it now so the creator (when scoped) is designed to
+match §6's existing page rather than drifting into its own style.
 
 ---
 
@@ -191,58 +412,109 @@ code, no files read for this section yet — recorded here so it isn't lost, not
 to build. Resolve into a real §-numbered design (with code references, like the rest of this doc)
 before implementation.
 
-**Quest creation in the web GPX manager.** §6 above only covers *tagging an existing GPX file*
-as a quest at upload time (a "Quest name" field on top of the existing upload flow). It does not
-cover *authoring* a new quest from scratch in the browser — i.e., a flow to create a new GPX file
-with new waypoints (name/lat/lon/description per waypoint) and the `<quest:group>` tag, without
-the user having built the GPX file externally first. Needs its own scoping pass: how are
-waypoints entered (manual lat/lon fields? tap-a-map?), does it reuse `upload_handler`'s
-`<extensions>` injection or need a new "create" endpoint, how many waypoints is reasonable to
-author through a form on an ESP32-hosted page.
+**Quest creation — RESOLVED 2026-08-06 (location, not design): lives in the web waypoint
+creator, not a bolt-on to §6's upload form.** §6 only covers *tagging an existing GPX file* as a
+quest at upload time. Authoring a new quest from scratch (new waypoints — name/lat/lon/description
+per waypoint — plus the `<quest:group>` and `<quest:badge>` tags) belongs in a general-purpose web
+GPX/waypoint creator, which doesn't exist yet in any form and needs improving/building as its own
+effort — quests are one option within it, not a separate tool. Still needs its own scoping pass
+once that creator's baseline (non-quest) design is settled: how are waypoints entered (manual
+lat/lon fields? tap-a-map?), does it reuse `upload_handler`'s `<extensions>` injection or need a
+new "create" endpoint, how many waypoints is reasonable to author through a form on an
+ESP32-hosted page. See "Design philosophy" above for why this creator and §6's existing manager
+need to look like one tool.
 
-**Manager needs more visibility, not just upload/tag.** The current `/list` + `UPLOAD_HTML`
-surface (§6) is upload-and-badge only. Idea, still fuzzy: richer per-quest info in the web UI —
-progress (already planned, §6's "X/N found"), but also things like which waypoints specifically
-are found vs. outstanding, and possibly a map view of the quest's waypoints (plotted against
-lat/lon, not necessarily live device position). Needs a brainstorm pass on what's actually useful
-to see there before it becomes a design — this is the open half of the idea, not a decision.
+**Manager needs more visibility, not just upload/tag — confirmed direction, still fuzzy on
+specifics.** The current `/list` + `UPLOAD_HTML` surface (§6) is upload-and-badge only. Confirmed:
+more visibility is worth building. Still open: richer per-quest info in the web UI — progress
+(already planned, §6's "X/N found"), which waypoints specifically are found vs. outstanding, a
+lat/lon map view of the quest's waypoints, and now also a badge collection view (§7). Needs a
+brainstorm pass on what's actually useful to see there before it becomes a design.
 
 Both of these are extensions of the same underlying tool (the web GPX manager), so they likely
 land together: a better authoring/management surface for quests, not just the tag-on-upload path
-in §6. Revisit once §0–§6 above are built and there's a real quest to manage.
+in §6. Revisit once §0–§0.5 and §1–§7 above are built and there's a real quest to manage.
 
 ---
 
 ## Open decisions to resolve before implementation
 
-1. Does the proximity star generalize to any nearby waypoint, or stay fixed-only (§0)?
-2. Completion reward: text+chirp vs. a small hand-authored pixel-art icon (§5).
+All of §0, §0.5, and §1-6's original open decisions are now resolved (star generalizes, tap
+radius is 10m, completion feedback is text+chirp for this pass, `file_id` widened to `uint16_t`
+and file cap raised to 512, badge resolution is 24×24, badge storage is a separate
+`/ffat/badges/` file). What's still open:
+
+1. Whether the completion pop-up icon and the permanent badge are the same asset (§7.2).
+2. Badge filename scheme on `/ffat/badges/` (§7, item 3).
+3. §7 hasn't been verified against actual code yet — needs the same explore-agent pass §0.5 and
+   §1-6 got.
+4. Web waypoint/quest creator — not scoped at all yet beyond "it should exist, quests are an
+   option within it, and it's the natural home for a badge pixel-editor" (future ideas section).
+5. Web manager visibility improvements (found/outstanding breakdown, map view, badge gallery) —
+   confirmed direction, no concrete design (future ideas section).
+6. **Execution risk, not a design gap**: `MAX_INDEX_FILES = 512` (with `file_id` as `uint16_t`)
+   and 24×24 badges are design decisions, not yet field-tested. The planned stress test
+   (Verification, below) is the first real data point on boot/rescan time at high file counts. If
+   it breaks, the fallback is lowering `MAX_INDEX_FILES` — nothing else in the design depends on
+   the specific value beyond the `static_assert`'s `< 0xFFFF` bound.
 
 ---
 
 ## Files to touch
 
-- `src/ui/navigation.cpp` — §0 generalization (sonar target selection, clickable distance
-  label, star scope per decision #2); quest-completion check after the existing found
-  write-through.
-- `include/gpx/gpx_index.h` / `src/gpx/gpx_index.cpp` — `IndexFile`/`IndexEntry` extensions,
-  quest query helpers, NVS load/save for quest found-hashes.
-- `src/gpx/gpx_loader.cpp` — extend `buildFileIndex()`'s fast scan for `<quest:group>` + `<name>`
-  hashing; wire persistence into `markWaypointFound()`.
+- `include/gpx/gpx_index.h` / `src/gpx/gpx_index.cpp` — **§0.5, DONE 2026-08-07**:
+  `MAX_INDEX_FILES` 64 → 512, `IndexEntry::file_id`/`addEntry()`/`getFileName()` widened
+  `uint8_t` → `uint16_t`, `static_assert(MAX_INDEX_FILES < 0xFFFF, ...)` against the
+  `open_file_id` sentinel. `pio run` clean, RAM/Flash static usage unaffected (the file table is
+  PSRAM-only). Still open: `IndexFile`/`IndexEntry` extensions, quest query helpers, NVS load/
+  save for quest found-hashes.
+- `src/ui/navigation.cpp` — §0 generalization (sonar + star target selection to nearest in-range
+  waypoint, clickable distance label, 10m tap-confirm gate); quest-completion check after the
+  existing found write-through; completion pop-up (§5, text placeholder this pass).
+- `src/gpx/gpx_loader.cpp` — **§0.5, DONE 2026-08-07**: both `open_file_id` sentinels widened to
+  `uint16_t open_file_id = 0xFFFF`, `buildFileIndex()`'s signature widened to match. Still open:
+  extend the fast scan for `<quest:group>` + `<quest:badge>` + `<name>` hashing; wire found-state
+  persistence into `markWaypointFound()`; **new**: on quest completion, decode `<quest:badge>`
+  and write it to `/ffat/badges/` (§7).
+- `src/utils/diagnostics.cpp` — **new, DONE 2026-08-07**: `gpx index genfiles <lat> <lon>
+  [count]` / `genfiles clean` debug commands, mirroring `gentest`'s pattern but generating up to
+  600 *separate* files (1 waypoint each) instead of many waypoints in one file — `gentest` only
+  ever exercised `MAX_INDEX_ENTRIES`, never `MAX_INDEX_FILES`, so there was no existing tool that
+  could stress-test the file-count cap itself. Times the reload and reports index-truncation
+  state, for the hardware stress test below.
+- **New**: badge file I/O (write-on-completion, `readdir()`-based collection listing) — home TBD,
+  likely a small new module (`gpx_badges.cpp`?) or folded into `gpx_loader.cpp`; not yet decided
+  which file owns this.
 - `src/gpx/gpx_server.cpp` — upload param handling, `<extensions>` injection, `/list` response
-  fields, `UPLOAD_HTML` quest name field + badge/progress display.
+  fields, `UPLOAD_HTML` quest name field + badge/progress display. Web waypoint/quest creator and
+  richer manager visibility (future ideas section) are separate, unscoped work in this same file.
 
 ## Documentation (per this project's standards)
 
 New subsystem → CHANGELOG.md entry, a `docs/quests.md` component doc, an ADR for the
 tagging-mechanism decision (extensions tag vs. filename convention vs. separate manifest — a
-real alternative was rejected) and likely a second ADR for the fix/sonar generalization (a real
-behavior change to an existing, previously-deliberate design), and a ROADMAP.md status update
-once built.
+real alternative was rejected), likely a second ADR for the fix/sonar generalization (a real
+behavior change to an existing, previously-deliberate design), and likely a third ADR for the
+`gpx_index` file-capacity raise + rejected quests/waypoints split, including the `uint8_t` →
+`uint16_t` `file_id` widening and its measured zero-cost padding finding (§0.5 — two real
+alternatives, citing ADR-0023's precedent and a direct struct-layout measurement, were rejected/
+superseded). ROADMAP.md status update once built.
 
 ## Verification
 
-- `pio run` clean build.
+- `pio run` clean build — **done 2026-08-07**, `uint16_t` widening + `MAX_INDEX_FILES = 512`
+  compiles clean, `static_assert` passes, static RAM/Flash unaffected.
+- **Stress-test `MAX_INDEX_FILES = 512` with up to 512 small quest-shaped GPX files** (few
+  waypoints each, matching §0.5's "quests are the worst case" scenario) on real hardware — **not
+  yet run, next step.** Use the new `gpx index genfiles <lat> <lon> 512` debug command (writes
+  512 real 1-waypoint files, times the reload, reports `MAX_INDEX_ENTRIES`-truncation state); a
+  second run at `count=600` exercises the past-512 "file table full" degrade path on purpose.
+  Watch boot/full-index-scan time (never measured at this file count) and confirm no correctness
+  regression (no `file_id`/sentinel collision at the `uint16_t` boundary, `/list` still correct,
+  working-set reselect still picks the true closest 200). Clean up with `gpx index genfiles
+  clean` when done. **If anything breaks, roll back `MAX_INDEX_FILES` to a lower value** —
+  nothing else in the design is hard-coded to 512 specifically, and `uint16_t` leaves headroom to
+  land anywhere below it without another type change.
 - Hand-author a synthetic quest GPX (multiple `<wpt>` + the extensions tag), respecting the
   parser's one-element-per-line assumption (a prior test-file generator violated this during the
   two-tier index verification pass — same constraint applies here).
@@ -252,3 +524,6 @@ once built.
   quest waypoint in range, confirm `found` sets and persists through the existing
   `gpx index list`-style diagnostic command; confirm completion feedback fires on the last one;
   reboot the device and confirm progress is still there.
+- **New**: complete a quest end-to-end, confirm a badge file appears in `/ffat/badges/`; delete
+  or re-upload the source quest GPX and confirm the badge survives (the whole point of §7's
+  corrected storage design).

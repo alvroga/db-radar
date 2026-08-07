@@ -131,6 +131,12 @@ found while investigating the logging side of this decision —
 not fully stop it once started at boot — tracked in ROADMAP.md, not blocking this partition change
 since dev logging stays on SD regardless of this ADR.
 
+**Update 2026-08-07**: the SD→FFat migration mentioned above was found to have a real bug (couldn't
+tell "never migrated" apart from "user deleted everything on purpose," so a delete-all silently
+resurrected old files from SD) and was removed entirely — see
+[ADR-0027](0027-remove-sd-ffat-gpx-migration.md). FFat is now the sole, permanent source of truth for
+GPX files; nothing in this codebase reads from or writes to `/sdcard/gpx` anymore.
+
 **A repartition itself requires a full USB reflash** — it cannot be pushed as an OTA update, since
 the running firmware's understanding of partition offsets is baked in at build time and a mismatched
 table between old and new firmware is exactly the failure case OTA can't safely cross.

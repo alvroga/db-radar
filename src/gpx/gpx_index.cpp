@@ -50,7 +50,7 @@ int addFile(const char* name) {
     return id;
 }
 
-bool addEntry(float lat, float lon, uint32_t file_offset, uint8_t file_id) {
+bool addEntry(float lat, float lon, uint32_t file_offset, uint16_t file_id) {
     if (!g_alloc_ok) return false;
     if (g_entry_count >= MAX_INDEX_ENTRIES) {
         g_truncated = true;
@@ -78,7 +78,7 @@ const IndexEntry& getEntry(int idx) {
     return g_entries[idx];
 }
 
-const char* getFileName(uint8_t file_id) {
+const char* getFileName(uint16_t file_id) {
     if (!g_alloc_ok || file_id >= g_file_count) return "";
     return g_files[file_id].name;
 }

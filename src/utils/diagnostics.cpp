@@ -24,6 +24,7 @@
 #include "hardware/sensors/accel_qmi8658.h"
 #include "navigation/tilt_compensation.h"
 #include <algorithm>
+#include <dirent.h>
 #include "field_log.h"
 #include "core/arduino_compat.h"
 #include "esp_core_dump.h"
@@ -1110,6 +1111,77 @@ void handleGPXCommand(const char* args) {
             }
         }
     }
+    else if (strncmp(args, "index genfiles clean", 21) == 0) {
+        // Removes every file genfiles wrote (by its distinct name prefix), then
+        // reloads so they drop out of the index. Debug-only.
+        DIR* dir = opendir("/ffat/gpx");
+        int removed = 0;
+        if (dir) {
+            struct dirent* e;
+            while ((e = readdir(dir)) != nullptr) {
+                if (strncmp(e->d_name, "CLAUDE_GENFILES_", 16) == 0) {
+                    char path[300];
+                    snprintf(path, sizeof(path), "/ffat/gpx/%s", e->d_name);
+                    if (remove(path) == 0) removed++;
+                }
+            }
+            closedir(dir);
+        }
+        Serial.printf("[GPX] Removed %d genfiles file(s)\n", removed);
+        int in_set = gpx_loader::refreshGPXFiles();
+        Serial.printf("[GPX] Reload after cleanup: %d in working set\n", in_set);
+    }
+    else if (strncmp(args, "index genfiles", 14) == 0) {
+        // Debug-only: writes `count` separate small GPX files (1 waypoint each)
+        // near a given center, straight to the GPX folder, then times a real full
+        // reload. Exercises gpx_index::MAX_INDEX_FILES specifically — gentest
+        // (above) stress-tests MAX_INDEX_ENTRIES via many waypoints in ONE file,
+        // which never touches the file-table budget at all. See docs/quests_plan.md
+        // §0.5 for the uint16_t file_id / 512-file-cap decision this verifies.
+        double lat = 0.0, lon = 0.0;
+        int count = 512;
+        int parsed = sscanf(args + 14, "%lf %lf %d", &lat, &lon, &count);
+        if (parsed < 2) {
+            Serial.println("Usage: gpx index genfiles <lat> <lon> [count]");
+        } else {
+            if (count <= 0) count = 512;
+            if (count > 600) count = 600;  // past MAX_INDEX_FILES=512 on purpose, to also
+                                            // exercise the "file table full" degrade path
+
+            double cos_lat = cos(lat * M_PI / 180.0);
+            randomSeed(millis());
+            int written = 0;
+            for (int i = 0; i < count; i++) {
+                char path[300];
+                snprintf(path, sizeof(path), "/ffat/gpx/CLAUDE_GENFILES_%03d.GPX", i);
+                FILE* f = fopen(path, "w");
+                if (!f) {
+                    Serial.printf("[GPX] ERROR: failed to create %s\n", path);
+                    continue;
+                }
+                double dlat_m = (double)random(-300, 301);
+                double dlon_m = (double)random(-300, 301);
+                double wlat = lat + dlat_m / 111320.0;
+                double wlon = lon + dlon_m / (111320.0 * cos_lat);
+                fprintf(f, "<?xml version=\"1.0\" encoding=\"UTF-8\"?>\n<gpx version=\"1.1\">\n");
+                fprintf(f, "<wpt lat=\"%.6f\" lon=\"%.6f\">\n<name>GF%03d</name>\n</wpt>\n",
+                        wlat, wlon, i);
+                fprintf(f, "</gpx>\n");
+                fclose(f);
+                written++;
+            }
+            Serial.printf("[GPX] Wrote %d file(s) near (%.6f, %.6f)\n", written, lat, lon);
+
+            uint32_t t0 = millis();
+            int in_set = gpx_loader::refreshGPXFiles();
+            uint32_t elapsed = millis() - t0;
+            int index_count; bool idx_trunc, ws_capped;
+            gpx_loader::getIndexStats(index_count, idx_trunc, ws_capped);
+            Serial.printf("[GPX] Reload after genfiles: %d in working set, %d indexed, %lums%s\n",
+                          in_set, index_count, (unsigned long)elapsed,
+                          idx_trunc ? " (index truncated!)" : "");
+        }
+    }
     else if (strncmp(args, "index list", 10) == 0) {
         int n = 0;
         double clat = 0.0, clon = 0.0;
@@ -1181,6 +1253,8 @@ void handleGPXCommand(const char* args) {
         Serial.println("  gpx index list [N] - List closest N working-set waypoints w/ distance");
         Serial.println("  gpx index reselect <lat> <lon> - Debug: force reselect against a synthetic center");
         Serial.println("  gpx index gentest <lat> <lon> [count] - Debug: write count waypoints near center + reload");
+        Serial.println("  gpx index genfiles <lat> <lon> [count] - Debug: write count separate files (1 wpt each) + timed reload");
+        Serial.println("  gpx index genfiles clean - Debug: remove genfiles' files + reload");
     }
 }
 

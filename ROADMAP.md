@@ -159,8 +159,9 @@ esptool/otadata step should be needed.
 - NVS starts blank on new hardware (unlike FFat, which auto-formats on first mount per the GPX-to-FFat
   entry below) — compass calibration (tumble + figure-8, Settings > Display), WiFi/beacon settings,
   and `dev_mode` state all need to be redone from scratch, not just copied over.
-- GPX waypoints: nothing pre-loaded unless an old SD card with `/sdcard/gpx` is present for the
-  one-time migration to fire; otherwise re-upload via the web portal like any fresh install.
+- GPX waypoints: nothing pre-loaded — the SD→FFat auto-migration was removed 2026-08-07 (see
+  CHANGELOG.md, [ADR-0027](docs/adr/0027-remove-sd-ffat-gpx-migration.md)); always re-upload via the
+  web portal on a fresh device.
 - Whether the `/update` OTA path needs anything different for the *first* real OTA on a freshly-USB-
   flashed board vs. steady-state — expected not to, since otadata is already valid after the USB
   flash, but not yet tested end-to-end on new hardware.
@@ -333,6 +334,13 @@ migration survive and load correctly from `/ffat/gpx`. The dev-mode-gated logs p
 select/download UI haven't specifically been exercised on hardware yet.
 
 **Full reasoning**: [ADR-0024](docs/adr/0024-ota-partitions-grown-from-unused-ffat.md)
+
+**Follow-up (2026-08-07)**: the one-time SD→FFat migration described above turned out to have a real
+bug — it couldn't distinguish "never migrated" from "user deleted everything on purpose," so an
+intentional delete-all silently resurrected old files from SD on the next boot. Fixed, then the
+migration mechanism was removed entirely rather than kept as dormant automatic-delete logic. FFat is
+now the sole, permanent source of truth for GPX files. Full reasoning: CHANGELOG.md,
+[ADR-0027](docs/adr/0027-remove-sd-ffat-gpx-migration.md).
 
 ---
 

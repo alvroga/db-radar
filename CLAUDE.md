@@ -103,9 +103,13 @@ board_build.f_flash = 80000000L
   FFat is now mounted (`device_manager::initFFat()`, `esp_vfs_fat_spiflash_mount_rw_wl()` at `/ffat`,
   right after SD init in `initializeAll()`) and holds GPX waypoint files (`/ffat/gpx`) — moved off SD
   the same day GPX-to-FFat was decided, see ROADMAP.md's "GPX Storage: Move from SD to FFat" (Resolved)
-  and CHANGELOG.md. `gpx_loader::init()` does a one-time boot migration from `/sdcard/gpx` if the FFat
-  folder is still empty, so upgrading doesn't orphan already-uploaded waypoints — **field-verified
-  2026-08-06**, pre-migration waypoints survived and loaded correctly from `/ffat/gpx`. Dev-only
+  and CHANGELOG.md. **The one-time SD→FFat auto-migration that originally lived in
+  `gpx_loader::init()` is gone (removed 2026-08-07)** — it copied `/sdcard/gpx` → `/ffat/gpx` whenever
+  the FFat folder was empty, which couldn't distinguish "never migrated" from "user just deleted
+  everything," so a deliberate delete-all silently resurrected the old files from SD on next boot. A
+  one-time NVS-gated cleanup ran once to remove the stale SD copies, then was itself deleted so no
+  automatic-delete logic sits in the firmware going forward — FFat is the sole source of truth for GPX
+  files now, no migration path exists in either direction. Dev-only
   logging (`system_logger`, `field_log`, `tilt_bench`) stays on the physical SD card, and its web
   management page (`/logs`) is gated behind `dev_mode` (404 when off) — not specifically field-tested.
   (`partitions/partitions.csv` is the orphaned pre-OTA 3MB/10MB table — unused, see its header.)

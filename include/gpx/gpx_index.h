@@ -5,7 +5,8 @@
 namespace gpx_index {
 
 constexpr int MAX_INDEX_ENTRIES = 8192;   // ~128-156KB PSRAM — thousands, not millions
-constexpr int MAX_INDEX_FILES   = 64;
+constexpr int MAX_INDEX_FILES   = 512;
+static_assert(MAX_INDEX_FILES < 0xFFFF, "0xFFFF is gpx_loader.cpp's open_file_id sentinel");
 
 // Lightweight per-waypoint record for the full (uncapped) PSRAM index.
 // lat/lon are float — this is a sort/distance key only; pass 2 re-parses the
@@ -14,7 +15,9 @@ struct IndexEntry {
     float    lat = 0.0f;
     float    lon = 0.0f;
     uint32_t file_offset = 0;    // ftell() at the start of the "<wpt" line
-    uint8_t  file_id = 0;        // -> file table, see getFileName()
+    uint16_t file_id = 0;        // -> file table, see getFileName(). Widened from
+                                  // uint8_t 2026-08-07 — free, absorbed by existing
+                                  // struct padding (see docs/quests_plan.md §0.5).
     bool     found = false;      // source of truth for "found" across working-set churn
 };
 
@@ -33,7 +36,7 @@ int addFile(const char* name);
 // Append one entry. Returns false (and sets the truncated flag) once
 // MAX_INDEX_ENTRIES is reached — rare, real loss, distinct from the working
 // set being smaller than the index (expected/normal).
-bool addEntry(float lat, float lon, uint32_t file_offset, uint8_t file_id);
+bool addEntry(float lat, float lon, uint32_t file_offset, uint16_t file_id);
 
 int  getEntryCount();
 bool wasIndexTruncated();   // true only if total waypoints > MAX_INDEX_ENTRIES
@@ -41,7 +44,7 @@ bool wasIndexTruncated();   // true only if total waypoints > MAX_INDEX_ENTRIES
 // idx must be < getEntryCount(); no bounds checking (hot path, called from
 // partial_sort comparators).
 const IndexEntry& getEntry(int idx);
-const char* getFileName(uint8_t file_id);
+const char* getFileName(uint16_t file_id);
 
 // Write-through found-state, keyed by index entry (not working-set slot —
 // slots get recycled by reselect, entries don't).
