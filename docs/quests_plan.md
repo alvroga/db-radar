@@ -389,6 +389,55 @@ Corrected design:
 
 ---
 
+## 8. Milestone badges — a second badge category, distinct from quest badges
+
+Raised 2026-08-07, brainstorm — not yet verified against code (same caveat as §7 item 4). A quest
+badge (§7) is *author-supplied*: art comes from a specific quest's `<quest:badge>` hex tag, unlocked
+by completing that one quest. A milestone badge is *system-defined*: no GPX supplies it, because
+nothing being tagged owns it — "your first waypoint," "10 waypoints found," "50 waypoints found,"
+"waypoints found on 5 continents," "1 quest completed," "10 quests completed," and so on are
+properties of the user's cumulative history, not of any one file.
+
+**Same rendering/storage plumbing, different trigger and different art source:**
+- **Art ships in firmware, not in a GPX.** There's no quest file to source `<quest:badge>` hex from
+  for a milestone badge, so the catalog is a small fixed set of 4bpp indexed images (§7's exact
+  format) baked into flash at build time — reuses the same on-device decoder §7 already needs, no
+  second image format to support. This also means milestone-badge art is authored once by whoever
+  builds the firmware, not per-quest by whichever user wrote that quest's GPX — a real asymmetry
+  worth being explicit about, not a flaw.
+- **Unlock trigger is a threshold crossing, not a single found-event.** Needs cumulative counters,
+  persisted the same way §4 persists quest progress (NVS): total *distinct* waypoints found (must
+  increment only on a genuinely new found-event, not on re-tapping an already-found waypoint — the
+  existing `IndexEntry.found` flag already distinguishes "already true" from "just became true," so
+  the counter increments off that transition, not off every tap) and total distinct quests completed
+  (increments off §3's existing quest-completion check, §7's hook point). Same storage shape as an
+  earned quest badge once unlocked — written to `/ffat/badges/`, outside `gpx_index`'s file-capacity
+  budget (§0.5), for the same "must survive independent of any source file" reason §7 already
+  established.
+- **Continent coverage is the one genuinely new capability.** Classifying a found waypoint's lat/lon
+  into one of ~7 continents needs *some* offline lookup — there's no network geocoding service on
+  this device and none should be added just for this. A coarse static bounding-box (or a handful of
+  simple polygon) table, checked once per newly-found waypoint and OR'd into a persisted 7-bit
+  continent-visited mask (fits in one NVS byte), is enough — this doesn't need survey-grade accuracy,
+  only "which of 7 buckets." Same self-contained, no-network spirit as the existing WMM declination
+  module (`wmm_declination.cpp`).
+- **Trigger hook is the same one §3 already establishes for quest completion** — "after the existing
+  found write-through, check ... and fire the completion path" — milestone evaluation is a second
+  check at that same point, not a new mechanism: on every newly-found waypoint, increment the
+  waypoint counter and update the continent mask; on every newly-completed quest (§7's own hook),
+  increment the quest counter; after each increment, check whether any milestone threshold was just
+  crossed and if so unlock that badge.
+
+**Open, not yet resolved:**
+1. The actual threshold list (1/10/50/... waypoints, which quest counts, which continent counts) is
+   a product decision, not an engineering one — needs the user's call, not a default invented here.
+2. Whether milestone badges get their own gallery section or share one shelf with quest badges on
+   the eventual collection UI (§7's deferred dedicated screen).
+3. No code has been read for this section — same caveat as §7 item 4, treat this as a plausible
+   shape until an explore pass confirms it against `gpx_loader.cpp`/`gpx_index.h`/`navigation.cpp`.
+
+---
+
 ## Design philosophy: web = preparation, radar = the vessel
 
 Raised 2026-08-06, framing note for all quest-related web work (§6, §7, and the future-ideas
@@ -412,6 +461,17 @@ match §6's existing page rather than drifting into its own style.
   above doesn't need to change later, not because it's deferred without a plan.
 - **General (non-quest) found-state persistence.** Deliberately scoped to quest waypoints only;
   see §4.
+- **Coordinate-spoofing / "found" authenticity ("cheating").** Raised 2026-08-07: nothing stops a
+  user from hand-editing a quest GPX (or a personal waypoint file) to move a tagged waypoint's
+  `<name>` next to themselves, then tapping it within range for an instant, travel-free found/badge
+  — the file is plain-text and user-editable by design (§7's own authoring goal: "as simple as
+  possible to *create*... edit a text file"), so anything that hardens coordinate authenticity
+  directly fights the thing that makes quests easy to author. **Deliberately not defended against.**
+  There is no server, no account, and no other player whose stakes this affects — the entire trust
+  boundary is the user's own device, so this is structurally the same as real-world geocaching's
+  long-tolerated "armchair logging," except lower-stakes still (single-player, no shared log).
+  Revisit only if this device ever grows a networked/shared/leaderboard feature, since that's the
+  point a third party's stakes would actually be at risk — no such feature exists or is planned.
 
 ---
 
@@ -467,6 +527,10 @@ and file cap raised to 512, badge resolution is 24×24, badge storage is a separ
    (Verification, below) is the first real data point on boot/rescan time at high file counts. If
    it breaks, the fallback is lowering `MAX_INDEX_FILES` — nothing else in the design depends on
    the specific value beyond the `static_assert`'s `< 0xFFFF` bound.
+7. **New, 2026-08-07**: milestone-badge threshold list (§8, item 1) — a product decision, not
+   proposed here.
+8. **New, 2026-08-07**: §8 (milestone badges) hasn't been verified against actual code yet — same
+   gap as item 3 above, now applies to two sections instead of one.
 
 ---
 
