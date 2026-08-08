@@ -4,7 +4,11 @@
 
 All I2C traffic on this board goes through one unified manager — `i2c_manager` (`include/hardware/i2c/i2c_manager.h`, `src/hardware/i2c/i2c_manager.cpp`) — built on ESP-IDF 5.x's new `driver/i2c_master.h` API. There is no legacy driver layer to reconcile: earlier in the project's history a `TCA9554PWR.cpp`/`exio.cpp` pair and a Wire-based `I2C_Driver.cpp` compatibility shim existed alongside it; both are gone. Every device read/write, from any task, goes through this module.
 
-**Shared I2C Bus**: SDA=15, SCL=7, 400kHz (`i2c_manager::Config` defaults).
+**Shared I2C Bus**: SDA=15, SCL=7, **100kHz** — set by `system_config::communication::I2C_FREQ_HZ`
+(`include/core/system_config.h`), passed through `device_manager::initI2C()` to `i2c_manager::init()`.
+`i2c_manager::Config::frequency`'s own struct default is 400kHz, but nothing calls `init()` with a
+default-constructed `Config` — the 100kHz value is what actually runs. See "Bus Speed" below for why
+it's not 400kHz and whether it needs to be.
 
 ## Devices on the Bus
 
@@ -72,6 +76,30 @@ BUZZER  = 7
 
 - `resetBus()` — FSM-level reset. **Despite its name and ESP-IDF's own docs, this does not send clock-recovery pulses on ESP32-S3** — see the comment above its definition in `i2c_manager.cpp`.
 - `reinit()` — full re-initialization: tears down all device handles and the bus, then re-inits. This *does* run real bit-bang clock recovery on the freed pins before recreating the bus. Use this (not `resetBus()`) after standby wake or when the I2C controller FSM is stuck.
+
+## Bus Speed: 100kHz, not 400kHz — and it's safe to test 400 again
+
+Dropped 400kHz → 100kHz on 2026-08-02 as a diagnostic/mitigation experiment (T-B in the old freeze
+investigation log) on the theory that marginal signal integrity was causing the FT-06 freezes. **The
+real root cause turned out to be unrelated** — the ESP-IDF NACK-hang driver bug below, patched the
+same day — so the 100kHz change was never actually evaluated on its own merits, and nobody has
+reverted it since. It costs nothing functionally at 100kHz: a compass read is ~1ms and the bus is
+still >95% idle at the current 10Hz sensor rate.
+
+**Current call**: leave it at 100kHz. The system has been stable at this speed since 2026-08-02, and
+reverting now would only reintroduce an unknown against a device that's currently running clean — no
+performance need is pushing for 400kHz. One data point that keeps it an open question rather than a
+closed one: 100% of the residual (patch-independent) I2C failures are on the compass specifically —
+the one device reached over a cable — and front-loaded in the first hour after boot (see
+[Open Questions](i2c_bus_freeze_investigation.md#open-questions)), consistent with either a real
+signal-integrity margin issue or an unrelated power-on transient. Nobody has data at 400kHz *since*
+the NACK-hang patch landed, so it's untested whether that failure rate would change either way.
+
+**If it's ever worth testing**: flip `system_config::communication::I2C_FREQ_HZ` back to `400000` for
+one field session and compare `getDeviceStats()`'s per-device fail counts (especially the compass)
+against the 100kHz baseline above. This is now a clean, low-risk experiment — the NACK-hang patch
+bounds any hang regardless of bus speed, so a bad result at 400kHz can no longer manifest as a freeze,
+only as a higher (but bounded and retried) failure rate.
 
 ## Known Historical Issues (Resolved)
 
