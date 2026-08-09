@@ -57,7 +57,7 @@ void writeHeader(FILE* f) {
     rtc::Time t{};
     bool have_rtc = rtc::read(t) && t.valid;
 
-    fprintf(f, "# cc-radar tilt bench (WP-6, docs/compass_tilt_bench.md)\n");
+    fprintf(f, "# db-radar tilt bench (WP-6, docs/compass_tilt_bench.md)\n");
     fprintf(f, "# firmware=%s build=%lu\n", FW_VERSION, (unsigned long)FW_BUILD_TS);
     if (have_rtc) {
         fprintf(f, "# rtc=%04d-%02d-%02d %02d:%02d:%02d\n",

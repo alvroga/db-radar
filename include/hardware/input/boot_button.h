@@ -18,7 +18,7 @@
  * - Proper debouncing (50ms)
  * - Event callback system
  *
- * Usage in cc-radar:
+ * Usage in db-radar:
  * - Long press: Open/close settings menu
  * - Short press: Future use (zoom, etc.)
  * - Double press: Future use (waypoint actions, etc.)
