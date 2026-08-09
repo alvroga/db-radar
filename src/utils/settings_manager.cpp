@@ -177,8 +177,6 @@ const RadarSettings& getSettings() { return g_cached_settings; }
 
 void getDefaultSettings(RadarSettings& settings) {
     settings = RadarSettings();
-    strncpy(settings.beacon_macs[0], "DD:34:02:0A:26:7C", sizeof(settings.beacon_macs[0]) - 1);
-    settings.beacon_count = 1;
 }
 
 bool loadSettings(RadarSettings& settings) {
@@ -254,20 +252,14 @@ bool loadSettings(RadarSettings& settings) {
     settings.dev_tab_visible              = nvs_getbool(h, KEY_DEV_TAB, true);
     settings.logging_enabled              = nvs_getbool(h, KEY_LOGGING_EN, true);
     settings.heading_up_mode              = nvs_getbool(h, KEY_HEADING_UP, true);
-    // beacon_proximity_enabled: always on (MAC is hardcoded, feature is always active)
+    // beacon_proximity_enabled: always on when a MAC is configured
     // Don't load from NVS — was previously saved as false, would block the feature
     settings.beacon_sound_enabled         = nvs_getbool(h, KEY_BCN_SND, true);
     settings.beacon_measured_power        = nvs_geti8(h, KEY_BCN_PWR, -59);
     settings.beacon_path_loss_n           = nvs_getfloat(h, KEY_BCN_N, 2.5f);
     // Load beacon list from NVS (migrate from legacy single-MAC key if needed)
     nvs_getstr(h, KEY_BCN_MAC, settings.beacon_macs[0], sizeof(settings.beacon_macs[0]));
-    if (strlen(settings.beacon_macs[0]) > 0) {
-        settings.beacon_count = 1;
-    } else {
-        // First boot: seed hardcoded default MAC
-        strncpy(settings.beacon_macs[0], "DD:34:02:0A:26:7C", sizeof(settings.beacon_macs[0]) - 1);
-        settings.beacon_count = 1;
-    }
+    settings.beacon_count = (strlen(settings.beacon_macs[0]) > 0) ? 1 : 0;
     settings.beacon_found = nvs_getbool(h, KEY_BCN_FOUND, false);
     settings.compass_cal_x               = nvs_geti16(h, KEY_COMPASS_CAL_X, 0);
     settings.compass_cal_y               = nvs_geti16(h, KEY_COMPASS_CAL_Y, 0);
