@@ -14,79 +14,23 @@ None currently open. See Resolved below for FT-03, FT-05, FT-09.
 
 ## Planned
 
-### Quests *(brainstorm stage — not designed yet)*
-**Severity**: Feature — new idea, not yet scoped
+### Quests *(design substantially resolved, feature not yet built)*
+**Severity**: Feature — design largely settled, implementation not started
 
 **Ask**: a GPX file containing multiple waypoints treated as a single "quest" — find all the
-waypoints in the set to complete it. Idea originated from the single-file-multiple-waypoints GPX
-cache display work (2026-08-05).
+waypoints in the set to complete it, with progress tracking and a small collectible badge on
+completion. Idea originated from the single-file-multiple-waypoints GPX cache display work
+(2026-08-05).
 
-**Open questions to resolve before design**:
-- How is a "quest" GPX distinguished from a regular multi-waypoint GPX — a naming convention, a tag
-  in the file, or explicit user grouping in the web manager?
-- How does a waypoint get marked "found" — reuse the existing `Waypoint::found` mechanism (currently
-  driven by the 15m sonar-silencing arrival radius, see Sonar Rhythm Defects above) or a separate
-  quest-specific state?
-- What happens on completion — a reward/notification of some kind ("get something") is the open
-  question; no mechanism decided.
-- Where does quest progress persist — NVS, alongside the waypoint data, or derived on the fly from
-  `found` flags at render time?
-
-**Status**: nothing implemented or designed. Next step is a brainstorming session to scope this
-before any code or ADR.
-
----
-
-### Waypoint Memory Optimization — cap raised 50 → 500, then rolled back to 200 after a boot failure ✅ resolved at 200
-**Severity**: Medium — real GPX files get silently truncated above the cap
-
-**Status (2026-08-05)**: `MAX_WAYPOINTS` is **200**, not the 500 ADR-0022 decided on. 500 shipped,
-built clean, and passed a static-SRAM budget check (60.4%, under the documented 80% caution line) —
-but that budget was never checked against actual free heap at boot, and the very next boot attempt
-failed: `xTaskCreatePinnedToCore` for the Network/System tasks returned `pdFAIL` because only 83,899 B
-of internal SRAM remained free before BLE init (down from an estimated ~149KB at cap=50) — BLE
-(~25KB) plus the UI (16KB) + I2C (8KB) task stacks it grants first left too little for the two after.
-This is exactly the gap ADR-0022 flagged and didn't close: see "Field verification still open" there.
-Dropping to 200 (154,656 B / 47.2% static SRAM, a row already computed in ADR-0022's table) fixed it —
-**field-confirmed booting on hardware 2026-08-05**, BLE active. The per-waypoint render fix from the
-same change (Haversine → equirectangular approximation in `drawWaypoints()`/`latLonToScreen()`,
-`src/ui/navigation.cpp`) is unaffected and stays in place — it cut 10 double transcendental
-calls/waypoint to 2 multiplies + 1 `sqrtf` (+ conditionally 1 `atan2f`) and is still field-verified
-with no regression. `updateWaypointCountLabel()`'s proportional color thresholds
-(`src/ui/settings_screen.cpp`) also stay, now proportional to 200 instead of 500.
-
-**Why 200 and not some other number close to the true ceiling**: the failing boot had only 15 real
-waypoints loaded (well under any cap), and the array is fixed-size regardless of fill count, so the
-200 vs. 500 SRAM difference — not GPX file size — is what the confirmed boot validates. 200 was picked
-because it was already a row in ADR-0022's table with a comfortable margin, not because it was
-incrementally tuned down from 500. The true ceiling is somewhere in the untested 200–500 range (300
-is the next candidate the table already covers, 51.6%/59.4% static SRAM) — raising it further would
-need its own hardware boot verification with BLE active before trusting it, the same way this rollback
-did.
-
-**Resolved differently than either option above (2026-08-05)**: rather than spending more SRAM on a
-higher cap, `MAX_WAYPOINTS` stays 200 and a two-tier index was added instead — every waypoint across
-every GPX file gets a lightweight PSRAM-backed index entry (`gpx_index`, up to 8192), and the 200-slot
-SRAM array becomes a working set of the closest-200 to the user's actual position, reselected as they
-move. This makes "getting past 200" a non-issue for real-world waypoint counts without raising the
-SRAM ceiling at all — see [ADR-0023](docs/adr/0023-two-tier-waypoint-index.md) and
-`docs/waypoint_two_tier_index_plan.md`. **Field-verified on hardware** against an independent Haversine
-oracle (cold selection, a forced high-churn reselect, HDOP gating, a live end-to-end nearby-waypoints
-test) — caught and fixed a real bug (`gpx_loader::init()` was never called, so the feature was
-silently dead) along the way. Still open: the automatic GPS-driven trigger firing from real movement,
-and concurrent SD access during a reselect. A live `memory stats` reading and `wpt_us` at a real
-200-waypoint load are also still unmeasured. Decision record for the original 500 call, including why
-500 over 700:
-[ADR-0022](docs/adr/0022-waypoint-cap-raised-to-500-not-700.md) (superseded on the cap number, not on
-the render-cost reasoning).
-
-**Key files**: `include/ui/ui_manager.h` (`MAX_WAYPOINTS`), `src/ui/navigation.cpp`
-(`drawWaypoints()`, `latLonToScreen()`), `src/ui/settings_screen.cpp` (`updateWaypointCountLabel()`),
-`src/gpx/gpx_index.cpp`/`gpx_loader.cpp` (two-tier index and reselect, ADR-0023)
-
-**Related**: [`docs/performance_optimization_backlog.md`](docs/performance_optimization_backlog.md) step 11,
-[`docs/waypoint_cap_increase_investigation.md`](docs/waypoint_cap_increase_investigation.md) (historical — modeled 500, see ADR-0022 for the actual decision),
-[`docs/waypoint_two_tier_index_plan.md`](docs/waypoint_two_tier_index_plan.md) / [ADR-0023](docs/adr/0023-two-tier-waypoint-index.md) (closest-N selection instead of a higher cap)
+**Status**: past the brainstorm stage. The full design — tagging mechanism, data model, tap-to-
+confirm behavior (generalized from "fixed waypoint only" to "any in-range waypoint," a prerequisite
+change with its own real code impact), badge format/storage, NVS persistence — is written up and
+mostly resolved in [`docs/quests_plan.md`](docs/quests_plan.md). Real prep code has already shipped
+ahead of the feature itself: `gpx_index`'s file capacity was raised (64 → 1024) and `file_id` widened
+to `uint16_t` specifically to handle "many small quest files" instead of "a few large ones" (see
+CHANGELOG.md and `docs/quests_plan.md` §0.5). The quest feature's own tagging/tracking/badge code has
+not been built yet. Remaining open items (badge filename scheme, web quest creator UI, milestone
+badge thresholds) are listed at the end of `docs/quests_plan.md`.
 
 ---
 
@@ -137,6 +81,20 @@ code.
 
 ---
 
+### Radar Animation Effects from Capsule Radar Research — brainstorm stage, not designed yet
+
+**Severity**: Feature — new idea, not yet scoped
+
+**Ask**: research (a Claude Code fork reading capsule-radar's actual rendering source) into whether
+its visual effects — a rotating sweep beam, staggered sonar/glow rings — could port to db-radar's
+draw callback. Two candidates look directly implementable with no architecture change; a third
+(persistent `lv_canvas` heatmap) is a hard no, since it contradicts the no-canvas render design.
+**Status**: research only, nothing designed or implemented. Full findings (implementation approach,
+what doesn't port over and why, measurement requirements, open questions):
+[`docs/radar_animation_effects_research.md`](docs/radar_animation_effects_research.md).
+
+---
+
 ### First-Flash Procedure for a New Board — not yet verified end-to-end
 **Severity**: Process — a new board is inbound and needs a defined, low-friction bring-up path
 
@@ -145,7 +103,7 @@ partition table, and app in one step), then every subsequent update via the alre
 `/update` OTA flow (`gpx_server.cpp` — `esp_ota_begin`/`esp_ota_write`/`esp_ota_set_boot_partition`) —
 not USB again.
 
-**Already confirmed by inspecting the build** (`.pio/build/cc-radar/flasher_args.json`): `pio run -t
+**Already confirmed by inspecting the build** (`.pio/build/db-radar/flasher_args.json`): `pio run -t
 upload` writes all four required regions in one command — bootloader (`0x0`), partition table
 (`0x8000`), app to `ota_0` (`0x10000`), **and** `ota_data_initial.bin` to the `otadata` partition
 (`0xe000`). A blank chip's otadata is pre-seeded to boot `ota_0` correctly by this alone; no manual
@@ -166,16 +124,22 @@ esptool/otadata step should be needed.
   flashed board vs. steady-state — expected not to, since otadata is already valid after the USB
   flash, but not yet tested end-to-end on new hardware.
 
-**Also raised, not yet discussed in depth**: a browser-based first-flash option for people without
-PlatformIO — WebSerial flashing (Espressif's `esptool-js`, or the pre-built ESP Web Tools wrapper)
-talks to the ROM bootloader directly from Chrome/Edge, so it works on a genuinely blank chip with no
-firmware installed anywhere. The four files + offsets it would need are exactly what
-`flasher_args.json` already lists (bootloader/partition-table/app/otadata), so most of the integration
-is pointing a manifest at those binaries. Open before this is real: hosting (GitHub Pages vs. a local
-page the user opens), browser support is Chrome/Edge/Opera only, and — the actual new part — those
-four `.bin`s are currently per-dev-machine build artifacts with no release/tagging process, so "which
-binary do we hand out" is a process question, not just a page to build. To be discussed properly, not
-decided yet.
+**Browser-based first-flash — resolved 2026-08-08**: a tag-triggered release pipeline
+(`.github/workflows/release.yml`) now builds via PlatformIO, merges bootloader/partition-table/
+otadata/app into one image via `esptool merge_bin`, publishes both that full-flash binary and an
+app-only OTA binary to GitHub Releases, and deploys an ESP Web Tools flasher page (`web/flasher/`) to
+GitHub Pages — all from the same build, so the Release asset and the web flasher can never disagree.
+Hosting is GitHub Pages; "which binary do we hand out" is answered by the release process itself. See
+[`docs/firmware_installation.md`](docs/firmware_installation.md),
+[ADR-0030](docs/adr/0030-release-pipeline-build-time-pages-not-committed-binaries.md),
+[ADR-0031](docs/adr/0031-single-part-manifest-not-multi-part.md).
+
+**Scope narrowed same day**: shipping with only the 2 binary-distribution paths (web flasher +
+`esptool.py`/Releases) — the PlatformIO source-build install option is intentionally held back for
+now, repo isn't public yet. **Not yet exercised end-to-end on a real tag push, and the repo is
+currently private** (both install paths are inert until it's made public — GitHub Pages and public
+Release downloads both require a public repo on the free plan) — see
+`docs/firmware_installation.md`'s Verification status section for the full remaining checklist.
 
 **Status**: nothing verified on real new hardware yet. Walk this checklist in order when the new board
 arrives and turn it into a field-verified procedure.
@@ -377,6 +341,31 @@ of the NACK's cause.
 
 ---
 
+### Waypoint Cap: 500 → boot failure → 200 → two-tier index — Resolved (2026-08-05)
+**Was**: `MAX_WAYPOINTS` raised 50→500 ([ADR-0022](docs/adr/0022-waypoint-cap-raised-to-500-not-700.md))
+shipped, built clean, and passed a static-SRAM budget check — but the very next boot failed:
+FreeRTOS task creation returned `pdFAIL`, only 83,899 B internal SRAM free before BLE init once BLE
+(~25KB) plus the UI/I2C task stacks (24KB) were granted first. The static-SRAM check alone wasn't
+sufficient — it was never validated against actual free heap at boot.
+
+**Resolution**: rolled back to 200 (a comfortable-margin row already in ADR-0022's table),
+field-confirmed booting with BLE active. Rather than raise the cap again, added a two-tier index
+instead: every waypoint across every GPX file gets a lightweight PSRAM-backed index entry
+(`gpx_index`, up to 8192), and the 200-slot SRAM array becomes a working set of the closest-200 to
+the user's actual position, reselected as they move — see
+[ADR-0023](docs/adr/0023-two-tier-waypoint-index.md). Field-verified on hardware against an
+independent Haversine oracle; caught and fixed a real bug along the way (`gpx_loader::init()` was
+never called, so the feature was silently dead).
+
+**Still open**: the automatic GPS-driven reselect trigger hasn't been observed firing from real
+movement, and concurrent SD access during a reselect is unverified.
+
+**Full reasoning**: [ADR-0022](docs/adr/0022-waypoint-cap-raised-to-500-not-700.md) (superseded on
+the cap number, not the render-cost reasoning), [ADR-0023](docs/adr/0023-two-tier-waypoint-index.md),
+CHANGELOG.md.
+
+---
+
 ### GPX Manager Name Display + Logs Bulk Delete — Resolved (2026-08-04)
 **Was**: uploaded GPX filenames on the web upload page are bare geocache codes (e.g. `GC38EVJ.gpx`),
 giving no clue which cache is which without opening the file. Separately, the `/logs` page could only
@@ -473,6 +462,21 @@ scanlines didn't work out. With scanlines rejected, that fallback was reconsider
 building it as a standalone feature disconnected from that look isn't worth the 7-screen layout-risk
 audit it would require. If a genuine CRT/retro theme is wanted again later, treat it as a new ask and
 re-scope from scratch rather than resuming the font-only branch.
+
+---
+
+### GPX Upload/Delete Display Glitch — accepted, not pursued further (2026-08-07)
+**Was/is**: every GPX file upload or delete visibly glitches the display (shifted/wrapped frame
+content) — a real FFat write/erase briefly disables both cores' cache/interrupts, which can starve
+the RGB panel's DMA refill.
+
+**Tried**: `CONFIG_SPI_FLASH_AUTO_SUSPEND` enabled to test as a fix (2026-08-07) — field data suggests
+it didn't resolve it.
+
+**Decision**: not pursued further. Documented for the user in the GPX web manager UI (so it reads as
+"expected, harmless" rather than a bug report) rather than fixed in the render pipeline. Full detail:
+[ADR-0028](docs/adr/0028-defer-gpx-reload-to-explicit-endpoint.md)'s Verification status section,
+CHANGELOG.md, and CLAUDE.md's Render Pipeline section.
 
 ---
 
