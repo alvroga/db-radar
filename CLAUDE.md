@@ -9,7 +9,7 @@ This document provides comprehensive technical guidance for the Waveshare ESP32-
 This is a **production-ready PlatformIO template** for ESP32-S3 touch LCD development. It provides a complete hardware abstraction layer, modular architecture, and proven stability for the Waveshare ESP32-S3-Touch-LCD-2.1 board.
 
 **Repository**: https://github.com/alvroga/db-radar
-**License**: MIT
+**License**: CC BY-NC-SA 4.0 (Attribution-NonCommercial-ShareAlike — see [`LICENSE`](LICENSE))
 
 ### **Hardware Platform**
 - **Board**: Waveshare ESP32-S3-Touch-LCD-2.1 (16MB Flash, 8MB PSRAM)
@@ -77,13 +77,14 @@ this architecture replaced. See [`docs/i2c.md`](docs/i2c.md) for the current que
 
 ### **PlatformIO Settings**
 
-**The build is ESP-IDF, not Arduino.** The env is `cc-radar`; `cc-moat-port` and the Arduino
+**The build is ESP-IDF, not Arduino.** The env is `db-radar` (renamed from `cc-radar` 2026-08-09,
+alongside the project's public rename — see CHANGELOG.md); `cc-moat-port` and the Arduino
 framework are pre-migration history. Behaviour-affecting settings live in `sdkconfig.defaults`, not
 only here — and editing that file alone does **not** change the build (see the `sdkconfig` note in
 the Render Pipeline section).
 
 ```ini
-[env:cc-radar]
+[env:db-radar]
 platform = espressif32
 board = esp32-s3-devkitc-1
 framework = espidf
@@ -132,6 +133,11 @@ pio run -t upload
 # Clean build files
 pio run -t clean
 ```
+
+**Tagged releases** (`git push origin vYY.MM.##`) trigger `.github/workflows/release.yml`, which
+builds, merges bootloader+partitions+app into one flashable image via `esptool merge_bin`, publishes
+both a full-flash and an OTA-only binary to GitHub Releases, and deploys the browser web flasher to
+GitHub Pages. See [`docs/firmware_installation.md`](docs/firmware_installation.md).
 
 ### **Monitoring and Debugging**
 ```bash
@@ -190,7 +196,8 @@ toggle for A/B measurement): [`docs/display.md`](docs/display.md) and
 All I2C traffic goes through one unified manager (`i2c_manager.cpp`/`.h`, ESP-IDF 5.x
 `driver/i2c_master.h`) — device handles, retry logic, per-device and cross-device failure stats, and
 bus-recovery (`reinit()`, not `resetBus()` — see the doc for why). **Shared I2C Bus** (SDA=15, SCL=7)
-@ 400kHz hosts **six** devices: Touch (CST820, 0x15), RTC (PCF85063, 0x51), IO Expander (TCA9554,
+@ 100kHz (dropped from 400kHz 2026-08-02 as a freeze mitigation, see `docs/i2c.md`) hosts **six**
+devices: Touch (CST820, 0x15), RTC (PCF85063, 0x51), IO Expander (TCA9554,
 0x20), Compass (QMC5883L, 0x0D), and the IMU (QMI8658, two addresses 0x6A/0x6B) — the IMU is genuinely
 present and in active use for tilt compensation; an older note elsewhere claiming it was removed for
 bus contention is stale (GPS is UART, not I2C, so there was never a contention issue between the two).
@@ -256,7 +263,8 @@ src/
 ```
 
 ### **LVGL Integration**
-- **Version**: 8.3.11
+- **Version**: 8.4.0 (resolved/installed — `platformio.ini` pins `^8.3.11`, a minimum that
+  allows drift; check `.pio/libdeps/*/lvgl/library.json` if this ever needs re-verifying)
 - **Configuration**: `LV_CONF_INCLUDE_SIMPLE` mode
 - **Memory**: Direct framebuffer access with dual buffers, `BUFFER_LINES = 480` (full frame)
 - **Performance**: 10-line SRAM bounce buffer (18.75KB), 64-byte PSRAM alignment
@@ -368,7 +376,7 @@ The project includes a comprehensive serial command system for runtime control a
 ## Project Structure
 
 ```
-cc-radar/
+db-radar/
 ├── src/                    # Source code
 ├── include/               # Project headers
 ├── lib/                   # Private libraries
@@ -386,6 +394,7 @@ cc-radar/
 
 Detailed component documentation is available in the `docs/` directory:
 
+- [`docs/firmware_installation.md`](docs/firmware_installation.md) - Release pipeline, merge_bin offsets, web flasher internals
 - [`docs/configuration.md`](docs/configuration.md) - Central configuration system and hardware variants
 - [`docs/display.md`](docs/display.md) - ST7701 display configuration, timing, and rotation
 - [`docs/touch.md`](docs/touch.md) - CST820 touch controller integration
@@ -394,7 +403,7 @@ Detailed component documentation is available in the `docs/` directory:
 - [`docs/i2c.md`](docs/i2c.md) - I2C bus management and device communication
 - [`docs/memory_management.md`](docs/memory_management.md) - Advanced memory management system guide
 - [`docs/peripherals.md`](docs/peripherals.md) - RTC and GPS integration guides
-- [`docs/wifi_implementation_guide.md`](docs/wifi_implementation_guide.md) / [`docs/wifi_power_management.md`](docs/wifi_power_management.md) - WiFi implementation and power patterns (BLE: see Beacon Proximity below)
+- [`docs/wifi_implementation_guide.md`](docs/wifi_implementation_guide.md) - WiFi boot modes, GPX web portal, OTA updates (BLE: see Beacon Proximity below)
 - [`docs/standby_mode.md`](docs/standby_mode.md) - Low-power standby: entry/wake, power settings, thread-safety history
 - [`docs/troubleshooting.md`](docs/troubleshooting.md) - Common issues and solutions
 - [`docs/documentation_standards.md`](docs/documentation_standards.md) - Full documentation process (see also Documentation Standards below)
@@ -424,14 +433,18 @@ Layout above) — not the 3MB figure this section previously stated, which was s
 
 **Status**: Complete ✅ | [Complete Guide](docs/battery_monitoring.md)
 
-Visual battery percentage on the radar screen (GPIO4 ADC, ETA6098 charging IC, 1:3 divider), updated
-every 5s via the System Task, green/yellow/red at 70%/50% thresholds. **Display offset is `-150px`,
-not a smaller value** — `-50px` caused text cutoff and crashes near the circular display boundary.
-The display is round; any absolute-position UI element needs enough margin to stay inside the visible
-circle, not just inside the square 480×480 framebuffer (the same class of bug FT-09 hit for waypoints —
-see ROADMAP.md).
+Battery icon on the radar screen (GPIO4 ADC, ETA6098 charging IC, divider calibrated to 3.255, not
+the theoretical 1:3), sampled continuously but only pushed to the UI every 30s — the icon only has 5
+visual states, so faster updates just add queue churn. Icon (not color) encodes level:
+FULL/3-bar/2-bar/1-bar/EMPTY at 87/62/37/12% thresholds, a charge glyph at ≥4.20V, black in daylight
+mode / white otherwise — the tri-color percentage-text design this section once described was
+superseded and the docs never caught up until 2026-08-09. **Display offset is `-150px`, not a smaller
+value** — `-50px` caused text cutoff and crashes near the circular display boundary. The display is
+round; any absolute-position UI element needs enough margin to stay inside the visible circle, not
+just inside the square 480×480 framebuffer (the same class of bug FT-09 hit for waypoints — see
+ROADMAP.md).
 
-**Serial Commands**: `battery status`, `battery monitor on|off`, `battery history`, `battery raw`
+**Serial Commands**: `battery status`, `battery monitor on|off`, `battery state`, `battery raw`
 
 **Full guide** (hardware, display, power, troubleshooting): [`docs/battery_monitoring.md`](docs/battery_monitoring.md).
 
@@ -634,75 +647,37 @@ the flush no longer copies anything.
 `refr_ms`, not sequential with it. **Frame = `label_us + refr_ms`** — adding `paint` double-counts.
 Read via the `perf` serial command or the DEV tab.
 
-**Where the 85ms sits** (measured at 240MHz, 2026-07-28; 160MHz values in parens): rotate 38.3
-(47.4) + non-radar LVGL draw 17.0 (23.2) + radar bg fill 20.5 (21.5) + radar paint 9.3 (9.4).
+**CPU is 240MHz**, set by `CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240` in `sdkconfig.defaults` (had been
+160 — vanilla IDF's default — since the ESP-IDF migration; verified on hardware: frame 101.5 →
+85.2ms). Boot prints the measured value; if it ever says 160 again, the generated `sdkconfig.db-radar`
+is stale — **PlatformIO does not regenerate it when `sdkconfig.defaults` changes**, so delete it and
+rebuild. PCLK is still 10MHz, with ~3.2× margin against the panel's 26.6ms period at the current
+85ms/frame (relevant if PCLK is ever raised — see load-bearing constraint #4 above).
 
-**"Full-screen PSRAM write" is not one category** — the 240MHz measurement split the two apart:
-- **radar bg fill scaled 1.05×** — genuinely at the bus ceiling, as a plain optimized `memcpy` over
-  the same bytes (~27 MB/s) predicted.
-- **rotate scaled 1.24×**, the largest absolute gain of any stage. ~24% of the transpose was CPU
-  work — loop overhead and the scatter into the SRAM tile — not bandwidth. An earlier version of this
-  section claimed both writes "sit near the memory ceiling"; that was true of only one of them.
-- **radar paint scaled 1.01×** — it did *not* move. Emitting geometry into LVGL's draw context is
-  bound by writing the draw buffer, not by computing the geometry, so optimizing the drawing math
-  would buy nothing.
-
-**Clocks** (all measurements above were taken at 160MHz):
-- **CPU is now 240MHz**, set by `CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240` in `sdkconfig.defaults`. It had
-  been at 160 since the ESP-IDF migration — vanilla IDF's default, where the Arduino core used to set
-  240 for us. Verified on hardware: **frame 101.5 → 85.2ms (1.19×)**. Boot prints the measured value;
-  if it ever says 160 again, the generated `sdkconfig.cc-radar` is stale (see below).
-- **PCLK is still 10MHz.** Raising it is the item where the `on_frame_buf_complete` guard stops being
-  theoretical: it now has ~3.2× of margin at 85ms/frame against a 26.6ms panel period, and a higher
-  PCLK shortens that period.
-
-**`sdkconfig.defaults` is not enough on its own.** PlatformIO does *not* regenerate
-`sdkconfig.cc-radar` when `sdkconfig.defaults` changes — a build will succeed and silently keep the
-old setting. Delete `sdkconfig.cc-radar`, rebuild, and diff against the previous copy: the committed
-file had accumulated three settings that diverged from the defaults, one of which
-(`CONFIG_BT_NIMBLE_MEM_ALLOC_MODE_EXTERNAL`) existed *only* in the generated file and would have
-silently reverted.
+Per-stage breakdown, scaling behavior at 240MHz, and the full historical measurement trail:
+[`docs/performance_optimization_backlog.md`](docs/performance_optimization_backlog.md).
 
 **Sensor rate**: `SYSTEM_UPDATE_MS = 100` is the sensor clock — it drives *both* the compass sub-timer
 (20ms gate) and the GPS gate (`GPS_UPDATE_INTERVAL_MS = 100`), so compass and GPS both sample at 10Hz.
-Safe only because render requests are coalesced to at most one per UI Task loop.
+Safe only because render requests are coalesced to at most one per UI Task loop. With a GPS fix,
+`RADAR_REFRESH` is queued every sample, so the UI Task renders nearly every loop and polls
+button/touch once per ~90ms rather than once per 26.6ms vsync — **verified fine outdoors**, since
+90ms is shorter than a real button press (132–186ms). If Core 1 ever needs relief, drop the
+*GPS-driven* refresh to 5Hz and leave the compass at 10Hz (translation matters less than rotation) —
+not needed today, and if done, never lower the compass rate, it's what makes rotation feel right.
 
-With a GPS fix, `RADAR_REFRESH` is queued every sample, so the UI Task renders nearly every loop and
-polls button/touch once per ~90ms rather than once per 26.6ms vsync. **Verified fine outdoors** — 90ms
-is shorter than a real button press (132–186ms), so nothing is missed.
+**Methodology note**: never attribute an un-instrumented residual (`total − known`) to a hypothesis
+without bracketing it with `esp_timer_get_time()` first — three estimates in the backlog were wrong
+this way. See "The residual trap" there.
 
-**Possible future revisit**: if Core 1 ever needs relief — a higher PCLK, or a much heavier waypoint
-load — dropping the *GPS-driven* `RADAR_REFRESH` to 5Hz while leaving the compass at 10Hz would halve
-the render rate for little visible cost, since translation matters less than rotation. Not needed
-today. If it is ever done, lower the GPS refresh and **not** the compass rate — the compass rate is
-what makes the rotation feel right.
-
-**Methodology note**: three separate estimates in the backlog were wrong because a *residual*
-(`total − known`) was named after a hypothesis. Never attribute an un-instrumented remainder; bracket
-it with `esp_timer_get_time()` first. See "The residual trap" in the backlog.
-
-**⚠️ The backlog is no longer render-only.** It was scoped to a single number — frame time — and every
-other subsystem went unexamined until a 2026-07-31 audit. Both items it turned up have since been
-built, and **neither was a CPU problem**:
-- ~~**§7 — beacon proximity** is rate-starved at 2 Hz against a 5 Hz source.~~ ✅ fixed — see the
-  Beacon Proximity section above.
-- ~~**§8 — sonar/buzzer**~~ ✅ **fixed.** The walking beat grid (`= now + interval` instead of `+=`,
-  ~8% jitter and a ~4% flat tempo) is fixed and verified. The waypoint distance→tempo mapping is now
-  **continuous** — geometric, 2000 ms at 50 m → 250 ms at 2 m — with a τ = 1.5 s EMA on the *distance*
-  as the GPS-noise guard, replacing the four-zone ladder and its hysteresis outright. The waypoint
-  sonar also honours `Waypoint::found` now, so tapping the waypoint within 15 m silences it exactly
-  as tapping the beacon ball does.
-
-§8 also grades the rest: input latency adequate for taps and coarse for drags; GPS healthy bar a
-syscall-per-byte UART drain; **compass and battery healthy, no action.** The compass is the example to
-follow — when its rate went 5→10 Hz someone correctly re-derived the heading EMA (1.5° → 0.5°). The
-recurring defect everywhere else is *a rate or quantization constant nobody re-derived after the
-pipeline around it changed*.
-
-**A pattern worth generalising, from the sonar fix**: prefer a *continuous* mapping for a continuous
-physical quantity, and put the noise filter on the **input** (a τ-based EMA on distance/RSSI) rather
-than hysteresis on the **output**. Hysteresis is only correct where a genuinely discrete decision is
-being made — beeping vs silent, in range vs out. The beacon ring (§7.3c) wants the same treatment.
+**The backlog is no longer render-only** — a 2026-07-31 audit found two other subsystems needed work
+(beacon proximity rate-starved at 2Hz; sonar timing jitter), both since fixed (see the Beacon
+Proximity section above and the backlog's §7/§8 for full detail). The recurring defect pattern across
+both: *a rate or quantization constant nobody re-derived after the pipeline around it changed* — the
+compass is the example that did it right (rate 5→10Hz, heading EMA correctly re-derived alongside
+it). Also worth generalising: prefer a continuous mapping for a continuous physical quantity, with the
+noise filter on the *input* (τ-based EMA) rather than hysteresis on the *output* — hysteresis belongs
+only where a genuinely discrete decision is being made.
 
 **Known, accepted issue: every GPX upload/delete visibly glitches the display** (shifted/wrapped
 frame content) — a real FFat write/erase briefly disables both cores' cache/interrupts, which can
@@ -745,11 +720,9 @@ this option and not the others* — for decisions that were genuinely reversible
 future reader will otherwise wonder "why didn't they just—". Use the template at
 `docs/adr/0000-template.md`, numbered sequentially (`0001-`, `0002-`, ...). Not every change needs
 one — a bug fix or a tuned constant doesn't; a choice like "software rotation vs hardware", "passive
-vs active BLE scan", "zero-copy `lv_obj` draw vs `lv_canvas`" does. When in doubt, check the backlog
-docs (`performance_optimization_backlog.md`, `ROADMAP.md`) first — several existing decisions
-documented there (the four load-bearing render flags, the `I2C_PROCESS_MS` floor, passive-vs-active
-BLE scanning) are ADR candidates once someone has time to extract them; new decisions from this point
-forward should get one directly instead of only living in prose docs.
+vs active BLE scan", "zero-copy `lv_obj` draw vs `lv_canvas`" does (all three already have ADRs —
+0004, 0010, 0005 respectively — cited here as examples of the *category*, not as open work). New
+decisions from this point forward should get one directly instead of only living in prose docs.
 **Historical backfill** (decisions made before 2026-07-31) is a separate, lower-priority pass — not
 required for new work — tracked in `docs/adr/BACKFILL_PLAN.md`.
 
