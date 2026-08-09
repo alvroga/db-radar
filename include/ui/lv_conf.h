@@ -39,7 +39,6 @@
 #define LV_USE_MEM_MONITOR 0
 
 // Fonts
-#define LV_USE_FONT_MONTSERRAT_22 1
 #define LV_FONT_MONTSERRAT_16 1   // Needed for LV_SYMBOL_BATTERY_* glyphs on battery label
 
 // Widgets
