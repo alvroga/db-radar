@@ -425,8 +425,8 @@ void createRadarScreen() {
         g_ui_state.center_lat = saved_lat;
         g_ui_state.center_lon = saved_lon;
     } else {
-        g_ui_state.center_lat = 34.133417;
-        g_ui_state.center_lon = -118.145190;
+        g_ui_state.center_lat = 0.0;
+        g_ui_state.center_lon = 0.0;
     }
 
     Serial.println("[RADAR] Radar screen created");

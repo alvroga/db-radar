@@ -1,6 +1,6 @@
 import pandas as pd, numpy as np, glob, os, re
 
-DIR = "/Users/dit/Documents/PlatformIO/Projects/cc-radar/docs/calibration"
+DIR = os.path.dirname(os.path.abspath(__file__))
 
 FILES = {
  '006': 'cal_006_flat360.csv',
