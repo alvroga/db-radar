@@ -711,6 +711,89 @@ static lv_obj_t* g_custom_tab_btns[6] = {};
 static lv_obj_t* g_custom_tabview     = nullptr;
 static int        g_custom_tab_count  = 0;
 
+// ============================================================================
+// HIDDEN GESTURE (Konami code, tap version) — pure Easter egg, no functional impact.
+// Four invisible zones sit in the screen margins the tabview/header never draw into
+// (x<60 or x>420, below the header), plus the existing GPS/WiFi tab buttons stand in
+// for A/B. A wrong tap (or 3s of inactivity) resets progress; matching the sequence
+// start restarts it rather than dropping to zero, so a stray tab switch mid-attempt
+// doesn't force the whole thing to be retapped from scratch.
+// ============================================================================
+enum class KonamiZone : uint8_t { ORANGE, PURPLE, PINK, BLUE, GPS_TAB, WIFI_TAB };
+static const KonamiZone k_konami_sequence[] = {
+    KonamiZone::ORANGE, KonamiZone::ORANGE,
+    KonamiZone::PURPLE, KonamiZone::PURPLE,
+    KonamiZone::PINK,   KonamiZone::BLUE,
+    KonamiZone::PINK,   KonamiZone::BLUE,
+    KonamiZone::WIFI_TAB, KonamiZone::GPS_TAB,
+};
+static constexpr size_t   KONAMI_LEN            = sizeof(k_konami_sequence) / sizeof(k_konami_sequence[0]);
+static constexpr uint32_t KONAMI_TAP_TIMEOUT_MS = 3000;
+static size_t   g_konami_progress    = 0;
+static uint32_t g_konami_last_tap_ms = 0;
+static lv_obj_t* g_konami_overlay    = nullptr;
+
+static void showKonamiEasterEgg() {
+    if (g_konami_overlay) return;  // Already showing
+
+    g_konami_overlay = lv_obj_create(lv_scr_act());
+    lv_obj_set_size(g_konami_overlay, 480, 480);
+    lv_obj_set_pos(g_konami_overlay, 0, 0);
+    lv_obj_set_style_bg_color(g_konami_overlay, lv_color_black(), 0);
+    lv_obj_set_style_bg_opa(g_konami_overlay, LV_OPA_COVER, 0);
+    lv_obj_set_style_border_width(g_konami_overlay, 0, 0);
+    lv_obj_set_style_radius(g_konami_overlay, 0, 0);
+    lv_obj_clear_flag(g_konami_overlay, LV_OBJ_FLAG_SCROLLABLE);
+
+    static const char* const k_art =
+        "     .  *  .   *  .\n"
+        "         ______\n"
+        "       .'  ..  '.\n"
+        "      /  o    o  \\\n"
+        "     |     __     |\n"
+        "      \\   '--'   /\n"
+        "       '.______.'\n"
+        "          |  |\n"
+        "         /|  |\\\n"
+        "        ' |  | '\n"
+        "           ||\n\n"
+        "    KONAMI CODE ACCEPTED\n"
+        "       tap to return";
+
+    lv_obj_t* art = lv_label_create(g_konami_overlay);
+    lv_label_set_text(art, k_art);
+    lv_obj_set_style_text_font(art, &iosevka_14, 0);
+    lv_obj_set_style_text_color(art, lv_color_hex(0x00FF00), 0);
+    lv_obj_set_style_text_align(art, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_center(art);
+
+    lv_obj_add_event_cb(g_konami_overlay, [](lv_event_t* e) {
+        if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
+        lv_obj_del(g_konami_overlay);
+        g_konami_overlay = nullptr;
+    }, LV_EVENT_CLICKED, nullptr);
+
+    Serial.println("[SETTINGS] Konami code accepted");
+}
+
+static void konamiOnZoneTap(KonamiZone zone) {
+    uint32_t now = millis();
+    if (g_konami_progress > 0 && (now - g_konami_last_tap_ms) > KONAMI_TAP_TIMEOUT_MS) {
+        g_konami_progress = 0;
+    }
+    g_konami_last_tap_ms = now;
+
+    if (zone == k_konami_sequence[g_konami_progress]) {
+        g_konami_progress++;
+        if (g_konami_progress == KONAMI_LEN) {
+            g_konami_progress = 0;
+            showKonamiEasterEgg();
+        }
+    } else {
+        g_konami_progress = (zone == k_konami_sequence[0]) ? 1 : 0;
+    }
+}
+
 namespace settings_screen {
 
 static void createBeaconTab(lv_obj_t* parent);  // defined after createSoundTab
@@ -752,6 +835,8 @@ void create() {
     g_cal_save_btn     = nullptr;
     g_cal_save_lbl     = nullptr;
     g_cal_phase        = CalPhase::IDLE;
+    g_konami_overlay   = nullptr;
+    g_konami_progress  = 0;
 
     // Create main screen with dark background
     ui.screen_settings = lv_obj_create(NULL);
@@ -849,6 +934,8 @@ void create() {
         lv_obj_add_event_cb(btn, [](lv_event_t* e) {
             if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
             int idx = (int)(intptr_t)lv_event_get_user_data(e);
+            if (idx == 0) konamiOnZoneTap(KonamiZone::GPS_TAB);
+            else if (idx == 1) konamiOnZoneTap(KonamiZone::WIFI_TAB);
             lv_tabview_set_act(g_custom_tabview, (uint16_t)idx, LV_ANIM_ON);
             for (int j = 0; j < g_custom_tab_count; j++) {
                 if (!g_custom_tab_btns[j]) continue;
@@ -918,6 +1005,31 @@ void create() {
     lv_obj_center(lbl_close);
 
     Serial.println("[SETTINGS] Close button created in main screen");
+
+    // Hidden gesture zones — transparent, in the screen margins outside the header/tabview
+    // (x<60 or x>420), which is currently always blank background. Never overlaps a real
+    // control, so it can't interfere with any existing tap target.
+    struct KonamiZoneRect { int16_t x, y, w, h; KonamiZone zone; };
+    static const KonamiZoneRect k_zones[] = {
+        {0,   100, 60, 190, KonamiZone::ORANGE},  // top-left margin
+        {0,   290, 60, 190, KonamiZone::PURPLE},  // bottom-left margin
+        {420, 100, 60, 190, KonamiZone::PINK},    // top-right margin
+        {420, 290, 60, 190, KonamiZone::BLUE},    // bottom-right margin
+    };
+    for (const auto& zr : k_zones) {
+        lv_obj_t* zone = lv_obj_create(ui.screen_settings);
+        lv_obj_set_size(zone, zr.w, zr.h);
+        lv_obj_set_pos(zone, zr.x, zr.y);
+        lv_obj_set_style_bg_opa(zone, LV_OPA_TRANSP, 0);
+        lv_obj_set_style_border_width(zone, 0, 0);
+        lv_obj_set_style_radius(zone, 0, 0);
+        lv_obj_clear_flag(zone, LV_OBJ_FLAG_SCROLLABLE);
+        lv_obj_add_event_cb(zone, [](lv_event_t* e) {
+            if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
+            konamiOnZoneTap((KonamiZone)(intptr_t)lv_event_get_user_data(e));
+        }, LV_EVENT_CLICKED, (void*)(intptr_t)zr.zone);
+    }
+
     Serial.println("[SETTINGS] Settings screen created successfully");
 }
 
