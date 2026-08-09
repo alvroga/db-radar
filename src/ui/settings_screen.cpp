@@ -541,6 +541,164 @@ static void openAPCredDialog(bool is_ssid, lv_obj_t* value_label) {
     lv_obj_center(lbl_save);
 }
 
+// Beacon MAC value label (updated when user saves a new MAC)
+static lv_obj_t* g_beacon_mac_val_label = nullptr;
+
+// Beacon MAC edit dialog state
+static struct {
+    lv_obj_t* overlay;
+    lv_obj_t* textarea;
+    lv_obj_t* keyboard;
+    lv_obj_t* value_label;
+} s_beacon_mac = {};
+
+// Reentrancy guard for beaconMacTextChanged() below — load-bearing, not defensive
+// style: lv_textarea_set_text() takes the char-by-char path whenever a max_length
+// is set (see lv_textarea.c), firing LV_EVENT_VALUE_CHANGED once per character
+// INSERTED WHILE THE OUTER CALL IS STILL MID-LOOP. Without this guard, calling
+// set_text() again from inside that handler re-enters lv_textarea_set_text() during
+// that loop and corrupts the textarea's label text buffer — reproduced on hardware
+// as a heap-corruption crash inside the FreeRTOS scheduler moments after opening
+// this dialog.
+static bool s_beacon_mac_formatting = false;
+
+// Tracks what beaconMacTextChanged() last displayed, so a trailing ':' can be
+// appended the moment a pair completes (typing "00" shows "00:" immediately, not
+// only once a 3rd character arrives) while still letting backspace collapse
+// through it cleanly: on deletion (raw shorter than what was last shown) a
+// trailing colon is never re-added, so backspacing "00:" lands on "00" instead of
+// bouncing back to "00:".
+static char s_beacon_mac_prev[18] = "";
+
+static void beaconMacSave(lv_event_t*) {
+    const char* text = lv_textarea_get_text(s_beacon_mac.textarea);
+    if (strlen(text) >= 17) {  // MAC address format: XX:XX:XX:XX:XX:XX — matches the "beacon mac" serial command
+        if (settings_manager::saveBeaconMAC(text)) {
+            beacon_proximity::refreshTarget();
+            lv_label_set_text(s_beacon_mac.value_label, text);
+        }
+    } else {
+        lv_label_set_text(s_beacon_mac.value_label, "Invalid MAC");
+    }
+    lv_obj_del(s_beacon_mac.overlay);
+    memset(&s_beacon_mac, 0, sizeof(s_beacon_mac));
+    s_beacon_mac_prev[0] = '\0';
+}
+
+static void beaconMacCancel(lv_event_t*) {
+    lv_obj_del(s_beacon_mac.overlay);
+    memset(&s_beacon_mac, 0, sizeof(s_beacon_mac));
+    s_beacon_mac_prev[0] = '\0';
+}
+
+// Auto-inserts ':' every 2 hex digits as the user types, so only the 12 hex
+// characters need typing — strips anything non-hex (including colons typed by
+// hand) and rebuilds, so it's idempotent and safe to call on every keystroke.
+static void beaconMacTextChanged(lv_event_t* e) {
+    if (s_beacon_mac_formatting) return;
+
+    lv_obj_t* ta = lv_event_get_target(e);
+    const char* raw = lv_textarea_get_text(ta);
+    bool inserting = strlen(raw) >= strlen(s_beacon_mac_prev);
+
+    char hex[13];
+    int hex_len = 0;
+    for (const char* p = raw; *p && hex_len < 12; p++) {
+        char c = *p;
+        if (c >= 'a' && c <= 'f') c -= ('a' - 'A');
+        if ((c >= '0' && c <= '9') || (c >= 'A' && c <= 'F')) {
+            hex[hex_len++] = c;
+        }
+    }
+
+    char formatted[18];
+    int out_len = 0;
+    for (int i = 0; i < hex_len; i++) {
+        if (i > 0 && i % 2 == 0) formatted[out_len++] = ':';
+        formatted[out_len++] = hex[i];
+    }
+    if (inserting && hex_len > 0 && hex_len % 2 == 0 && hex_len < 12) {
+        formatted[out_len++] = ':';  // pair just completed — show the separator right away
+    }
+    formatted[out_len] = '\0';
+
+    if (strcmp(raw, formatted) != 0) {
+        s_beacon_mac_formatting = true;
+        lv_textarea_set_text(ta, formatted);
+        lv_textarea_set_cursor_pos(ta, out_len);
+        s_beacon_mac_formatting = false;
+    }
+    strncpy(s_beacon_mac_prev, formatted, sizeof(s_beacon_mac_prev) - 1);
+    s_beacon_mac_prev[sizeof(s_beacon_mac_prev) - 1] = '\0';
+}
+
+static void openBeaconMacDialog(lv_obj_t* value_label) {
+    if (s_beacon_mac.overlay) return;  // already open
+
+    s_beacon_mac.value_label = value_label;
+
+    s_beacon_mac.overlay = lv_obj_create(lv_layer_top());
+    lv_obj_set_size(s_beacon_mac.overlay, LV_PCT(100), LV_PCT(100));
+    lv_obj_set_style_bg_color(s_beacon_mac.overlay, lv_color_black(), 0);
+    lv_obj_set_style_bg_opa(s_beacon_mac.overlay, LV_OPA_80, 0);
+    lv_obj_set_style_border_width(s_beacon_mac.overlay, 0, 0);
+    lv_obj_clear_flag(s_beacon_mac.overlay, LV_OBJ_FLAG_SCROLLABLE);
+
+    // Card: textarea at top, keyboard below, buttons at bottom (same layout as the AP credential dialog)
+    lv_obj_t* card = lv_obj_create(s_beacon_mac.overlay);
+    lv_obj_set_size(card, 420, 360);
+    lv_obj_center(card);
+    lv_obj_set_style_bg_color(card, lv_color_hex(0x1A1A2E), 0);
+    lv_obj_set_style_border_color(card, lv_color_hex(0x00AA44), 0);
+    lv_obj_set_style_border_width(card, 2, 0);
+    lv_obj_set_style_radius(card, 12, 0);
+    lv_obj_clear_flag(card, LV_OBJ_FLAG_SCROLLABLE);
+
+    // Textarea at top — pre-filled with the current MAC (or empty if unconfigured)
+    s_beacon_mac.textarea = lv_textarea_create(card);
+    lv_obj_set_size(s_beacon_mac.textarea, 390, 44);
+    lv_obj_align(s_beacon_mac.textarea, LV_ALIGN_TOP_MID, 0, 10);
+    lv_textarea_set_one_line(s_beacon_mac.textarea, true);
+    lv_obj_set_style_bg_color(s_beacon_mac.textarea, lv_color_hex(0x111111), 0);
+    lv_obj_set_style_text_color(s_beacon_mac.textarea, lv_color_hex(0xFFFFFF), 0);
+    lv_textarea_set_max_length(s_beacon_mac.textarea, 17);  // "XX:XX:XX:XX:XX:XX"
+    lv_textarea_set_placeholder_text(s_beacon_mac.textarea, "XX:XX:XX:XX:XX:XX");
+    lv_obj_add_event_cb(s_beacon_mac.textarea, beaconMacTextChanged, LV_EVENT_VALUE_CHANGED, nullptr);
+    const auto& st = settings_manager::getSettings();
+    if (st.beacon_count > 0) {
+        lv_textarea_set_text(s_beacon_mac.textarea, st.beacon_macs[0]);
+    }
+
+    // Keyboard directly below textarea
+    s_beacon_mac.keyboard = lv_keyboard_create(card);
+    lv_obj_set_size(s_beacon_mac.keyboard, 410, 175);
+    lv_obj_align(s_beacon_mac.keyboard, LV_ALIGN_TOP_MID, 0, 62);
+    lv_keyboard_set_textarea(s_beacon_mac.keyboard, s_beacon_mac.textarea);
+    lv_obj_set_style_bg_color(s_beacon_mac.keyboard, lv_color_hex(0x1A1A1A), 0);
+
+    // Buttons below keyboard
+    lv_obj_t* btn_cancel = lv_btn_create(card);
+    lv_obj_set_size(btn_cancel, 150, 40);
+    lv_obj_align(btn_cancel, LV_ALIGN_BOTTOM_LEFT, 10, -10);
+    lv_obj_set_style_bg_color(btn_cancel, lv_color_hex(0x444455), 0);
+    lv_obj_add_event_cb(btn_cancel, beaconMacCancel, LV_EVENT_CLICKED, nullptr);
+    lv_obj_t* lbl_cancel = lv_label_create(btn_cancel);
+    lv_label_set_text(lbl_cancel, "Cancel");
+    lv_obj_set_style_text_font(lbl_cancel, &iosevka_16, 0);
+    lv_obj_center(lbl_cancel);
+
+    lv_obj_t* btn_save = lv_btn_create(card);
+    lv_obj_set_size(btn_save, 150, 40);
+    lv_obj_align(btn_save, LV_ALIGN_BOTTOM_RIGHT, -10, -10);
+    lv_obj_set_style_bg_color(btn_save, lv_color_hex(0x00AA44), 0);
+    lv_obj_set_style_bg_color(btn_save, lv_color_hex(0x00CC55), LV_STATE_PRESSED);
+    lv_obj_add_event_cb(btn_save, beaconMacSave, LV_EVENT_CLICKED, nullptr);
+    lv_obj_t* lbl_save = lv_label_create(btn_save);
+    lv_label_set_text(lbl_save, "Save");
+    lv_obj_set_style_text_font(lbl_save, &iosevka_16, 0);
+    lv_obj_center(lbl_save);
+}
+
 // GPS Help modal (for info/help dialogs)
 static lv_obj_t* g_help_modal = nullptr;
 
@@ -575,6 +733,10 @@ void create() {
     g_ap_ssid_val_label    = nullptr;
     g_ap_pass_val_label    = nullptr;
     memset(&s_ap_cred, 0, sizeof(s_ap_cred));
+    g_beacon_mac_val_label = nullptr;
+    memset(&s_beacon_mac, 0, sizeof(s_beacon_mac));
+    s_beacon_mac_formatting = false;
+    s_beacon_mac_prev[0]    = '\0';
     g_sound_all_sw         = nullptr;
     g_sound_proximity_sw   = nullptr;
     g_sound_button_sw      = nullptr;
@@ -1804,11 +1966,23 @@ static void createBeaconTab(lv_obj_t* parent) {
     lv_obj_set_style_text_font(mac_lbl, &iosevka_16, 0);
     lv_obj_align(mac_lbl, LV_ALIGN_TOP_LEFT, 0, y_offset);
 
-    lv_obj_t* mac_val = lv_label_create(parent);
-    lv_label_set_text(mac_val, settings.beacon_count > 0 ? settings.beacon_macs[0] : "(not configured)");
-    lv_obj_set_style_text_color(mac_val, lv_color_hex(0xFFFFFF), 0);
-    lv_obj_set_style_text_font(mac_val, &iosevka_16, 0);
-    lv_obj_align(mac_val, LV_ALIGN_TOP_LEFT, 45, y_offset);
+    g_beacon_mac_val_label = lv_label_create(parent);
+    lv_label_set_text(g_beacon_mac_val_label, settings.beacon_count > 0 ? settings.beacon_macs[0] : "(not configured)");
+    lv_obj_set_style_text_color(g_beacon_mac_val_label, lv_color_hex(0xFFFFFF), 0);
+    lv_obj_set_style_text_font(g_beacon_mac_val_label, &iosevka_16, 0);
+    lv_obj_align(g_beacon_mac_val_label, LV_ALIGN_TOP_LEFT, 45, y_offset);
+
+    lv_obj_t* btn_edit_mac = lv_btn_create(parent);
+    lv_obj_set_size(btn_edit_mac, 70, 30);
+    lv_obj_align(btn_edit_mac, LV_ALIGN_TOP_LEFT, 250, y_offset - 4);
+    lv_obj_set_style_bg_color(btn_edit_mac, lv_color_hex(0x444455), 0);
+    lv_obj_add_event_cb(btn_edit_mac, [](lv_event_t*) {
+        openBeaconMacDialog(g_beacon_mac_val_label);
+    }, LV_EVENT_CLICKED, nullptr);
+    lv_obj_t* lbl_edit_mac = lv_label_create(btn_edit_mac);
+    lv_label_set_text(lbl_edit_mac, "Edit");
+    lv_obj_set_style_text_font(lbl_edit_mac, &iosevka_16, 0);
+    lv_obj_center(lbl_edit_mac);
     y_offset += 40;
 
     // Found / Missing toggle button

@@ -1,7 +1,7 @@
 # Beacon Proximity System
 
 **Status**: Complete ✅
-**Implemented**: 2026-01 (see CHANGELOG.md [Unreleased])
+**Implemented**: 2026-01-30 (see CHANGELOG.md `[v0.14.0]`)
 **Hardware**: ESP32-S3 BLE radio, QMI8658 buzzer via EXIO TCA9554
 
 ## Overview
@@ -242,7 +242,7 @@ Available via serial: `beacon trend`
 
 ## ⚠️ The tag MUST advertise in Legacy (BLE 4.0) mode
 
-`CONFIG_BT_NIMBLE_EXT_ADV` is **not set** in `sdkconfig.cc-radar`, so this firmware compiles the
+`CONFIG_BT_NIMBLE_EXT_ADV` is **not set** in `sdkconfig.db-radar`, so this firmware compiles the
 `ble_gap_disc()` path and can only receive **legacy** advertisements. If the tag's configurator app is
 switched to *Extend Advertisement (BLE 5.0)* or *PHY Coded (BLE 5.0)*, the radar will not see it
 **at all** — and the symptom is indistinguishable from a dead tag: RSSI pinned at -127 dBm,
@@ -254,7 +254,7 @@ suspecting anything in this firmware.
 
 Enabling BLE 5.0 extended advertising would mean turning on `CONFIG_BT_NIMBLE_EXT_ADV`, which changes
 the scan to `ble_gap_ext_disc()` and costs SRAM. Not worth it: legacy advertising is what a proximity
-beacon wants anyway, and this project's SRAM budget is tight (see `memory/sram_budget.md`).
+beacon wants anyway, and this project's SRAM budget is tight.
 
 ## BLE Scanning — one continuous passive scan
 
@@ -318,19 +318,28 @@ distance_m = 10 ^ ((measured_power - rssi) / (10 × n))
 
 ## Settings & Persistence
 
-All settings are stored in NVS and persist across reboots:
+Most settings are stored in NVS and persist across reboots. The feature-enabled flag is the
+exception — it's deliberately session-only, never written to NVS (loading it from a
+previously-saved `false` was blocking the feature on boot, so it now always starts enabled
+each session and is not persisted):
 
 | Setting | NVS Key | Default | Description |
 |---------|---------|---------|-------------|
-| Enabled | `bcn_en` | `true` | Feature on/off |
 | Sound | `bcn_snd` | `true` | Sonar beeping on/off |
-| MAC | `bcn_mac` | `AA:BB:CC:DD:EE:FF` | Target beacon MAC address |
-| Measured Power | `bcn_pwr` | `-59` dBm | Calibrated RSSI at 1 meter |
-| Path Loss N | `bcn_n` | `2.5` | Path loss exponent |
+| MAC | `bcn_mac` | *(unconfigured/empty)* | Target beacon MAC address — set via `beacon mac XX:XX:XX:XX:XX:XX` (serial) or the BEACON settings tab's Edit button (2026-08-09) |
+| Measured Power | `bcn_pwr` | `-59` dBm | Calibrated RSSI at 1 meter — serial-only (`beacon power`), no UI control |
+| Path Loss N | `bcn_n` | `2.5` | Path loss exponent — serial-only (`beacon n`), no UI control |
 
-**Settings UI**: Settings > Sound > "Beacon Sound" toggle (enable/disable audio feedback)
-**Settings code**: `src/ui/settings_screen.cpp:1241-1310`
-**Persistence code**: `src/utils/settings_manager.cpp:656-705`
+**Settings UI**: Settings > Sound > "Proximity Sound" toggle (enable/disable audio
+feedback). There's also a dedicated **BEACON** settings tab (`createBeaconTab()`,
+`src/ui/settings_screen.cpp:1786`) showing the configured MAC with an Edit button
+(text-entry dialog, mirrors the AP SSID/password dialog) and a Found/Missing toggle.
+Measured power and path-loss exponent have no UI — they're only settable via the
+`beacon power|n` serial commands.
+**Settings code**: `src/ui/settings_screen.cpp:1699-1701` (Proximity Sound toggle),
+`:1786` (Beacon tab), `openBeaconMacDialog()` (MAC edit dialog)
+**Persistence code**: `src/utils/settings_manager.cpp:257-262` (load),
+`:700-735` (save)
 
 ## API Reference
 
@@ -449,7 +458,7 @@ Zoom-gating logic lives in `src/utils/task_manager.cpp:79-94`.
   bin to be usable). True BT 5.1 AoA is impossible on this hardware (single antenna, no CTE IQ).
 - Multiple beacon tracking (show N nearest beacons simultaneously)
 - UWB integration for centimeter-accurate ranging (requires hardware upgrade — separate antenna(s)
-  and a UWB transceiver; all board GPIOs are currently allocated, see `hardware_constraints.md`)
+  and a UWB transceiver; all board GPIOs are currently allocated)
 - Custom beacon name/label display on radar
 - iBeacon / Eddystone UUID-based targeting (not just MAC)
 - RSSI history graph in dev screen

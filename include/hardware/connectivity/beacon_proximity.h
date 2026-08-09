@@ -103,6 +103,17 @@ void setEnabled(bool enabled);
 bool isEnabled();
 
 /**
+ * @brief Re-read the configured beacon MAC from settings immediately.
+ *
+ * The target address is otherwise only re-parsed on init() and on the
+ * disabled→enabled edge of setEnabled(), so a MAC saved while scanning is
+ * already active (50m zoom) would silently keep matching the old address
+ * until scanning was toggled off/on. Call this right after saving a new MAC
+ * (UI or serial) so the change takes effect immediately either way.
+ */
+void refreshTarget();
+
+/**
  * @brief True when the beacon is actively detected and still being hunted.
  *
  * Scanning, not yet marked found, and in a confirmed zone other than

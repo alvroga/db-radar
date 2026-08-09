@@ -544,6 +544,10 @@ void setEnabled(bool enabled) {
     }
 }
 
+void refreshTarget() {
+    applyTargetFromSettings();
+}
+
 bool isEnabled() {
     return g_state.scanning_enabled;
 }

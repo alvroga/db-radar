@@ -1056,7 +1056,7 @@ void handleGPXCommand(const char* args) {
     else if (strncmp(args, "index gentest clean", 20) == 0) {
         // Removes the file gentest writes, and reloads so it drops out of the
         // working set. Debug-only, run after gentest to leave the GPX folder clean.
-        const char* path = "/ffat/gpx/CLAUDE_NEARBY_TEST.GPX";
+        const char* path = "/ffat/gpx/DBG_NEARBY_TEST.GPX";
         if (remove(path) == 0) {
             Serial.printf("[GPX] Removed %s\n", path);
         } else {
@@ -1080,7 +1080,7 @@ void handleGPXCommand(const char* args) {
             if (count <= 0) count = 50;
             if (count > 500) count = 500;
 
-            const char* path = "/ffat/gpx/CLAUDE_NEARBY_TEST.GPX";
+            const char* path = "/ffat/gpx/DBG_NEARBY_TEST.GPX";
             FILE* f = fopen(path, "w");
             if (!f) {
                 Serial.printf("[GPX] ERROR: failed to create %s\n", path);
@@ -1119,7 +1119,7 @@ void handleGPXCommand(const char* args) {
         if (dir) {
             struct dirent* e;
             while ((e = readdir(dir)) != nullptr) {
-                if (strncmp(e->d_name, "CLAUDE_GENFILES_", 16) == 0) {
+                if (strncmp(e->d_name, "DBG_GENFILES_", 13) == 0) {
                     char path[300];
                     snprintf(path, sizeof(path), "/ffat/gpx/%s", e->d_name);
                     if (remove(path) == 0) removed++;
@@ -1145,15 +1145,16 @@ void handleGPXCommand(const char* args) {
             Serial.println("Usage: gpx index genfiles <lat> <lon> [count]");
         } else {
             if (count <= 0) count = 512;
-            if (count > 600) count = 600;  // past MAX_INDEX_FILES=512 on purpose, to also
-                                            // exercise the "file table full" degrade path
+            if (count > 600) count = 600;  // exercises past-cap behavior; well under the
+                                            // current MAX_INDEX_FILES=1024 by design — this
+                                            // is a mid-range stress count, not a boundary test
 
             double cos_lat = cos(lat * M_PI / 180.0);
             randomSeed(millis());
             int written = 0;
             for (int i = 0; i < count; i++) {
                 char path[300];
-                snprintf(path, sizeof(path), "/ffat/gpx/CLAUDE_GENFILES_%03d.GPX", i);
+                snprintf(path, sizeof(path), "/ffat/gpx/DBG_GENFILES_%03d.GPX", i);
                 FILE* f = fopen(path, "w");
                 if (!f) {
                     Serial.printf("[GPX] ERROR: failed to create %s\n", path);
@@ -1664,6 +1665,7 @@ void handleBeaconCommand(const char* args) {
         while (*args == ' ') args++;
         if (strlen(args) >= 17) {  // MAC address format: XX:XX:XX:XX:XX:XX
             settings_manager::saveBeaconMAC(args);
+            beacon_proximity::refreshTarget();
         } else if (strlen(args) == 0) {
             const auto& settings = settings_manager::getSettings();
             Serial.printf("[BEACON] Current MAC: %s\n", settings.beacon_count > 0 ? settings.beacon_macs[0] : "(not set)");
