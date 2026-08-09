@@ -1,0 +1,190 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>db-radar — Web Flasher</title>
+<meta name="description" content="Flash db-radar firmware to a Waveshare ESP32-S3-Touch-LCD-2.1 board straight from your browser.">
+<script type="module" src="https://unpkg.com/esp-web-tools@10/dist/web/install-button.js?module"></script>
+<style>
+  :root {
+    color-scheme: dark;
+    --bg: #0a0f0a;
+    --panel: #10160f;
+    --green: #39d353;
+    --green-dim: #1f7a34;
+    --text: #d7ffe0;
+    --text-dim: #7fae8c;
+    --border: #1e3320;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    min-height: 100vh;
+    background: radial-gradient(ellipse at top, #0e1a0f 0%, var(--bg) 60%);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    display: flex;
+    justify-content: center;
+    padding: 2.5rem 1rem 4rem;
+  }
+  main {
+    width: 100%;
+    max-width: 640px;
+  }
+  .badge {
+    display: inline-block;
+    font-size: 0.75rem;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    color: var(--green);
+    border: 1px solid var(--green-dim);
+    border-radius: 999px;
+    padding: 0.2rem 0.7rem;
+    margin-bottom: 1rem;
+  }
+  h1 {
+    font-size: 1.9rem;
+    margin: 0 0 0.4rem;
+    color: var(--text);
+  }
+  .subtitle {
+    color: var(--text-dim);
+    margin: 0 0 2rem;
+    line-height: 1.5;
+  }
+  .panel {
+    background: var(--panel);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 1.6rem;
+    margin-bottom: 1.5rem;
+  }
+  .panel h2 {
+    font-size: 1rem;
+    text-transform: uppercase;
+    letter-spacing: 0.06em;
+    color: var(--text-dim);
+    margin: 0 0 1rem;
+  }
+  esp-web-install-button {
+    display: block;
+    text-align: center;
+  }
+  button, [slot="activate"] button {
+    background: var(--green);
+    color: #06210c;
+    border: none;
+    border-radius: 8px;
+    padding: 0.9rem 1.6rem;
+    font-size: 1.05rem;
+    font-weight: 600;
+    cursor: pointer;
+    width: 100%;
+  }
+  button:hover { filter: brightness(1.1); }
+  .req {
+    font-size: 0.85rem;
+    color: var(--text-dim);
+    margin-top: 0.9rem;
+    text-align: center;
+  }
+  .msg {
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 0.9rem 1rem;
+    font-size: 0.9rem;
+    color: var(--text-dim);
+  }
+  ol, ul {
+    color: var(--text-dim);
+    line-height: 1.7;
+    padding-left: 1.3rem;
+  }
+  ol li::marker, ul li::marker { color: var(--green); }
+  a { color: var(--green); }
+  code {
+    background: #0d150d;
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    padding: 0.1rem 0.4rem;
+    font-size: 0.9em;
+  }
+  footer {
+    margin-top: 2.5rem;
+    font-size: 0.8rem;
+    color: var(--text-dim);
+    text-align: center;
+    line-height: 1.6;
+  }
+  footer a { color: var(--text-dim); text-decoration: underline; }
+  .version {
+    font-size: 0.8rem;
+    color: var(--text-dim);
+    margin-top: 1rem;
+    text-align: center;
+  }
+</style>
+</head>
+<body>
+<main>
+  <span class="badge">Waveshare ESP32-S3-Touch-LCD-2.1</span>
+  <h1>Flash db-radar from your browser</h1>
+  <p class="subtitle">
+    No PlatformIO, no toolchain — Chrome or Edge on desktop talks to the board's ROM
+    bootloader directly over USB. Works on a genuinely blank board.
+  </p>
+
+  <div class="panel">
+    <h2>Install</h2>
+    <esp-web-install-button manifest="manifest.json">
+      <button slot="activate">Connect &amp; Install</button>
+      <div slot="unsupported" class="msg">
+        Your browser doesn't support Web Serial. Open this page in
+        <strong>Chrome</strong> or <strong>Edge</strong> on desktop instead.
+      </div>
+      <div slot="not-allowed" class="msg">
+        Web Serial requires HTTPS. You're seeing this because the page isn't
+        served securely — this shouldn't happen on the published GitHub Pages URL.
+      </div>
+    </esp-web-install-button>
+    <p class="req">Requires a USB-C <strong>data</strong> cable (not charge-only) and Chrome or Edge on desktop.</p>
+  </div>
+
+  <div class="panel">
+    <h2>First boot, step by step</h2>
+    <ol>
+      <li>Plug the board into your computer with a USB-C data cable.</li>
+      <li>Click <strong>Connect &amp; Install</strong> above and pick the board's serial port.</li>
+      <li>On a new board, choose <strong>Erase device and install</strong> when prompted.</li>
+      <li>After it reboots, the board creates a WiFi access point named <code>Radar-GPX</code>
+        (password <code>radar123</code>).</li>
+      <li>Connect to that network and browse to <code>http://192.168.4.1</code> to upload GPX
+        waypoint files — see the
+        <a href="https://github.com/alvroga/db-radar#loading-gpx-waypoints">README's Loading GPX Waypoints section</a>
+        for the full walkthrough, including how to switch to your home WiFi instead.</li>
+    </ol>
+  </div>
+
+  <div class="panel">
+    <h2>Already flashed? Update over WiFi instead</h2>
+    <p class="msg">
+      Once db-radar is running, you don't need this page or a cable again — open the device's
+      own web portal at <code>/update</code> and upload the <code>-ota.bin</code> release asset.
+      This page's installer always does a full flash, meant for first-time setup or recovery.
+    </p>
+  </div>
+
+  <p class="version">Installs firmware <strong>v__FWVER__</strong> — built from
+    <a href="https://github.com/alvroga/db-radar">github.com/alvroga/db-radar</a></p>
+
+  <footer>
+    db-radar is licensed under
+    <a href="https://creativecommons.org/licenses/by-nc-sa/4.0/">CC BY-NC-SA 4.0</a>.
+    Provided as-is, build and use at your own risk.<br>
+    <a href="https://github.com/alvroga/db-radar/releases">All releases</a> ·
+    <a href="https://github.com/alvroga/db-radar">Source</a>
+  </footer>
+</main>
+</body>
+</html>
