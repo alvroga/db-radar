@@ -28,10 +28,10 @@ See full guide: `docs/custom_fonts.md`
 
 ## Current Fonts
 
-None yet! Start by converting your first font.
+- `iosevka_14.c` (14px)
+- `iosevka_16.c` (16px) — the most-used size in the current UI
+- `iosevka_20.c` (20px)
 
-**Recommendations**:
-- Roboto 16px (body text)
-- Roboto 20px (headers)
-- Roboto Mono 16px (coordinates)
+Each has its own wrapper file in `src/ui/fonts/` (`iosevka_NN_wrapper.c`) and is declared
+in `custom_fonts.h`. See `docs/custom_fonts.md` for the full conversion/build process.
 

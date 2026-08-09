@@ -17,8 +17,7 @@ start walking toward the beacon?*
 
 **Bluetooth 5.1 AoA/AoD direction finding cannot be done on this hardware.** It requires:
 
-- an **antenna array** with an RF switch (we have one onboard antenna, and no free GPIO for a switch —
-  see `memory/hardware_constraints.md`),
+- an **antenna array** with an RF switch (we have one onboard antenna, and no free GPIO for a switch),
 - access to **IQ samples** of the Constant Tone Extension, which the ESP32-S3 radio does not produce
   and ESP-IDF's NimBLE does not expose.
 

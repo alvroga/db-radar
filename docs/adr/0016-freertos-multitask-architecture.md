@@ -31,7 +31,7 @@ reads, memory monitoring, diagnostics). Current constants live in `include/utils
 (`TaskConfig`); the relative ordering — UI highest, background tasks low — is unchanged from the
 original design even though the absolute priority numbers have since been retuned (e.g. `UI_PRIORITY`
 is now 5, positioned "above FreeRTOS timer svc (1), below WiFi driver (22-23)" per the comment at
-`task_manager.h:32`, not the `3` CLAUDE.md's prose still quotes).
+`task_manager.h:32` — CLAUDE.md's prose used to lag behind at `3`, since corrected).
 
 ## Consequences
 

@@ -127,11 +127,10 @@ namespace system_config::timing {
 ```cpp
 namespace system_config::features {
     // Hardware features
-    constexpr bool ENABLE_WIFI_SCANNING = true;
-    constexpr bool ENABLE_BLE_SCANNING = true;
-    constexpr bool ENABLE_GPS = false;               // Optional GPS module
+    constexpr bool ENABLE_WIFI_SCANNING = false;     // Disabled for GPS radar project
+    constexpr bool ENABLE_BLE_SCANNING = false;      // Disabled for GPS radar project
+    constexpr bool ENABLE_GPS = true;                // GPS is this project's core function
     constexpr bool ENABLE_SD_CARD = true;
-    constexpr bool ENABLE_IMU = true;
     constexpr bool ENABLE_RTC = true;
 
     // Software features
@@ -175,29 +174,51 @@ config set <parameter> <value>
 
 ```
 > config show
-[CONFIG] Hardware Configuration:
-  Variant: Waveshare ESP32-S3-Touch-LCD-2.1
-  Description: 2.1" 480x480 IPS LCD with capacitive touch
-
-[CONFIG] Display: 480x480 @ 10000000Hz PCLK
-[CONFIG] Communication: I2C=400000Hz, SPI=4000000Hz
-[CONFIG] Features: WiFi=ON, BLE=ON, GPS=OFF, SD=ON, IMU=ON, RTC=ON
+==== System Configuration ====
+Hardware:        Waveshare ESP32-S3-Touch-LCD-2.1
+Description:     2.1" 480x480 IPS LCD with capacitive touch
+---- Display Configuration ----
+Screen Size:     480x480
+Pixel Clock:     10000000 Hz
+Buffer Lines:    480
+Header Height:   60 px
+Safe Margin:     16 px
+PWM Frequency:   20000 Hz
+---- Timing Configuration ----
+WiFi Scan:       15000 ms
+BLE Scan:        10000 ms
+BLE Duration:    3000 ms
+RTC Read:        5000 ms
+Memory Check:    60000 ms
+Health Check:    30000 ms
+---- Pin Configuration ----
+LED:             0
+I2C SDA:         15
+I2C SCL:         7
+LCD Backlight:   6
+LCD PCLK:        41
+LCD DE:          40
+LCD VSYNC:       39
+LCD HSYNC:       38
+GPS TX:          43
+GPS RX:          44
+===============================
 ```
+
+`config show` prints all three sections in sequence (display, timing, pins) — it doesn't
+report I2C bus speed or feature flags; those aren't part of this command's output today.
 
 ### Example: Display Configuration Details
 
 ```
 > config display
-[CONFIG] Display Configuration:
-  Screen: 480x480 pixels
-  Pixel Clock: 10000000 Hz (10 MHz)
-  Buffer Lines: 40
-
-  RGB Timing:
-    HSYNC: pulse=8, back=20, front=20
-    VSYNC: pulse=4, back=8, front=10
-
-  Critical timing parameters optimized for jitter-free operation
+---- Display Configuration ----
+Screen Size:     480x480
+Pixel Clock:     10000000 Hz
+Buffer Lines:    480
+Header Height:   60 px
+Safe Margin:     16 px
+PWM Frequency:   20000 Hz
 ```
 
 ## Customizing Configuration

@@ -40,28 +40,28 @@ it feels (§3.2). Three distinct gaps follow from it:
 
 | Aspect | Current state | Reference |
 |---|---|---|
-| Heading formula | 2-axis `atan2f(cy, cx)` — no tilt compensation | `compass_qmc5883l.cpp:120` |
-| Hard-iron correction | X, Y, **and Z** (WP-5) — Z unused by the heading formula, which stays 2-axis | `compass_qmc5883l.cpp:133-135` |
-| Z axis | Read into `z_raw`, offset applied (`cz`), **real value since WP-5** | `compass_qmc5883l.cpp:106, 133-135` |
+| Heading formula | 2-axis `atan2f(cy, cx)` — no tilt compensation | `compass_qmc5883l.cpp:139` |
+| Hard-iron correction | X, Y, **and Z** (WP-5) — Z unused by the heading formula, which stays 2-axis | `compass_qmc5883l.cpp:130-132` |
+| Z axis | Read into `z_raw`, offset applied (`cz`), **real value since WP-5** | `compass_qmc5883l.cpp:120, 132` |
 | Calibration procedure | **Two-phase (WP-5)**: Step 1 flat 360° spin (X/Y, unchanged) → Step 2 tumble/figure-8 (Z, min/max per axis, offset = (max+min)/2) | `settings_screen.cpp` calibration overlay |
 | Z offset at save time | Real value from Step 2's min/max, no longer hardcoded 0 | `settings_screen.cpp` Save/Next button callback |
 | 3-D coverage scoring | Elevation span + azimuth sector count of the corrected vector in **sensor frame** (no accelerometer needed) — Step 2 gates on all three of Z span/elevation span/azimuth sectors | `settings_screen.cpp` `calTimerCb()` TUMBLE branch |
 | Calibration quality | Coverage span **plus** `H0`/circle-fit residual/axis ratio (WP-4) — still Step-1-only, see §12 WP-5 | `settings_screen.cpp` calibration overlay |
 | Runtime health check | `compass_qmc5883l::classifyHealth()` — magnitude vs. `H0`, EMA+hysteresis (WP-4) | `compass_qmc5883l.h/.cpp`, `navigation.cpp` HUD label |
-| Field magnitude | Computed implicitly, **discarded** | `compass_qmc5883l.cpp:117-120` |
-| Declination | WMM2020 (n=1..3), once per session at first fix, NVS-cached | `wmm_declination.cpp`, `task_manager.cpp:1537-1541` |
-| Sensor config | 2 G range, 200 Hz ODR, 512 OSR, continuous | `compass_qmc5883l.cpp:48-50` |
-| Read rate | 10 Hz from System Task | `task_manager.cpp:1462-1473` |
+| Field magnitude | Computed implicitly, **discarded** | `compass_qmc5883l.cpp:134-136` |
+| Declination | WMM2020 (n=1..3), once per session at first fix, NVS-cached | `wmm_declination.cpp`, `task_manager.cpp:1569-1613` |
+| Sensor config | 2 G range, 200 Hz ODR, 512 OSR, continuous | `compass_qmc5883l.cpp:56-58` |
+| Read rate | 10 Hz from System Task | `task_manager.cpp:1757` |
 
 ### 2.1 Two documentation defects found while writing this
 
 Both are comments contradicting working code. **The code is correct** — the sign was verified
-empirically and is recorded in project memory (`feedback_wmm_sign.md`):
+empirically:
 
 - `include/utils/wmm_declination.h` — *"Apply: true_heading = magnetic_heading - declination"*
 - `include/settings_manager.h:69` — *"Apply: true_heading = magnetic_heading - compass_declination_deg"*
 
-Actual code, `task_manager.cpp:1541`: `true_heading += decl_settings.compass_declination_deg;`
+Actual code, `task_manager.cpp:1781`: `true_heading += decl_settings.compass_declination_deg;`
 
 Fix the comments, do not "fix" the code.
 
@@ -461,7 +461,7 @@ Both are about latency and known-unstable behaviour, not bandwidth:
 - Put it behind a **runtime kill switch** (setting + serial command) so it can be disabled instantly
   in the field if the bus misbehaves, without a reflash.
 - Follow the **existing compass suspension rules**: reads are fully suspended while the WiFi AP is up
-  and re-initialised after standby (`task_manager.cpp:1465-1516`). The accelerometer must obey the
+  and re-initialised after standby (`task_manager.cpp:1694-1748`). The accelerometer must obey the
   same gates or it will reintroduce exactly the case those gates exist for.
 - Record `i2c_manager` failure statistics before and after, and treat any change as blocking.
 
@@ -686,7 +686,7 @@ repeatedly (settings → DEV → Field Log → start → stop → back → repea
 with no crash or hang. Pre-flight testing itself caught and fixed three bugs first: a `sdkconfig.defaults`
 Kconfig footgun that silently kept FATFS on 8.3 filenames (CSV writes were failing outright), and two
 LVGL screen-lifecycle bugs in `goToSettingsScreen()` (two crashes + one hang, same root cause each
-time — see CHANGELOG entry and `memory/lvgl_screen_lifecycle.md`). Cleared for WP-2.
+time — see the matching CHANGELOG entry). Cleared for WP-2.
 
 **1.1 — Compass: expose the full corrected vector.** ✅ implemented
 `src/hardware/sensors/compass_qmc5883l.cpp`
@@ -713,7 +713,7 @@ New `src/hardware/sensors/accel_qmi8658.cpp` + header, modelled on `compass_qmc5
 **1.3 — Wire the accel read into the System Task.** ✅ implemented
 `src/utils/task_manager.cpp`, immediately after the compass read (~line 1462-1520).
 - Same tick, same place. **Must obey the existing gates**: reads fully suspended while the WiFi AP is
-  up, chip re-initialised after standby (`task_manager.cpp:1465-1516`). Skipping this reintroduces
+  up, chip re-initialised after standby (`task_manager.cpp:1694-1748`). Skipping this reintroduces
   exactly the cases those gates exist for.
 - Keep it inside one mutex acquisition alongside the compass where the `i2c_manager` API allows.
 - **Do not move the compass read to the I2C Task** while doing this — see
@@ -916,11 +916,11 @@ WP-7** (τ-per-zoom smoothing, ROADMAP FT-02) — it is independent of WP-6 and 
 - **The compass read stays in the System Task** (`docs/compass_i2c_constraint.md`).
 - **`I2C_PROCESS_MS = 20` is a floor with an undiagnosed cause** (ADR-0013). Do not lower it.
 - **Serial requires USB**, which also powers the 5 V rail — no serial diagnostics in the field.
-- **Editing `sdkconfig.defaults` does not change the build.** Delete `sdkconfig.cc-radar` and diff the
+- **Editing `sdkconfig.defaults` does not change the build.** Delete `sdkconfig.db-radar` and diff the
   regenerated file (`sdkconfig_regeneration.md`).
 - **The four render-pipeline flags in CLAUDE.md are load-bearing.** Nothing here should touch them.
 
-**Build**: `pio run` (env `cc-radar`, ESP-IDF), `pio run -t upload`, `pio device monitor` at 115200.
+**Build**: `pio run` (env `db-radar`, ESP-IDF), `pio run -t upload`, `pio device monitor` at 115200.
 
 **Commit discipline**: do not commit until the user has verified on hardware. This applies especially
 to WP-0.2, which is a subjective feel change.

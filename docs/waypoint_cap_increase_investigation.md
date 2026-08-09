@@ -40,13 +40,13 @@ compiling the current struct definition (`include/ui/ui_manager.h:32-41`) standa
 ```
 sizeof(Waypoint)       = 144 bytes   (0x90)
 sizeof(WaypointDetail) = 1280 bytes  (0x500)  — desc[1024] + hint[256], PSRAM-resident
-sizeof(void*)          = 4 bytes     — Xtensa is 32-bit; this project's own earlier ~136B
-                                        estimate in memory/sram_budget.md assumed 8-byte
-                                        pointers and was slightly off. 144B is exact.
+sizeof(void*)          = 4 bytes     — Xtensa is 32-bit; an earlier back-of-envelope ~136B
+                                        estimate assumed 8-byte pointers and was slightly
+                                        off. 144B is exact, measured directly off the ELF.
 ```
 
 Current static SRAM, read directly off the current build's ELF via `readelf -S`
-(`.pio/build/cc-radar/firmware.elf` — matches the current working tree; g_ui_state's size in this
+(`.pio/build/db-radar/firmware.elf` — matches the current working tree; g_ui_state's size in this
 build is consistent with the desc/hint-in-PSRAM struct, not the pre-migration one):
 
 ```
@@ -55,8 +55,6 @@ build is consistent with the desc/hint-in-PSRAM struct, not the pre-migration on
 -----------------------
 Static total 133,056 B  = 40.6% of the 327,680 B budget this project targets
 ```
-
-This matches `memory/sram_budget.md`'s reported 132,384 B / 40.4% closely enough to trust both.
 
 **Cost per waypoint added**: 144 B SRAM (the `Waypoint` array entry) + 1,280 B PSRAM (the
 `WaypointDetail` block, allocated once via `heap_caps_calloc(MAX_WAYPOINTS, ...)` in
@@ -91,8 +89,8 @@ entry for a competing SRAM claim:
   config-constant or logic-only, no new persistent SRAM.
 
 **Nothing currently on the roadmap wants this SRAM.** The one standing reason *not* to spend all of it
-is the project's own rule of thumb (`memory/sram_budget.md`: *"if total approaches 80% utilization,
-revisit"*) — general safety margin, not a specific feature. With NimBLE's ~25 KB dynamic-only cost
+is this project's own established safety margin — revisit if total static SRAM approaches 80%
+utilization — general safety margin, not a specific feature. With NimBLE's ~25 KB dynamic-only cost
 (active solely at 50 m zoom) layered on top of the 500-cap static total: 197,856 + 25,600 = 223,456 B
 = **68.2%**, leaving ~104 KB (31.8%) free — comfortably under that 80% line, and close to (slightly
 better than) the pre-migration operating point the project already ran on. This is a static-link
@@ -136,8 +134,7 @@ the trig math — which tells us nothing about the *marginal* cost per additiona
 
 **Not known**: nobody has loaded 200+ waypoints and read `wpt_us`. There is no isolated measurement of
 the Haversine loop's per-waypoint cost at this project's own naming convention would call a "residual"
-— and this project has three documented cases
-(`memory/feedback_residual_attribution.md`) where guessing at an un-instrumented number instead of
+— and this project has three documented cases where guessing at an un-instrumented number instead of
 measuring it turned out wrong. I'm not going to add a fourth. A rough bound: even if soft-double
 `sin`/`cos`/`atan2`/`sqrt` cost only ~5-10 µs each on this core (a plausible but unverified figure for
 Xtensa LX7 soft-float), 10 calls × 500 waypoints × ~7 µs ≈ **35 ms** — on the same order as the entire
@@ -248,8 +245,8 @@ conservative option) rather than a second guess.
    summary-only, linking here and to CHANGELOG.md), add a CHANGELOG.md entry, and file an ADR — this
    qualifies as a real architectural decision (raise the cap + shrink per-waypoint cost, vs. the
    rejected alternative of keeping the cap low and doing "nearest 500 at load time" filtering on the
-   host/GPX side) per CLAUDE.md's documentation standards. Would be ADR-0021 (next unused number as of
-   this writing).
+   host/GPX side) per CLAUDE.md's documentation standards. This became
+   [ADR-0022](adr/0022-waypoint-cap-raised-to-500-not-700.md).
 
 ## Open question for the user
 

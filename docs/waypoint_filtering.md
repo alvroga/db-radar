@@ -46,14 +46,14 @@ in it. It's also meaningful, not just harmless: the working-set selection
 picks the N globally-closest waypoints with **no distance cap**, so there are real far-away candidates
 for a wider cutoff to actually surface.
 
-**Calculation** (`src/ui/navigation.cpp:296-300`):
+**Calculation** (`src/ui/navigation.cpp:631-633`):
 ```cpp
 int zoom_idx = static_cast<int>(ui.current_zoom);
 float zoom_radius = ui_manager::RadarConfig::ZOOM_CONFIGS[zoom_idx].radius_meters;
 float max_indicator_distance = zoom_radius * ui_manager::RadarConfig::DISTANCE_FILTER_MULTIPLIER;
 ```
 
-**Filtering Logic** (`src/ui/navigation.cpp:672-678`):
+**Filtering Logic** (`src/ui/navigation.cpp:715-716`):
 ```cpp
 // Distance from the equirectangular approximation (see below), not Haversine
 if (distance > max_indicator_distance) {
@@ -94,7 +94,7 @@ static constexpr int INDICATOR_EDGE_INSET = 25;  // Inset from edge (pixels)
 
 ### How It Works
 
-**8-Sector Division** (`src/ui/navigation.cpp:303-310`):
+**8-Sector Division** (`src/ui/navigation.cpp:636-637`):
 ```
        N (0)
    NW (7)  NE (1)
@@ -113,7 +113,7 @@ Each sector covers 45° of the compass:
 - **Sector 6 (W)**: 247.5° - 292.5° (West)
 - **Sector 7 (NW)**: 292.5° - 337.5° (Northwest)
 
-**Clustering Algorithm** (`src/ui/navigation.cpp:371-386`):
+**Clustering Algorithm** (`src/ui/navigation.cpp:798-810`):
 
 For each off-screen waypoint:
 1. Calculate bearing (direction from user to waypoint)
@@ -148,16 +148,20 @@ if (distance < sectors[sector].closest_distance) {
 **Appearance**: Yellow filled circles
 - **Size**: 25×25 pixels (circular)
 - **Color**: `0xFFFF00` (bright yellow)
-- **Drawing**: `src/ui/navigation.cpp:365-369`
+- **Drawing**: `src/ui/navigation.cpp:743-750`
 
 ```cpp
-if (x >= 0 && x < screen_size && y >= 0 && y < screen_size) {
-    // On-screen: draw yellow circle beacon
-    int size = ui_manager::RadarConfig::WAYPOINT_SIZE;  // 25x25
-    int half_size = size / 2;
-    lv_canvas_draw_rect(canvas, x - half_size, y - half_size, size, size, &circle_dsc);
-}
+// On-screen: draw yellow circle beacon
+int size = ui_manager::RadarConfig::WAYPOINT_SIZE;  // 25x25
+int half_size = size / 2;
+const lv_area_t dot_area = { (lv_coord_t)(x - half_size), (lv_coord_t)(y - half_size),
+                             (lv_coord_t)(x - half_size + size - 1),
+                             (lv_coord_t)(y - half_size + size - 1) };
+lv_draw_rect(ctx, &circle_dsc, &dot_area);
 ```
+
+(This draws directly into LVGL's draw context via `lv_draw_rect` — there's no `lv_canvas`
+in the radar's render path; see CLAUDE.md's Render Pipeline section.)
 
 ### Off-Screen Indicators
 **Appearance**: Orange triangles at screen edge
@@ -165,7 +169,7 @@ if (x >= 0 && x < screen_size && y >= 0 && y < screen_size) {
 - **Color**: `0xFF8800` (orange - distinct from yellow)
 - **Position**: 25px inset from circular screen edge
 - **Direction**: Triangle points toward waypoint bearing
-- **Drawing**: `src/ui/navigation.cpp:250-289`
+- **Drawing**: `src/ui/navigation.cpp:563` (`drawOffScreenIndicator()`)
 
 ```cpp
 // Position indicator 25px inset from circular edge
@@ -188,10 +192,10 @@ points[0].y = edge_y - (tri_size * 0.8) * cos(bearing);
 
 ## Complete Filtering Pipeline
 
-### Processing Flow (`src/ui/navigation.cpp:291-395`)
+### Processing Flow (`src/ui/navigation.cpp:622`, `drawWaypoints()`)
 
 ```
-1. Calculate max_indicator_distance (zoom_radius × 10)
+1. Calculate max_indicator_distance (zoom_radius × 100)
    ↓
 2. FOR each waypoint (0 to waypoint_count):
    ↓
@@ -258,22 +262,24 @@ compute bearing" step. See [ADR-0022](adr/0022-waypoint-cap-raised-to-500-not-70
     waypoints skip it entirely
   - 1× sector assignment (integer division) — off-screen waypoints only
 
-**At the current `MAX_WAYPOINTS = 500`** this is the change that made raising the cap from 50 safe —
-the old per-waypoint cost was unconditional double-precision transcendentals on an ESP32-S3 FPU that's
-single-precision only, so it would have scaled 10× worse at the new cap. Field-verified on hardware at
-the current real-world waypoint count; a synthetic 500-waypoint `wpt_us` measurement is still open
-(see ADR-0022).
+This is the change that made raising the cap from 50 safe in the first place — the old per-waypoint
+cost was unconditional double-precision transcendentals on an ESP32-S3 FPU that's single-precision
+only. **`MAX_WAYPOINTS` is currently 200** (raised to 500 same-day-rolled-back to 200 after a hardware
+boot failure — see ADR-0022 — then superseded by the two-tier PSRAM index, ADR-0023, rather than
+raising the cap again). Field-verified on hardware at the current real-world waypoint count; a
+synthetic 200-waypoint `wpt_us` measurement is still open.
 
 ### Memory Usage
 - **Sector storage**: 8 × `SectorWaypoint` structs
   ```cpp
   struct SectorWaypoint {
-      bool has_waypoint = false;      // 1 byte
+      bool has_waypoint = false;       // 1 byte
       float closest_distance = FLT_MAX; // 4 bytes
-      double bearing = 0.0;            // 8 bytes
-  };  // Total: 13 bytes + 3 padding = 16 bytes
+      double bearing = 0.0;             // 8 bytes
+      int waypoint_index = -1;          // 4 bytes — added 2026-08-07 for tap-to-detail
+  };  // ~24 bytes with standard alignment padding (not runtime-verified via sizeof)
   ```
-- **Total**: 8 × 16 bytes = **128 bytes** (stack allocation)
+- **Total**: 8 × ~24 bytes = **~192 bytes** (stack allocation)
 
 ### Rendering Performance
 - **On-screen waypoints**: Direct draw (no limit beyond `MAX_WAYPOINTS` total)
@@ -283,7 +289,7 @@ the current real-world waypoint count; a synthetic 500-waypoint `wpt_us` measure
 **Frame time impact**: the often-quoted "<2ms for 50 waypoints" figure was never actually measured —
 see CLAUDE.md's Waypoint Filtering section. Waypoint drawing measures ~5ms in the instrumented frame
 breakdown at the old 50-waypoint cap. Read `wpt_us` off the `perf` HUD for the current figure rather
-than trusting either number, especially at the new 500-waypoint cap.
+than trusting either number, especially at the current 200-waypoint cap.
 
 ---
 
@@ -354,10 +360,10 @@ int sector = (int)((bearing_deg + 11.25f) / 22.5f) % NUM_SECTORS;
 ## Code References
 
 ### Key Files
-- **Algorithm**: `src/ui/navigation.cpp:291-395` - `drawWaypoints()` function
+- **Algorithm**: `src/ui/navigation.cpp:622` - `drawWaypoints()` function
 - **Configuration**: `include/ui/ui_manager.h:54-81` - `RadarConfig` struct
-- **Off-screen drawing**: `src/ui/navigation.cpp:250-289` - `drawOffScreenIndicator()`
-- **Coordinate conversion**: `src/ui/navigation.cpp:98-135` - `latLonToScreen()`
+- **Off-screen drawing**: `src/ui/navigation.cpp:563` - `drawOffScreenIndicator()`
+- **Coordinate conversion**: `src/ui/navigation.cpp:264` - `latLonToScreen()`
 
 ### Important Constants
 ```cpp
@@ -431,7 +437,7 @@ on-screen dots and off-screen triangles disappear, on-screen or off.
 
 ### Performance Optimizations
 1. **Spatial indexing**: Use quadtree for O(log n) distance queries (beneficial well before the
-   current 500-waypoint cap, unlike when this was written against a 50-waypoint cap)
+   current 200-waypoint cap, unlike when this was written against a 50-waypoint cap)
 2. **Dirty flag**: Only recalculate when waypoints change or user moves significantly
 3. ~~GPU acceleration: Offload Haversine calculations to hardware floating-point unit~~ — moot;
    Haversine was replaced by the equirectangular approximation (2026-08-05), which is already cheap
@@ -462,4 +468,4 @@ off-screen indicators made tappable, detail-screen distance display added. Previ
 [ADR-0022](adr/0022-waypoint-cap-raised-to-500-not-700.md) — superseded by the two-tier PSRAM index,
 [ADR-0023](adr/0023-two-tier-waypoint-index.md); Haversine replaced with equirectangular approximation)
 **Author**: GPS Radar Development Team
-**Related Documentation**: `README.md`, `CLAUDE.md`, `docs/gps_settings_simplification.md`
+**Related Documentation**: `README.md`, `CLAUDE.md`

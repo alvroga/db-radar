@@ -18,16 +18,12 @@ suspect the hardware and most inclined to suspect your last commit.
 
 **Fix**: **full power cycle.** Unplug USB *and* disconnect the battery for ~10 s so the slaves lose
 power and release the lines. The reset button is not enough — that is the entire point of the failure
-mode. ✅ Confirmed to resolve it (2026-07-31).
+mode. Confirmed to resolve it (2026-07-31).
 
 **Diagnostic value**: if a power cycle fixes it, it was the bus, not your code. A code fault would
 reproduce deterministically across power cycles; this does not.
 
-**Not yet implemented — the durable fix**: standard I2C recovery before `i2c_new_master_bus()` — drive
-SDA/SCL as plain GPIOs, pulse SCL up to 9 times with SDA released (clocking the stuck slave through the
-byte it is waiting on so it lets go), issue a manual STOP, then hand the pins to the driver. Note that
-`i2c_manager::resetBus()` already exists (`:203`) but nothing calls it at boot, and the failed EXIO
-ping only prints a warning and continues.
+**Full detail**: [`docs/i2c.md`](i2c.md) and [`docs/i2c_bus_freeze_investigation.md`](i2c_bus_freeze_investigation.md).
 
 ### **Display Issues**
 
@@ -38,14 +34,9 @@ ping only prints a warning and continues.
 - PCLK frequency too high
 - Poor power supply
 
-**Solutions**:
-```cpp
-// Use stable timing baseline
-cfg.timings.pclk_hz = 10000000;  // Reduce from 12MHz
-cfg.timings.hsync_back_porch = 20;   // Increase from 16
-cfg.timings.hsync_front_porch = 20;  // Increase from 16
-cfg.timings.vsync_front_porch = 10;  // Increase from 8
-```
+**Solutions**: this project's timing baseline is already tuned (10MHz PCLK, specific porch values) —
+see [`docs/display.md`](display.md) for the full RGB timing table and why each value is what it is,
+rather than guessing at new numbers.
 
 #### No Display Output
 **Symptoms**: Blank screen, backlight may work
@@ -57,7 +48,7 @@ cfg.timings.vsync_front_porch = 10;  // Increase from 8
 **Solutions**:
 1. Verify LCD_CS is held HIGH after init
 2. Check SPI command sequence
-3. Monitor serial output for timing confirmation
+3. Monitor serial output for timing confirmation — see [`docs/display.md`](display.md)
 
 #### Color Issues
 **Symptoms**: Wrong colors, color bleeding
@@ -65,406 +56,200 @@ cfg.timings.vsync_front_porch = 10;  // Increase from 8
 - Incorrect RGB pin mapping
 - Signal integrity issues
 
-**Solutions**:
-```cpp
-// Verify DATA_PINS array
-static const int DATA_PINS[16] = {
-    5,45,48,47,21,14,13,12,11,10,9,46,3,8,18,17
-};
-```
+**Solutions**: verify the `DATA_PINS` array matches CLAUDE.md's GPIO Pin Assignments table exactly —
+a single swapped pin here shows up as wrong colors, not a blank screen.
 
 ### **I2C Communication Errors**
 
-#### Frequent Bus Errors
-**Symptoms**:
-```
-[Wire.cpp:499] requestFrom(): i2cWriteReadNonStop returned Error -1
-```
+This project uses a unified I2C manager (`i2c_manager.cpp`/`.h`, ESP-IDF's `driver/i2c_master.h`) —
+there is no `Wire` library anywhere in this codebase, so any advice referencing `Wire.begin()` /
+`Wire.beginTransmission()` is for a different (Arduino-framework) build and does not apply here.
 
-**Causes**:
-- Device not connected
-- Bus speed too high
-- Multiple I2C implementations conflict
-- Insufficient pull-up resistors
+#### Frequent Bus Errors / Device Not Responding
+**Symptoms**: repeated I2C failures logged for a specific device, or a device that never responds.
 
-**Solutions**:
-1. **Reduce I2C frequency**:
-```cpp
-Wire.begin(I2C_SDA, I2C_SCL, 100000);  // Reduce from 400kHz
-```
+**Diagnose and fix via**:
+- `i2c_manager` already retries and tracks per-device failure stats — check `config show` or the
+  relevant serial diagnostics for current bus health rather than adding new throttling code.
+- Verify device addresses against the table in [`docs/i2c.md`](i2c.md): Touch (CST820, 0x15), RTC
+  (PCF85063, 0x51), IO Expander (TCA9554, 0x20), Compass (QMC5883L, 0x0D), IMU (QMI8658, 0x6A/0x6B).
+- If the symptom is a full boot hang rather than intermittent errors, see the stuck-bus section above
+  — that is a different failure mode with a different fix (power cycle, not a code change).
 
-2. **Implement throttling**:
-```cpp
-static uint32_t last_read = 0;
-if (millis() - last_read >= 5000) {
-    // Perform I2C operation
-    last_read = millis();
-}
-```
-
-3. **Check device presence**:
-```cpp
-bool isDevicePresent(uint8_t addr) {
-    Wire.beginTransmission(addr);
-    return (Wire.endTransmission() == 0);
-}
-```
-
-#### Device Not Responding
-**Symptoms**: Specific I2C device timeouts
-**Causes**:
-- Device not connected
-- Wrong I2C address
-- Power supply issues
-
-**Solutions**:
-1. **I2C Scanner**:
-```cpp
-void scanI2C() {
-    for (uint8_t addr = 1; addr < 127; addr++) {
-        Wire.beginTransmission(addr);
-        if (Wire.endTransmission() == 0) {
-            Serial.printf("Device found at 0x%02X\n", addr);
-        }
-    }
-}
-```
-
-2. **Verify addresses**:
-- Touch (CST820): 0x15
-- RTC (PCF85063): 0x51
-- IO Expander (TCA9554): 0x20
-- IMU (QMI8658): 0x6A or 0x6B
+**Full guide** (retry logic, bus recovery, historical EXIO pin-mapping bug):
+[`docs/i2c.md`](i2c.md).
 
 ### **Touch Issues**
 
-#### Touch Not Responding
-**Symptoms**: No touch events registered
-**Causes**:
-- I2C communication failure
-- Wrong touch mapping
-- Interrupt pin not configured
+**Symptoms**: no touch events, touch offset/inaccurate coordinates, touch works but at the wrong
+position.
 
-**Solutions**:
-1. **Verify I2C communication**
-2. **Check touch mapping**:
-```cpp
-// CST820 configuration
-data->point.x = touch_x;  // swap_xy = false
-data->point.y = 480 - touch_y;  // inv_y = true
-```
-
-#### Inaccurate Touch
-**Symptoms**: Touch offset or wrong coordinates
-**Causes**:
-- Incorrect coordinate mapping
-- Need calibration
-
-**Solutions**:
-```cpp
-// Fine-tune touch mapping in cst820.cpp
-// Test with touch debug output enabled
-```
+The touch coordinate pipeline (CST820 register reads, coordinate scaling, circular-display masking)
+is documented in detail, with exact current code references, in [`docs/touch.md`](touch.md) — consult
+that rather than a simplified snippet here, since the scaling/inversion logic is more involved than a
+one-line swap and has changed over the project's history.
 
 ### **WiFi/BLE Issues**
 
 #### WiFi Scanning Shows 0 Networks
 **Symptoms**: WiFi count always 0
-**Causes**:
-- WiFi not properly initialized
-- Scan timing issues
-- Radio interference
 
 **Solutions**:
-```cpp
-// Verify initialization order
-WiFi.mode(WIFI_STA);
-WiFi.disconnect(true);
-WiFi.scanDelete();
-```
+1. Confirm WiFi scanning is actually enabled: `diag wifi on`
+2. Check `wifi_manager`'s connection state and mode — see
+   [`docs/wifi_implementation_guide.md`](wifi_implementation_guide.md) for the full boot-mode
+   architecture (AP standalone / STA standalone / in-session) and which mode you're actually in.
+3. WiFi and BLE radios are mutually exclusive on this project — NimBLE only initializes when WiFi is
+   not active. If BLE is active, WiFi scanning will show nothing by design, not by fault.
 
 #### BLE Scanning Not Working
-**Symptoms**: BLE count always 0
-**Causes**:
-- Wrong BLE library (NimBLE vs standard)
-- Scan parameters incorrect
-- Radio interference
+**Symptoms**: BLE count always 0, or a configured beacon is never found
+
+**This project uses NimBLE, not the standard `BLEDevice.h` stack — that migration (ADR-0009) is
+deliberate and saved ~40KB SRAM. Do not "fix" this by switching back to standard BLE.**
 
 **Solutions**:
-1. **Use standard ESP32 BLE**:
-```cpp
-#include <BLEDevice.h>  // Not NimBLE
-```
+1. Passive scanning is load-bearing here, not a power-saving choice — active scanning defers the
+   `onResult` callback until a scan response arrives, which a legacy `ADV_IND` advertiser may never
+   send. Don't change `setActiveScan()` without reading why first.
+2. If a specific target device is never found: `beacon status` disambiguates "the scan itself is
+   broken" (near-zero scan callbacks) from "the scan works but never sees this device" (many
+   callbacks, zero matching the target MAC) — the two look identical from the outside otherwise.
+3. The target device must advertise in **Legacy (BLE 4.0)** mode — BLE 5.0 Extended
+   Advertising/Coded PHY is invisible to this scanner and looks exactly like a dead/out-of-range
+   device.
 
-2. **Verify scan parameters**:
-```cpp
-pScan->setActiveScan(false);  // Passive scan
-pScan->setInterval(160);
-pScan->setWindow(80);
-```
+**Full guide**: [`docs/beacon_proximity.md`](beacon_proximity.md).
 
 ### **Memory Issues**
 
-#### Heap Fragmentation
-**Symptoms**: Random crashes, malloc failures
-**Causes**:
-- Memory leaks
-- Large allocations fragmenting heap
-- Insufficient PSRAM usage
+There is no `ESP.getFreeHeap()` / `ESP.getFreePsram()` in this codebase (those are Arduino-framework
+calls) — this is an ESP-IDF build. Use the `memory` serial command family instead:
 
-**Solutions**:
-1. **Monitor heap**:
-```cpp
-Serial.printf("Free heap: %d, PSRAM: %d\n",
-              ESP.getFreeHeap(), ESP.getFreePsram());
+```
+memory stats       Current heap/PSRAM/LVGL usage
+memory integrity   Check heap integrity
+memory report      Full system memory report
+memory leak start|stop|report   Leak detection over a time window
 ```
 
-2. **Use PSRAM for large buffers**:
-```cpp
-cfg.flags.fb_in_psram = 1;
-```
+**Full guide** (pool sizes, corruption checks, the reasoning behind the current conservative
+allocation): [`docs/memory_management.md`](memory_management.md).
 
 #### Stack Overflow
-**Symptoms**: Core panic, stack traces
-**Causes**:
-- Large local variables
-- Deep function recursion
-- Insufficient task stack size
+**Symptoms**: core panic, stack-related crash
+**Causes**: large local variables, deep recursion, insufficient task stack size
 
-**Solutions**:
-```cpp
-// Increase task stack size
-xTaskCreatePinnedToCore(task_func, "task", 8192, nullptr, 1, nullptr, 0);
-```
+**Solutions**: task stack sizes are defined in `include/utils/task_manager.h`
+(`TaskConfig::UI_STACK_SIZE` etc.) — check `task status` for current stack high-water marks before
+assuming a size increase is needed.
 
 ### **Performance Issues**
 
 #### Low Frame Rate
-**Symptoms**: Sluggish UI, low FPS
-**Causes**:
-- Blocking I2C operations
-- Inefficient LVGL configuration
-- CPU-intensive operations in main loop
+**Symptoms**: sluggish UI, low FPS
 
-**Solutions**:
-1. **Throttle I2C operations**
-2. **Optimize LVGL**:
-```cpp
-cfg.bounce_buffer_size_px = 10 * 480;
-cfg.psram_trans_align = 64;
-```
-3. **Move heavy operations to tasks**
-
-#### High Memory Usage
-**Symptoms**: Out of memory errors
-**Causes**:
-- LVGL objects not cleaned up
-- Large static buffers
-- Memory fragmentation
-
-**Solutions**:
-1. **Clean up LVGL objects**:
-```cpp
-lv_obj_del(object);
-```
-2. **Use dynamic allocation wisely**
-3. **Monitor memory usage regularly**
+The render pipeline is a zero-copy design with several load-bearing constraints (clip_corner off,
+`radar_obj` not clickable, `full_refresh` tied to rotation mode) — read CLAUDE.md's Render Pipeline
+section **before** changing anything here, since several of these flags look like reasonable
+optimizations but actually reintroduce measured regressions if touched. Use the `perf` serial command
+to see current frame timing broken down by stage rather than guessing at the bottleneck.
 
 ### **Development Issues**
 
 #### Upload Failures
-**Symptoms**: Cannot upload firmware
-**Causes**:
-- Wrong upload speed
-- USB connection issues
-- Board in wrong mode
-
+**Symptoms**: cannot upload firmware
 **Solutions**:
-1. **Reduce upload speed**: 460800 → 115200
-2. **Try different USB cables**
-3. **Hold GPIO0 during reset** (if needed)
+1. Reduce upload speed: 921600 → 460800 → 115200
+2. Try a different USB cable — charge-only cables have no data lines
+3. Hold GPIO0 during reset if the board doesn't enter bootloader mode automatically
 
 #### Serial Monitor Not Working
-**Symptoms**: No serial output
-**Causes**:
-- Wrong baud rate
-- USB CDC issues
-- Driver problems
+**Symptoms**: no serial output, or output stops mid-session
 
 **Solutions**:
-1. **Verify baud rate**: 115200
-2. **Check USB CDC configuration**:
-```ini
-build_flags =
-    -DARDUINO_USB_CDC_ON_BOOT=1
-```
+1. Verify baud rate: 115200
+2. USB CDC is configured via `sdkconfig.defaults` on this build, not a `platformio.ini` build flag —
+   there is no `-DARDUINO_USB_CDC_ON_BOOT` flag to check here (that was pre-migration Arduino
+   configuration).
+3. If output stopped because logging was explicitly disabled: `serial on` re-enables it — the
+   `serial off`/`serial on` gate itself still responds even while logging is off.
 
 ## Diagnostic Tools
 
 ### **Serial Commands**
 ```
-help                 - Show available commands
-diag wifi on|off     - Control WiFi scanning
-diag ble on|off      - Control BLE scanning
-diag overlay on|off  - Toggle diagnostic overlay
+help                    Show all available commands
+diag wifi on|off        Enable/disable WiFi scanning
+diag ble on|off         Enable/disable BLE scanning
+diag freeze on|off      Freeze/unfreeze LVGL display (testing)
+memory stats|report|... Memory diagnostics — see Memory Issues above
+task status             FreeRTOS task health and statistics
+config show|display|timing|pins   Current configuration values
+battery status|voltage|percent|raw|info|monitor on|off
+beacon status|scan|test|zone|trend
+perf                    Frame timing breakdown by render stage
 ```
-
-### **Debug Output**
-Enable various debug outputs:
-- I2C operations
-- Touch events
-- Memory usage
-- Performance metrics
-
-### **Hardware Test Modes**
-- Touch calibration mode
-- Display test patterns
-- I2C device scanner
-- Memory stress test
 
 ## Crash Investigation Workflow
 
-### **Automatic Reboot / Panic Analysis**
+**Core dump to flash is currently disabled in this build** (`CONFIG_ESP_COREDUMP_ENABLE_TO_NONE=y`
+in `sdkconfig.db-radar`) — `crash dump` will correctly report nothing found, even after a real crash.
+Until that's re-enabled, the reliable method is reading the boot output directly.
 
-**System**: ESP32 Core Dump to Flash (256KB partition)
+### Recommended: read the boot message, not `crash dump`
 
-#### When System Reboots Unexpectedly
+**Keep `pio device monitor` running before a crash happens** — when the device reboots after a
+panic, ESP-IDF prints a full register dump and backtrace directly to serial:
 
-**Step 1: Reconnect Serial Monitor**
+```
+Guru Meditation Error: Core  1 panic'ed (LoadProhibited). Exception was unhandled.
+
+Core  1 register dump:
+PC      : 0x400d1a3c  PS      : 0x00060330  A0      : 0x800d1b50  A1      : 0x3ffb1234
+                     ^^^^^^^^ THIS IS THE IMPORTANT PART!
+...
+Backtrace:
+0x400d1a3c:0x3ffb1234 0x800d1b50:0x3ffb1250 0x400d2c14:0x3ffb1270
+```
+
+**What to capture**: the PC address (`0x400d1a3c`), the exception type (`LoadProhibited`), and which
+core panicked (Core 1 runs the UI Task; Core 0 runs I2C/Network/System).
+
+| Exception | Meaning | Common Cause |
+|-----------|---------|---------------|
+| **LoadProhibited** | Read from invalid/protected memory | Null pointer dereference, use-after-free, bad array access |
+| **StoreProhibited** | Write to invalid/protected memory | Writing to freed memory, LVGL object after delete |
+| **IllegalInstruction** | CPU tried to execute an invalid instruction | Stack corruption, corrupted function pointer |
+| **InstrFetchProhibited** | Tried to fetch code from an invalid address | Function pointer / return address corruption |
+| **IntegerDivideByZero** | Division by zero | Uninitialized variable used as a divisor |
+| **DoubleException** | Exception occurred while handling another exception | Usually stack overflow |
+
+**Converting the PC address to a source location** (requires the matching `firmware.elf`):
 ```bash
-pio device monitor
-# Baudrate: 115200
+xtensa-esp32s3-elf-addr2line -e .pio/build/db-radar/firmware.elf 0x400D1A3C
 ```
 
-**Step 2: Retrieve Crash Dump**
-```
-crash dump
-```
+### If the same PC recurs across multiple crashes
+That's a reproducible software bug, not environmental noise — check recent changes, and review the
+code at that address for array bounds, null pointers, or LVGL object lifetime issues (see CLAUDE.md's
+LVGL Screen Lifecycle notes — this is a common source of exactly this crash class).
 
-**Expected Output**:
-```
-==== ESP32 Crash Dump ====
-Crash dump found!
+### If the PC differs every time
+More consistent with a hardware/environmental cause (power supply dip, battery voltage sag under
+load) than a code defect. Correlate with `battery status` and check for patterns in when it happens
+(charging transitions, brownout-adjacent voltage, temperature extremes).
 
-Program Counter (PC): 0x400D1A3C
-Crashed Task: UI_Task
-
-Core Dump Version: 1
-App ELF SHA256: [hash]
-
-TROUBLESHOOTING:
-1. Note the Program Counter (PC) address above
-2. This indicates where in the code the crash occurred
-3. Use 'crash clear' to erase this dump after investigation
-4. Monitor for pattern - same PC = reproducible crash
-==========================
-```
-
-**Step 3: Analyze Crash Information**
-
-| Field | Meaning | Action |
-|-------|---------|--------|
-| **Program Counter (PC)** | Memory address where crash occurred | Note this value - recurring PC indicates reproducible bug |
-| **Crashed Task** | FreeRTOS task that panicked | Helps narrow down which subsystem failed (UI/I2C/Network/System) |
-| **Core Dump Version** | Firmware build identifier | Verify matches current build |
-
-**Step 4: Pattern Recognition**
-
-**Single Crash** (PC changes each time):
-- Likely random hardware issue
-- Power supply fluctuation
-- Cosmic ray (rare but possible)
-- Monitor for frequency
-
-**Reproducible Crash** (same PC every time):
-- **CRITICAL**: Indicates software bug
-- Check recent code changes
-- Review code at PC address (requires firmware.elf analysis)
-- Add logging before crash point
-- Check array bounds, null pointers, division by zero
-
-#### Common Crash Patterns
-
-**GPIO0 Button Not Responding Before Reboot**
-- **Symptom**: Button stops working, then system reboots
-- **Likely Cause**: Task watchdog timeout (UI task hung)
-- **Investigation**:
-  1. Check if PC is in I2C-related code
-  2. Review I2C bus lockup logs
-  3. Check task health: `task status`
-  4. Monitor I2C failure rate: `task stats`
-
-**Battery Monitoring Related Crashes**
-- **Symptom**: Crash when battery percentage updates
-- **Likely Cause**: LVGL object invalidation
-- **Investigation**:
-  1. Check if PC is in `updateStatusLabels()` function
-  2. Verify battery label validity logs
-  3. Check for "Battery label invalid" warnings in serial
-
-**WiFi/Network Related Crashes**
-- **Symptom**: Crash during WiFi scan or AP mode switch
-- **Likely Cause**: WiFi mode transition race condition
-- **Investigation**:
-  1. Check if PC is in scanner or wifi_manager code
-  2. Review WiFi mode state machine
-  3. Test with WiFi disabled: `diag wifi off`
-
-#### Crash Logging Commands
-
-**View Last Crash**:
-```
-crash dump
-```
-
-**System Information**:
-```
-crash info
-```
-Shows:
-- Core dump status (enabled/disabled)
-- Partition size (256KB)
-- Debug level (CORE_DEBUG_LEVEL=3)
-- Capabilities and limitations
-
-**Clear Crash Data**:
-```
-crash clear
-```
-Note: Crash dump will be overwritten on next panic
-
-#### Preventive Monitoring
-
-**Before Deploying Field Testing**:
-1. Run memory stress test: `memory stress`
-2. Check task health: `task status`
-3. Verify I2C stability: `task stats` (check failure rate)
-4. Monitor heap integrity: `memory integrity`
-5. Enable battery monitoring: `battery monitor on`
-
-**During Field Testing**:
-1. Periodically check: `crash dump` (even if no obvious crash)
-2. Monitor task health every hour
-3. Record battery level correlation with reboots
-4. Note environmental factors (temperature, vibration)
-
-#### Advanced Debugging (Requires firmware.elf)
-
-**Convert PC to Source Code Location**:
+### Before field testing
 ```bash
-# Use ESP32 toolchain addr2line (not available via serial)
-xtensa-esp32s3-elf-addr2line -e .pio/build/cc-radar/firmware.elf 0x400D1A3C
+memory stress       # Run stress test
+task status          # Verify all tasks healthy
+memory integrity     # Verify heap not corrupted
+battery monitor on   # Enable periodic battery logging for correlation
 ```
-
-This will show exact function and line number where crash occurred.
-
-#### Limitations
-
-- **No full stack trace via serial**: PC address is primary diagnostic
-- **Requires firmware.elf for symbol lookup**: Cannot decode PC to function name on-device
-- **Single crash storage**: New panic overwrites previous dump
-- **No pre-crash variable state**: Cannot inspect local variables
 
 ---
 
-*When encountering issues, always check the serial output first for error messages and diagnostic information.*
+*When encountering issues, always check the serial output first for error messages and diagnostic
+information. If a section above conflicts with what you observe in current code, trust the code and
+the linked component doc — this file is a triage index, not the source of truth for any subsystem.*

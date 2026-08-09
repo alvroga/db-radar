@@ -142,8 +142,10 @@ HTTP server (`esp_http_server`) with the following endpoints:
 
 **File storage:** GPX files live on the FFat flash partition at `/ffat/gpx` (moved off SD 2026-08-06,
 see ADR-0024 and ROADMAP.md's "GPX Storage: Move from SD to FFat"). All `.gpx` files in this folder
-are auto-loaded on boot; a one-time migration in `gpx_loader::init()` copies over anything still on
-the old `/sdcard/gpx` location the first time the FFat folder is found empty. Dev-only logging
+are auto-loaded on boot. The one-time SD→FFat migration that originally lived in `gpx_loader::init()`
+has been **removed** (2026-08-07) — it couldn't distinguish "never migrated" from "user deliberately
+deleted everything," so a delete-all could silently resurrect old files from SD on the next boot.
+FFat is now the sole source of truth for GPX files; no migration path exists in either direction. Dev-only logging
 (`system_logger`, `field_log`, `tilt_bench`) stays on the physical SD card at `/sdcard/logs`, gated
 behind `dev_mode` as noted above.
 
@@ -155,14 +157,15 @@ behind `dev_mode` as noted above.
 
 Accessible at `/update`. The device writes the uploaded `.bin` directly to the inactive OTA partition.
 
-**Partition layout** (`partitions/partitions_ota.csv`):
+**Partition layout** (`partitions/partitions_ota.csv`, grown 2026-08-06 from an original 2MB/11.7MB
+split — see ADR-0024):
 ```
-nvs       0x9000   16KB
-otadata   0xE000    8KB
-ota_0     0x10000   2MB   ← active or standby
-ota_1     0x210000  2MB   ← active or standby
-ffat      0x410000 11.7MB
-coredump  0xFC0000 256KB
+nvs       0x9000    16KB
+otadata   0xE000     8KB
+ota_0     0x10000    4MB   ← active or standby
+ota_1     0x410000   4MB   ← active or standby
+ffat      0x810000  ~7.69MB
+coredump  0xFC0000  256KB
 ```
 
 **Upload flow:**

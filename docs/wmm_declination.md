@@ -60,7 +60,7 @@ Standard navigation formula is `true = magnetic - East_declination`, but the QMC
 
 After first GPS fix:
 ```
-[WMM] Declination computed: 12.25° E at (34.1325, -118.1451) 2026.2
+[WMM] Declination computed: 12.25° E at (34.1, -118.1) 2026.2
 [SETTINGS] Magnetic declination saved: 12.25°
 ```
 

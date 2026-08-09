@@ -3,7 +3,7 @@
 **Status**: Implemented 2026-08-05 (all four phasing steps, §9). Build-clean, SRAM cost measured
 (+3,640 B static, `MAX_WAYPOINTS` held at 200 throughout), and **field-verified on real hardware**
 against an independent Haversine oracle (cold selection, a forced high-churn reselect, HDOP gating, a
-live end-to-end nearby-waypoints test) — see [ADR-0023](docs/adr/0023-two-tier-waypoint-index.md) for
+live end-to-end nearby-waypoints test) — see [ADR-0023](adr/0023-two-tier-waypoint-index.md) for
 the full record, the two real bugs this verification pass caught and fixed, and what §10 items (below)
 are still open (automatic-trigger observation from real movement; concurrent SD access safety).
 Originally written 2026-08-05 as a design-only document.

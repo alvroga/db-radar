@@ -149,7 +149,7 @@ The BH-880 includes a QMC5883L 3-axis magnetometer connected via I2C.
 |---------|-------|
 | **Chip** | QMC5883L |
 | **I2C Address** | 0x0D |
-| **I2C Bus** | Shared (SDA=15, SCL=7, 400kHz) |
+| **I2C Bus** | Shared (SDA=15, SCL=7, 100kHz) |
 | **Chip ID Register** | 0x0D, expected value: 0xFF |
 | **Output** | 16-bit signed X, Y, Z (magnetic field) |
 | **Field Range** | +/-2 Gauss or +/-8 Gauss (configurable) |
@@ -223,11 +223,12 @@ if (heading < 0) heading += 360.0f;
 ```
 
 **Important Notes**:
-- This gives **magnetic heading**, not true heading
-- Must apply **magnetic declination** for true north (location-dependent)
-- The module orientation relative to the device matters - mounting angle offset may be needed
-- **Calibration** (hard/soft iron compensation) is essential for accurate readings
-- Tilt compensation requires accelerometer data (available from QMI8658 IMU on the board)
+- This raw formula gives **magnetic heading**, not true heading, and has no calibration
+  applied — it's shown here for the underlying register math, not as what the firmware
+  actually computes today.
+- The shipped implementation is considerably more complete: hard-iron calibration,
+  health classification, magnetic-declination correction (WMM), and accelerometer-based
+  tilt compensation are all built and field-verified — see below.
 
 ### Serial Commands
 
@@ -237,14 +238,12 @@ compass read            - Read and display raw X/Y/Z values and computed heading
 compass stream [s]      - Stream compass readings for N seconds (default 5)
 ```
 
-### Calibration (Future)
+### Calibration and Tilt Compensation
 
-For accurate compass readings, calibration is needed:
-
-1. **Hard-iron calibration**: Rotate device 360 degrees, record min/max for each axis, compute offsets
-2. **Soft-iron calibration**: Fit ellipse to XY data, compute scale factors
-3. **Mounting offset**: Determine angular offset between compass X-axis and device "forward" direction
-4. **Tilt compensation**: Use accelerometer (QMI8658 at 0x6B) to compensate for device tilt
+Hard-iron calibration, health classification, magnetic declination (WMM), and
+accelerometer-based tilt compensation are all implemented and shipped — not future work.
+Full detail (formulas, EMA time constants, calibration procedure, field-verification
+history): [`docs/compass.md`](compass.md).
 
 ### Key Code Files
 
@@ -257,7 +256,7 @@ For accurate compass readings, calibration is needed:
 
 ## I2C Bus Devices (Complete)
 
-All devices on the shared I2C bus (SDA=15, SCL=7 @ 400kHz):
+All devices on the shared I2C bus (SDA=15, SCL=7 @ 100kHz):
 
 | Address | Device | Source |
 |---------|--------|--------|
@@ -265,11 +264,17 @@ All devices on the shared I2C bus (SDA=15, SCL=7 @ 400kHz):
 | 0x15 | CST820 (Touch) | Waveshare board |
 | 0x20 | TCA9554 (IO Expander) | Waveshare board |
 | 0x51 | PCF85063 (RTC) | Waveshare board |
-| 0x6B | QMI8658 (IMU) | Waveshare board |
-| 0x7E | Unknown | TBD |
+| 0x6A | QMI8658 (IMU, low address) | Waveshare board |
+| 0x6B | QMI8658 (IMU, high address) | Waveshare board |
+
+A scan will sometimes also show `0x7E` — that's not a real device, it's a probe artifact
+at a reserved I2C address that survives even a double-ACK confirmation guard. See
+[`docs/i2c_bus_freeze_investigation.md`](i2c_bus_freeze_investigation.md) for detail.
 
 ---
 
 **Compass software implementation**: See [`docs/compass.md`](compass.md) for heading pipeline, calibration, WMM declination, I2C constraints, and upgrade path.
 
-*Last updated: 2026-03-18 (GPS + compass fully working, WMM declination active)*
+*Last updated: 2026-08-09 (I2C bus speed, IMU address table, and calibration section
+corrected against current code — see [`docs/compass.md`](compass.md) for the compass
+software pipeline in full)*

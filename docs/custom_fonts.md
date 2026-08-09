@@ -22,9 +22,10 @@ This document explains how to add and use custom fonts (Iosevka) in the GPS rada
 - Perfect for displaying coordinates, distances, and technical data
 
 **Current Status**:
-- ✅ **iosevka_14** - Working (14px, uncompressed)
-- ⏳ **iosevka_20** - Not yet converted (recommended)
-- ⏳ **iosevka_28** - Not yet converted (recommended)
+- ✅ **iosevka_14** - Working (14px, uncompressed, ~28KB)
+- ✅ **iosevka_16** - Working (16px, uncompressed, ~32KB) — the most-used size in the current UI
+- ✅ **iosevka_20** - Working (20px, uncompressed, ~37KB)
+- No 28px font exists in this project today; the walkthrough below still applies if one is ever added.
 
 ---
 
@@ -36,15 +37,14 @@ For a 480×480 circular display with GPS radar UI:
 
 | Size | Use Case | Examples |
 |------|----------|----------|
-| **14px** | Small labels, battery %, coordinates | `34.1334°N`, `88%`, `GPS: 12 sats` |
-| **20px** | Medium labels, waypoint names, distances | `Waypoint Alpha`, `2.4 km`, `Heading: 045°` |
-| **28px** | Large numbers, speed, main status | `65 km/h`, `LOCKED`, `READY` |
+| **14px** | Small labels, status text | `88%`, `GPS: 12 sats` |
+| **16px** | Body text, coordinates, primary labels — the most-used size in the shipped UI | `34.1334°N`, `Waypoint Alpha` |
+| **20px** | Section headers, larger status text | `2.4 km`, `Heading: 045°` |
 
-### ❌ Skip These Sizes
+### Sizes not currently used
 
-- **16px** - Too similar to 14px, not worth the memory cost
-- **Bold variants** - Iosevka is already very readable; bold not needed
-- **32px+** - Too large for 480px screen with multiple UI elements
+- **28px+** - Not converted; would suit a large single-number display (speed, main status) if one is ever added
+- **Bold variants** - Iosevka is already very readable; bold not currently used
 
 ---
 
@@ -134,33 +134,36 @@ error: 'lv_font_t' {aka 'const struct _lv_font_t'} has no member named 'static_b
 
 ## Using Custom Fonts in Code
 
-### Step 1: Include Font in Build
+### Step 1: Give the New Font Its Own Wrapper File
 
-Edit `src/ui/fonts/iosevka_fonts.c`:
+LVGL font files use static variable names that collide if multiple `.c` fonts land in the
+same compilation unit — so this project uses **one wrapper file per font size**, not a
+single combined file with commented-out includes. The existing wrappers
+(`src/ui/fonts/iosevka_14_wrapper.c`, `iosevka_16_wrapper.c`, `iosevka_20_wrapper.c`) are
+each one line:
 
 ```c
-// Iosevka custom fonts wrapper
-// Note: Only include one font at a time to avoid static variable name collisions
+// Iosevka 14px font wrapper
+// Separate wrapper to avoid static variable name collisions
 
 #include "../../../include/ui/fonts/iosevka_14.c"
-// #include "../../../include/ui/fonts/iosevka_20.c"  // Uncomment when available
-// #include "../../../include/ui/fonts/iosevka_28.c"  // Uncomment when available
 ```
 
-**Why Only One at a Time?**
-LVGL font files use static variable names that collide if multiple fonts are included in the same compilation unit. The wrapper allows you to include fonts separately.
+For a new size, add a new `iosevka_NN_wrapper.c` file following the same one-line pattern
+— don't add it to an existing wrapper.
 
-### Step 2: Declare Font (C Linkage)
+### Step 2: Declare the Font
 
-In your source file (e.g., `ui_manager.cpp`):
+`include/ui/fonts/custom_fonts.h` is where fonts are declared with `LV_FONT_DECLARE()`:
 
-```cpp
-extern "C" {
-    extern const lv_font_t iosevka_14;
-    // extern const lv_font_t iosevka_20;  // When available
-    // extern const lv_font_t iosevka_28;  // When available
-}
+```c
+LV_FONT_DECLARE(iosevka_14);  // 14px - UI labels, status text (~28KB)
+LV_FONT_DECLARE(iosevka_16);  // 16px - Body text, GPS coordinates (~32KB)
+LV_FONT_DECLARE(iosevka_20);  // 20px - Section headers, page titles (~37KB)
 ```
+
+Add a new line here for any new size, then `#include "fonts/custom_fonts.h"` wherever
+the font is used.
 
 ### Step 3: Use Font in LVGL Objects
 
@@ -168,7 +171,7 @@ extern "C" {
 // Create label with custom font
 lv_obj_t* label = lv_label_create(parent);
 lv_obj_set_style_text_font(label, &iosevka_14, 0);
-lv_label_set_text(label, "34.1334°N 118.1452°W");
+lv_label_set_text(label, "40.7128°N 74.0060°W");
 
 // Or set font for a specific state (e.g., pressed)
 lv_obj_set_style_text_font(button, &iosevka_20, LV_STATE_PRESSED);
@@ -185,15 +188,15 @@ lv_label_set_text_fmt(coords_label, "%.4f°N %.4f°W", lat, lon);
 lv_obj_align(coords_label, LV_ALIGN_BOTTOM_MID, 0, -10);
 ```
 
-### Example: Speed Display
+### Example: Header/Status Display
 
 ```cpp
-// Large speed display with Iosevka 28px
-lv_obj_t* speed_label = lv_label_create(stage);
-lv_obj_set_style_text_color(speed_label, lv_color_hex(0x00FF00), 0);
-lv_obj_set_style_text_font(speed_label, &iosevka_28, 0);
-lv_label_set_text_fmt(speed_label, "%d", speed_kmh);
-lv_obj_align(speed_label, LV_ALIGN_TOP_LEFT, 20, 20);
+// Section header with Iosevka 20px (the largest size currently in the project)
+lv_obj_t* status_label = lv_label_create(stage);
+lv_obj_set_style_text_color(status_label, lv_color_hex(0x00FF00), 0);
+lv_obj_set_style_text_font(status_label, &iosevka_20, 0);
+lv_label_set_text(status_label, "LOCKED");
+lv_obj_align(status_label, LV_ALIGN_TOP_LEFT, 20, 20);
 ```
 
 ---
@@ -300,11 +303,11 @@ if (battery_pct > 80) {
 
 | Font Size | Memory Usage | Character Count |
 |-----------|--------------|-----------------|
-| 14px | ~30 KB | 95 chars (0x20-0x7F) |
-| 20px | ~38 KB | 95 chars (0x20-0x7F) |
-| 28px | ~46 KB | 95 chars (0x20-0x7F) |
+| 14px | ~28 KB | 95 chars (0x20-0x7F) |
+| 16px | ~32 KB | 95 chars (0x20-0x7F) |
+| 20px | ~37 KB | 95 chars (0x20-0x7F) |
 
-**Total for all 3 fonts**: ~114 KB (0.11 MB)
+**Total for the 3 shipped fonts**: ~97 KB (per `custom_fonts.h`'s own size comments)
 
 ### ESP32-S3 Memory Layout
 
@@ -315,7 +318,7 @@ if (battery_pct > 80) {
 
 ### Memory Optimization Tips
 
-1. **Only include fonts you actually use** - Comment out unused sizes in `iosevka_fonts.c`
+1. **Only include fonts you actually use** - Don't add a wrapper file for a size nothing references
 2. **Use symbols from built-in fonts** - Don't convert custom symbol fonts
 3. **Limit character ranges** - If you only need numbers, use `0x30-0x39` instead of full ASCII
 4. **Share fonts across screens** - Declare fonts globally, don't duplicate
@@ -345,8 +348,8 @@ Memory saved: ~70% (only 11 chars instead of 95)
 
 ### Multiple Definition Errors
 **Symptom**: `redefinition of 'glyph_bitmap'` errors during compilation
-**Cause**: Multiple font `.c` files included in same wrapper
-**Fix**: Only include one font file at a time in `iosevka_fonts.c`
+**Cause**: Multiple font `.c` files included in the same wrapper file
+**Fix**: Give each font size its own wrapper file (`iosevka_NN_wrapper.c`), one `#include` per file
 
 ### Font Looks Pixelated
 **Symptom**: Font appears jagged or low quality
@@ -369,13 +372,15 @@ When adding a new Iosevka font:
 - [ ] Convert and download
 - [ ] Save to `include/ui/fonts/iosevka_XX.c`
 - [ ] **Remove `.static_bitmap = 0,` line** ⚠️
-- [ ] Include in `src/ui/fonts/iosevka_fonts.c`
-- [ ] Declare with `extern "C"` in source file
+- [ ] Create a new `src/ui/fonts/iosevka_XX_wrapper.c` including just that one file
+- [ ] Add `LV_FONT_DECLARE(iosevka_XX);` to `include/ui/fonts/custom_fonts.h`
 - [ ] Use with `lv_obj_set_style_text_font()`
 - [ ] Test on device before committing
 
 ---
 
-**Last Updated**: 2025-10-15
+**Last Updated**: 2026-08-09 (corrected against shipped fonts — 14/16/20px are converted
+and in use, not just 14px; build mechanism is one wrapper file per size, not a single
+combined file)
 **LVGL Version**: 8.4.0
 **Platform**: ESP32-S3 (16MB Flash, 8MB PSRAM)
