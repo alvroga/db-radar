@@ -5,6 +5,10 @@ tickets/
 assets/
 CLAUDE.md.bak2
 
+# Full README draft, held back until the initial public release (README.md
+# ships as a "coming soon" placeholder until then) — see docs/public_release_plan.md
+README.full.md
+
 # PlatformIO Build Files
 .pio/
 .pioenvs/
