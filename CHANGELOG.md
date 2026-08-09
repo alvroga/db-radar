@@ -9,6 +9,169 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed (docs)
+
+**Low-priority doc trim pass — audit findings items 28-33 (2026-08-09)**
+
+- `docs/memory_management.md` rewritten from ~180 lines of marketing prose ("enterprise-grade,"
+  "expert memory engineer watching over your project," For Education/Commercial/Prototyping use-case
+  sections with zero project-specific content) down to ~40 lines: verified command reference (also
+  caught and removed a fabricated `memory pools test` command that doesn't exist in
+  `diagnostics.cpp`), pool architecture, and the boot-loop history CLAUDE.md's own summary defers to
+  this doc for.
+- `docs/navigation_modes.md` trimmed ~30%: cut "Industry Examples" (aviation/marine/automotive
+  comparisons, zero project-specific content) entirely, merged two sections that separately explained
+  the same compass pipeline and rotation math at different detail levels into one.
+- **`docs/wmm_declination.md` audit finding was checked and found incorrect** — the original 5-agent
+  audit claimed it was redundant with a CLAUDE.md summary; grepped CLAUDE.md for "WMM"/"declination"
+  and found zero matches, so left untouched rather than trim the only place this feature is
+  documented at all down to a link that points nowhere.
+- CLAUDE.md's Render Pipeline section trimmed from 130 to ~90 lines: verified the cut historical
+  measurement narrative (per-stage 85ms breakdown, 240MHz scaling factors, the 2026-07-31
+  beacon/sonar audit findings) is preserved in `docs/performance_optimization_backlog.md` before
+  removing it here; the four numbered load-bearing constraints were left verbatim, per the file's own
+  explicit rule.
+- ROADMAP.md's "Waypoint Memory Optimization" entry (~50 lines, sitting under Planned despite being
+  fully resolved) rewritten to ~15 lines and moved to the Resolved section where it belongs.
+  "Radar Animation Effects from Capsule Radar Research" (~55 lines) had its actual research content
+  moved into a new `docs/radar_animation_effects_research.md` (this was itself a documentation-
+  standards violation the entry admitted to — research reported inline in conversation, never saved),
+  leaving a short summary + link in ROADMAP.md.
+- Added the previously-undocumented "every GPX upload/delete glitches the display" known issue to
+  ROADMAP.md's Won't Fix section — it existed in CLAUDE.md's Render Pipeline section and
+  ADR-0028/CHANGELOG, but a reader checking ROADMAP.md specifically (the place this project's own
+  conventions say to look) would have found no mention of it at all.
+
+### Security
+
+**Stripped real GPS coordinates from 18 tracked compass-calibration CSVs (2026-08-09)**
+
+`docs/calibration/*.csv` carried a `lat,lon` column pair with precise (7-decimal, sub-meter) real-world
+coordinates in nearly every recorded row — clustered tightly across almost all 18 files, almost
+certainly a real home/testing location. Found while fixing an unrelated hardcoded path in
+`docs/calibration/analyze.py` (see below) and grepping the surrounding directory. This sat in the
+**current tracked tree**, not just git history, so the fresh-squash public-release strategy in
+`docs/public_release_plan.md` (which sidesteps history-only exposure) would not have protected against
+it — it would have shipped directly in the public `db-radar` release. Confirmed via grep that
+`analyze.py` never reads the `lat`/`lon` columns (only `course` and `speed_kn`, which don't reveal
+absolute position), so the values were zeroed out in place across all 18 files — everything
+`analyze.py` actually uses (magnetometer, accel, gyro, GPS course/speed, fix validity) is untouched;
+re-ran the script afterward and confirmed identical analytical output.
+
+Also fixed `docs/calibration/analyze.py`'s hardcoded absolute path
+(`/Users/dit/Documents/.../cc-radar/docs/calibration`) — replaced with
+`os.path.dirname(os.path.abspath(__file__))` so the script works regardless of where the repo is
+cloned, instead of only on the machine and folder name it was originally written on.
+
+**A third, more consequential instance found in the same sweep**: `ui_manager.cpp`'s radar-screen
+init hardcoded the same real coordinates (`34.133417, -118.145190`) as the pre-first-GPS-fix map
+center fallback — used only until the very first NVS-saved GPS fix exists on a given device, but
+that means **every fresh install of every device would have centered its very first boot on this
+real location**, not a documentation example. Changed to `(0.0, 0.0)` — a neutral "no fix yet"
+sentinel with identical fallback behavior (overwritten unconditionally the moment a real fix lands,
+same as before). Build verified clean, no other occurrences of these coordinates anywhere in
+`src/`/`include/`.
+
+### Changed
+
+**Renamed the build identity from `cc-radar` to `db-radar`, ahead of the public release (2026-08-09)**
+
+`platformio.ini`'s `[env:cc-radar]` → `[env:db-radar]` (and `default_envs`), `CMakeLists.txt`'s
+`project(cc-radar)` → `project(db-radar)`, the release workflow's env/build-dir/binary-filename
+references (`cc-radar-esp32s3-{full,ota}.bin` → `db-radar-esp32s3-{full,ota}.bin`,
+`.pio/build/cc-radar` → `.pio/build/db-radar`, the GitHub Pages URL), `web/flasher/manifest.json` and
+`index.html`'s repo links, and every current/forward-looking doc citation of a `.pio/build/cc-radar/`
+or `sdkconfig.cc-radar` path (CLAUDE.md, ROADMAP.md, ADR-0030, ADR-0031,
+`docs/{beacon_proximity,compass_calibration_foundation,troubleshooting,firmware_installation,
+waypoint_cap_increase_investigation}.md`). This repo (`cc-radar`, full history) stays untouched as
+the private archive per `docs/public_release_plan.md` — this rename lands here first specifically so
+the eventual fresh squash commit into the new public `db-radar` repo already has correct naming
+baked in, rather than needing a second pass after the fact. Historical records were deliberately
+**not** rewritten — CHANGELOG.md's own past entries, ADR-0014's `cc-radar-compass` mention (a
+different, specifically-named env that existed and was removed in 2026-03), `docs/compass.md`'s same
+mention, and `docs/calibration/README.md`'s description of already-captured CSV files' literal header
+content all still correctly say `cc-radar`, because that's what was actually true when each was
+written.
+
+Also swapped the committed `sdkconfig.cc-radar` fallback for a freshly-generated `sdkconfig.db-radar`
+(byte-identical aside from the env-name strings — diffed to confirm no drift snuck in).
+
+**Found and fixed a real pre-existing gap while verifying the rename with a real build**: two manual
+esp-nimble-cpp v1.4.1 patches (ESP-IDF 5.x compatibility — a missing `<time.h>` include and a removed
+`esp_nimble_hci_and_controller_deinit()` API) had only ever been hand-applied directly inside
+`.pio/libdeps/cc-radar/esp-nimble-cpp/`, which is gitignored build output, never committed, and
+undocumented anywhere in the actual codebase. The env rename gave PlatformIO a fresh `libdeps`
+directory and immediately exposed it: the very first `pio run -e db-radar` failed to compile. This
+means **any fresh clone of this repo — including the eventual public `db-radar` release — could never
+have built out of the box**, independent of the rename itself. Fixed properly by automating both
+patches as a new PlatformIO pre-build extra_script, `scripts/patch_nimble_cpp_idf5.py` (same
+idempotent, exact-match-or-loudly-warn pattern as the existing
+`scripts/patch_i2c_master_nack_hang.py`), registered in `platformio.ini`. Verified with a true
+from-scratch build (`.pio/` fully deleted, library re-downloaded) — succeeds without manual
+intervention. (Noted in passing, unrelated to this fix: a from-scratch `.pio/build/` occasionally
+needs one retry on the very first CMake configure pass — a pre-existing ESP-IDF/CMake quirk, not
+something this rename introduced.)
+
+**Beacon MAC configuration UI (2026-08-09)**
+
+Settings > Beacon tab gained an "Edit" button opening a text-entry dialog (mirrors the existing AP
+SSID/password dialog: on-screen keyboard, 17-char max length, Save/Cancel) to set the beacon proximity
+target MAC — previously the tab only displayed the MAC read-only, and the only way to configure it was
+a serial command (`beacon mac XX:XX:XX:XX:XX:XX`). Closes a real pre-release gap: beacon proximity is a
+shipped, documented feature (see CLAUDE.md's Beacon Proximity System section) that was otherwise
+unusable by anyone without a USB-serial connection. Field-verified on hardware. The textarea also
+auto-inserts `:` every 2 hex digits as the user types (strips and rebuilds on every keystroke, so
+typing or backspacing stays correct) — the user only ever types the 12 hex characters, never the
+colons themselves.
+
+**Fixed a heap-corruption crash in the auto-colon formatter above**, caught immediately on the first
+hardware test (`Guru Meditation Error: LoadProhibited`, backtrace inside FreeRTOS's
+`prvSelectHighestPriorityTaskSMP` — corruption surfacing far from its cause, not a straightforward
+NULL-deref-at-the-call-site bug). Root cause, confirmed by reading `lv_textarea.c`: once a max length
+is set, `lv_textarea_set_text()` inserts character-by-character and fires `LV_EVENT_VALUE_CHANGED`
+**on every character**, not just once at the end. The reformat handler called `lv_textarea_set_text()`
+again on that event, re-entering LVGL's own set-text call while its char-by-char loop was still
+mid-flight, corrupting the textarea's label text buffer. Fixed with a reentrancy guard flag
+(`s_beacon_mac_formatting`) so the handler no-ops for events it triggered itself.
+
+**Fixed the auto-colon timing** — the trailing `:` was only appearing once the *next* digit was typed
+(typing "00" didn't show "00:" until a 3rd character arrived), a side effect of only inserting colons
+between two already-present digit groups. Now tracks the previously-displayed text
+(`s_beacon_mac_prev`) to tell insertion from deletion: on insertion, a trailing colon is appended the
+instant a pair completes; on deletion, it's never re-added, so backspacing "00:" collapses straight to
+"00" instead of bouncing back. Field-verified on hardware (dialog open/prefill, fresh entry, and
+backspace-through-colon all confirmed working).
+
+Also added `beacon_proximity::refreshTarget()` (a thin public wrapper around the existing private
+`applyTargetFromSettings()`) and call it from both the new dialog's save path and the serial `beacon
+mac` command. Previously the scanning target was only re-parsed from settings on `init()` and on the
+disabled→enabled edge of `setEnabled()`, so changing the MAC while already scanning at 50m zoom
+silently kept matching the old address until scanning was toggled off/on — a pre-existing gap in the
+serial path too, fixed for both at once rather than just papering over it in the new UI.
+
+No format validation existed anywhere before this (the serial command only checked `strlen >= 17`);
+the new dialog matches that same bar rather than inventing a stricter one, to stay consistent with the
+existing serial behavior.
+
+**Tag-triggered release pipeline + browser web flasher + 2-way Installation section (2026-08-08)**
+
+Added `.github/workflows/release.yml`: pushing a `v*` tag builds via PlatformIO, merges
+bootloader/partition-table/otadata/app into one flashable image with `esptool merge_bin`, publishes
+that full-flash binary plus an app-only OTA binary to GitHub Releases, and deploys an ESP Web Tools
+flasher page (`web/flasher/`) to GitHub Pages — all from the same build, so the Release asset and the
+web flasher can never disagree (see ADR-0030). The web flasher's manifest lists a single merged part
+at offset 0 rather than the four regions separately (see ADR-0031). README's Quick Start section
+replaced with a 2-option Installation section (browser flasher / `esptool.py` + Release download) —
+the PlatformIO source-build path is intentionally held back for now (repo isn't public yet, decided
+same day); also fixed a stale `db-radar` clone URL and CLAUDE.md repository link that pointed at an
+inactive placeholder repo instead of the real one. Full detail, including the known
+`FW_VERSION`/git-tag mismatch risk, the flash-offset cross-reference to
+`partitions/partitions_ota.csv`, and the repo-privacy prerequisite that's currently blocking both
+paths from actually going live: [`docs/firmware_installation.md`](docs/firmware_installation.md),
+[ADR-0030](docs/adr/0030-release-pipeline-build-time-pages-not-committed-binaries.md),
+[ADR-0031](docs/adr/0031-single-part-manifest-not-multi-part.md). **Not yet exercised end-to-end on a
+real tag push or real hardware** — see that doc's Verification status section.
+
 ### Changed
 
 **Trimmed `docs/performance_optimization_backlog.md` from 2,116 to ~1,140 lines (2026-08-07)**
@@ -1928,7 +2091,7 @@ Auto-computes magnetic declination from GPS fix using a truncated WMM2020 spheri
 - Computed once per session at first valid GPS fix
 - Persisted to NVS, reused on subsequent boots until a new fix updates it
 - Sign convention: `true_heading += declination` (positive = East declination)
-- Example: Los Angeles area ~12.25° East at (34.13°N, 118.15°W) in 2026.2
+- Example: Los Angeles area ~12.25° East at (34.1°N, 118.1°W) in 2026.2
 
 **Files**:
 - `include/utils/wmm_declination.h` / `src/utils/wmm_declination.cpp`
