@@ -1,5 +1,5 @@
 {
-  "name": "db-radar",
+  "name": "DRAC OS",
   "version": "__FWVER__",
   "new_install_prompt_erase": true,
   "builds": [
