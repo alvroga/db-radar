@@ -281,6 +281,21 @@ void latLonToScreen(double lat, double lon, int& x, int& y, int screen_size) {
     float dx_pixels = metersToPixels(dx_meters, meters_per_pixel);
     float dy_pixels = metersToPixels(dy_meters, meters_per_pixel);
 
+    // Clamp before the float->int cast below. Without a GPS fix, center_lat/lon
+    // sit at the (0,0) "no fix yet" sentinel (see ui_manager.cpp) while a loaded
+    // waypoint can be a real-world coordinate thousands of km away -- at a tight
+    // zoom (small meters_per_pixel) that's tens of millions of pixels, which
+    // overflows int on the cast and then overflows again in the squared-distance
+    // hit-test callers (latLonToScreen()'s callers all square this value), letting
+    // a wildly off-screen waypoint spuriously register as a tap hit anywhere on
+    // screen. +-20000px is far beyond anything reachable on a 480px display at any
+    // real zoom level, and stays safely inside int32 even squared and summed twice.
+    constexpr float kMaxOffsetPx = 20000.0f;
+    if (dx_pixels > kMaxOffsetPx) dx_pixels = kMaxOffsetPx;
+    else if (dx_pixels < -kMaxOffsetPx) dx_pixels = -kMaxOffsetPx;
+    if (dy_pixels > kMaxOffsetPx) dy_pixels = kMaxOffsetPx;
+    else if (dy_pixels < -kMaxOffsetPx) dy_pixels = -kMaxOffsetPx;
+
     // Center is middle of screen
     int center_x = screen_size / 2;
     int center_y = screen_size / 2;
