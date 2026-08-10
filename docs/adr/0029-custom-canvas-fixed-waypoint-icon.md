@@ -64,8 +64,7 @@ flash-resident image data, which is fine at this scale (one icon) but wouldn't b
 many.
 
 **Retroactive note**: `drawBeaconFoundIndicator()` predates this ADR and was never itself documented
-as a decision — this ADR covers the pattern going forward but doesn't backfill that one; see
-[`BACKFILL_PLAN.md`](BACKFILL_PLAN.md) if that's ever done.
+as a decision — this ADR covers the pattern going forward but doesn't backfill that one.
 
 ## Verification status
 

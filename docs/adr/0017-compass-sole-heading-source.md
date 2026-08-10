@@ -28,7 +28,7 @@ entirely (CHANGELOG.md:948, "GPS heading fusion removed"). GPS continues to supp
 enabling PVT output), not NMEA — but no longer contributes to the heading calculation at all. The
 System Task reads the compass and queues `COMPASS_UPDATE`; the UI Task applies it to
 `ui.current_heading`, which now drives the N indicator, on-screen waypoint rotation, and off-screen
-indicators (`memory/MEMORY.md` Compass Architecture section).
+indicators (`docs/navigation_modes.md`).
 
 ## Consequences
 

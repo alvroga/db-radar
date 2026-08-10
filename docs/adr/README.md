@@ -69,7 +69,7 @@ date — sort on that for chronology, not on the filename.
   → Documentation Standards). Next free number: **0032**.
 - **Historical backfill**: ✅ complete (2026-08-01). ADRs 0004–0017 were reconstructed from
   CHANGELOG.md, ROADMAP.md, `docs/performance_optimization_backlog.md`, the component docs and git
-  history, following [`BACKFILL_PLAN.md`](BACKFILL_PLAN.md). They carry
+  history. They carry
   `Decided by: Claude (backfilled from project history 2026-07-31)` so a reader can tell a
   reconstruction from a decision recorded as it was made.
 

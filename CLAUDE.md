@@ -723,8 +723,8 @@ one — a bug fix or a tuned constant doesn't; a choice like "software rotation 
 vs active BLE scan", "zero-copy `lv_obj` draw vs `lv_canvas`" does (all three already have ADRs —
 0004, 0010, 0005 respectively — cited here as examples of the *category*, not as open work). New
 decisions from this point forward should get one directly instead of only living in prose docs.
-**Historical backfill** (decisions made before 2026-07-31) is a separate, lower-priority pass — not
-required for new work — tracked in `docs/adr/BACKFILL_PLAN.md`.
+**Historical backfill** (decisions made before 2026-07-31) is complete — ADRs 0004-0017, see
+`docs/adr/README.md`'s Status section.
 
 **Documentation Flow**:
 1. **During**: Add one-line to CHANGELOG.md immediately
