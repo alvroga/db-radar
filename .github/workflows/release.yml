@@ -1,0 +1,142 @@
+name: Release firmware
+
+# Push a version tag to build db-radar, produce a full-flash merged binary
+# and an app-only OTA binary, publish both to a GitHub Release, and deploy
+# the browser web flasher (web/flasher/) to GitHub Pages — all from the same
+# build, so the Release assets and the web flasher can never drift apart
+# (see docs/adr/0030-release-pipeline-build-time-pages-not-committed-binaries.md).
+#
+#   git tag v26.08.50 && git push origin v26.08.50
+#
+# workflow_dispatch lets a maintainer re-run this against an already-pushed
+# tag (e.g. to fix a bad Pages deploy) without cutting a new version.
+#
+# One-time repo setup required (cannot be automated from CI):
+#   Settings -> Pages -> Build and deployment -> Source = "GitHub Actions"
+#
+# See docs/firmware_installation.md for the full picture, including the
+# known FW_VERSION/git-tag drift risk (the embedded FW_VERSION comes from
+# scripts/gen_version.py's own monthly build counter, not from this tag).
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing tag to (re)build and (re)publish, e.g. v26.08.50'
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # softprops/action-gh-release needs to create the release + upload assets
+    outputs:
+      fw_version: ${{ steps.fwver.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Cache PlatformIO
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.platformio
+            ~/.cache/pip
+          key: pio-${{ runner.os }}-${{ hashFiles('platformio.ini') }}
+
+      - name: Install PlatformIO + esptool
+        # PlatformIO's bundled tool-esptoolpy is pinned to an ~v3.0-era release
+        # that predates merge_bin (added ~v3.4). Install esptool separately.
+        run: pip install platformio "esptool>=4,<6"
+
+      - name: Build firmware (db-radar env)
+        env:
+          # Pins FW_VERSION to the exact tag being released instead of letting
+          # gen_version.py's per-build counter drift ahead of it — see
+          # scripts/gen_version.py's FW_VERSION_OVERRIDE doc comment.
+          FW_VERSION_OVERRIDE: ${{ inputs.tag || github.ref_name }}
+        run: pio run -e db-radar
+
+      - name: Verify embedded FW_VERSION matches the release tag
+        id: fwver
+        run: |
+          EXPECTED="${{ inputs.tag || github.ref_name }}"
+          VER=$(grep -oE 'FW_VERSION "v[0-9.]+"' include/core/fw_version_gen.h | grep -oE 'v[0-9.]+')
+          echo "version=$VER" >> "$GITHUB_OUTPUT"
+          echo "Embedded firmware version: $VER (tag: $EXPECTED)"
+          if [ "$VER" != "$EXPECTED" ]; then
+            echo "::error::Embedded FW_VERSION ($VER) does not match release tag ($EXPECTED)"
+            exit 1
+          fi
+
+      - name: Merge into a single full-flash binary
+        run: |
+          B=.pio/build/db-radar
+          python -m esptool --chip esp32s3 merge_bin -o db-radar-esp32s3-full.bin \
+            --flash_mode dio --flash_freq 80m --flash_size 16MB \
+            0x0     "$B/bootloader.bin" \
+            0x8000  "$B/partitions.bin" \
+            0xe000  "$B/ota_data_initial.bin" \
+            0x10000 "$B/firmware.bin"
+          # App-only image, for the device's own /update OTA page — NOT the merged image.
+          cp "$B/firmware.bin" db-radar-esp32s3-ota.bin
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.tag || github.ref_name }}
+          files: |
+            db-radar-esp32s3-full.bin
+            db-radar-esp32s3-ota.bin
+          generate_release_notes: true
+          body: |
+            Embedded firmware version: `${{ steps.fwver.outputs.version }}`
+
+            **Option A — Browser flasher (no install):**
+            https://alvroga.github.io/db-radar/flasher/
+
+            **Option B — esptool, first flash on a blank board:**
+            `esptool.py --chip esp32s3 write_flash 0x0 db-radar-esp32s3-full.bin`
+
+            **Update an already-flashed board over WiFi:**
+            Device web portal -> `/update` -> upload `db-radar-esp32s3-ota.bin`.
+            Do **not** upload `db-radar-esp32s3-full.bin` there — `/update` expects the raw app image only.
+
+      - name: Prepare GitHub Pages site
+        run: |
+          mkdir -p site/flasher
+          cp web/flasher/index.html web/flasher/manifest.json site/flasher/
+          cp db-radar-esp32s3-full.bin site/flasher/
+          sed -i "s/__FWVER__/${{ steps.fwver.outputs.version }}/g" site/flasher/index.html site/flasher/manifest.json
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

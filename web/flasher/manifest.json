@@ -1,0 +1,13 @@
+{
+  "name": "db-radar",
+  "version": "__FWVER__",
+  "new_install_prompt_erase": true,
+  "builds": [
+    {
+      "chipFamily": "ESP32-S3",
+      "parts": [
+        { "path": "db-radar-esp32s3-full.bin", "offset": 0 }
+      ]
+    }
+  ]
+}

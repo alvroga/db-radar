@@ -1,0 +1,837 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>GPX Generator</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+
+        body {
+            font-family: 'Courier New', monospace;
+            background: #0d0d1a;
+            color: #e0e0e0;
+            height: 100vh;
+            display: flex;
+            overflow: hidden;
+        }
+
+        /* ── Sidebar ── */
+        #sidebar {
+            width: 300px;
+            min-width: 300px;
+            height: 100vh;
+            background: #111124;
+            border-right: 1px solid #2a2a4a;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+        }
+
+        #sidebar-header {
+            padding: 16px;
+            border-bottom: 1px solid #2a2a4a;
+            background: #0d0d1a;
+        }
+
+        #sidebar-header h1 {
+            font-size: 14px;
+            color: #00ff88;
+            letter-spacing: 2px;
+            text-transform: uppercase;
+            margin-bottom: 3px;
+        }
+
+        #sidebar-header p {
+            font-size: 11px;
+            color: #555;
+        }
+
+        #sidebar-actions {
+            padding: 10px 12px;
+            border-bottom: 1px solid #2a2a4a;
+            display: flex;
+            gap: 8px;
+        }
+
+        #waypoint-list {
+            flex: 1;
+            overflow-y: auto;
+            padding: 8px;
+        }
+
+        .waypoint-item {
+            background: #1a1a2e;
+            border: 1px solid #2a2a4a;
+            border-radius: 4px;
+            padding: 9px 10px;
+            margin-bottom: 5px;
+            cursor: pointer;
+            transition: border-color 0.15s;
+            display: flex;
+            align-items: flex-start;
+            justify-content: space-between;
+            gap: 8px;
+        }
+
+        .waypoint-item:hover { border-color: #00aa55; }
+
+        .waypoint-item-info { flex: 1; min-width: 0; }
+
+        .waypoint-name {
+            font-size: 12px;
+            color: #00ff88;
+            font-weight: bold;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+        }
+
+        .waypoint-display {
+            font-size: 11px;
+            color: #aaa;
+            white-space: nowrap;
+            overflow: hidden;
+            text-overflow: ellipsis;
+            margin-top: 1px;
+        }
+
+        .waypoint-coords {
+            font-size: 10px;
+            color: #777;
+            margin-top: 2px;
+        }
+
+        .wp-delete {
+            background: none;
+            border: 1px solid #552222;
+            border-radius: 3px;
+            color: #ff6666;
+            cursor: pointer;
+            font-size: 13px;
+            line-height: 1;
+            padding: 3px 6px;
+            flex-shrink: 0;
+        }
+
+        .wp-delete:hover { background: #ff4444; color: #fff; border-color: #ff4444; }
+
+        .wp-dl {
+            background: none;
+            border: 1px solid #005533;
+            border-radius: 3px;
+            color: #00cc66;
+            cursor: pointer;
+            font-size: 10px;
+            font-family: 'Courier New', monospace;
+            font-weight: bold;
+            line-height: 1;
+            padding: 3px 6px;
+            flex-shrink: 0;
+            white-space: nowrap;
+        }
+
+        .wp-dl:hover { background: #00cc66; color: #000; border-color: #00cc66; }
+
+        #sidebar-footer {
+            padding: 12px;
+            border-top: 1px solid #2a2a4a;
+            background: #0d0d1a;
+        }
+
+        #wp-count {
+            font-size: 10px;
+            color: #888;
+            text-align: center;
+            margin-top: 8px;
+        }
+
+        /* ── Search bar ── */
+        #search-bar {
+            position: absolute;
+            top: 14px;
+            left: calc(300px + 14px);
+            width: 340px;
+            z-index: 500;
+            display: flex;
+            gap: 0;
+            box-shadow: 0 2px 8px rgba(0,0,0,0.25);
+            border-radius: 6px;
+            overflow: hidden;
+        }
+
+        #search-input {
+            flex: 1;
+            padding: 9px 13px;
+            font-family: 'Courier New', monospace;
+            font-size: 12px;
+            border: none;
+            background: rgba(255,255,255,0.95);
+            color: #222;
+            outline: none;
+        }
+
+        #search-input::placeholder { color: #999; }
+
+        #search-btn {
+            padding: 9px 16px;
+            background: #00cc66;
+            border: none;
+            color: #000;
+            font-family: 'Courier New', monospace;
+            font-size: 12px;
+            font-weight: bold;
+            cursor: pointer;
+            white-space: nowrap;
+        }
+
+        #search-btn:hover { background: #00ff88; }
+
+        /* ── Map ── */
+        #map {
+            flex: 1;
+            height: 100vh;
+            cursor: crosshair;
+        }
+
+        #map-hint {
+            position: absolute;
+            bottom: 28px;
+            left: 50%;
+            transform: translateX(-50%);
+            background: rgba(255,255,255,0.92);
+            border: 1px solid #ccc;
+            color: #333;
+            padding: 5px 14px;
+            border-radius: 20px;
+            font-size: 11px;
+            font-family: 'Courier New', monospace;
+            pointer-events: none;
+            z-index: 500;
+            white-space: nowrap;
+        }
+
+        /* ── Buttons ── */
+        .btn {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 5px;
+            padding: 7px 11px;
+            border-radius: 4px;
+            font-size: 11px;
+            font-family: 'Courier New', monospace;
+            font-weight: bold;
+            letter-spacing: 0.5px;
+            text-transform: uppercase;
+            cursor: pointer;
+            border: 1px solid;
+            transition: all 0.15s;
+            white-space: nowrap;
+        }
+
+        .btn-primary {
+            background: #00cc66;
+            border-color: #00cc66;
+            color: #000;
+        }
+
+        .btn-primary:hover { background: #00ff88; border-color: #00ff88; }
+
+        .btn-secondary {
+            background: transparent;
+            border-color: #3a3a5a;
+            color: #888;
+        }
+
+        .btn-secondary:hover { border-color: #00aa55; color: #00ff88; }
+        .btn-full { width: 100%; }
+
+        /* ── Modal ── */
+        #modal-overlay {
+            display: none;
+            position: fixed;
+            inset: 0;
+            background: rgba(0,0,0,0.72);
+            z-index: 1000;
+            align-items: center;
+            justify-content: center;
+        }
+
+        #modal-overlay.open { display: flex; }
+
+        #modal {
+            background: #111124;
+            border: 1px solid #2a2a4a;
+            border-radius: 8px;
+            width: 500px;
+            max-width: 96vw;
+            max-height: 92vh;
+            overflow-y: auto;
+            padding: 24px;
+        }
+
+        #modal h2 {
+            font-size: 12px;
+            color: #00ff88;
+            letter-spacing: 2px;
+            text-transform: uppercase;
+            margin-bottom: 20px;
+        }
+
+        .form-row {
+            margin-bottom: 15px;
+        }
+
+        .form-row .label-line {
+            display: flex;
+            justify-content: space-between;
+            align-items: baseline;
+            margin-bottom: 5px;
+        }
+
+        .form-row label {
+            font-size: 10px;
+            color: #777;
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+
+        .char-count {
+            font-size: 10px;
+            color: #777;
+        }
+
+        .char-count.warn { color: #ffaa00; }
+        .char-count.over { color: #ff4444; }
+
+        .form-row input,
+        .form-row textarea {
+            width: 100%;
+            background: #0d0d1a;
+            border: 1px solid #2a2a4a;
+            border-radius: 4px;
+            color: #e0e0e0;
+            font-family: 'Courier New', monospace;
+            font-size: 13px;
+            padding: 8px 10px;
+            outline: none;
+            transition: border-color 0.15s;
+            resize: vertical;
+        }
+
+        .form-row input:focus,
+        .form-row textarea:focus { border-color: #00ff88; }
+
+        .form-row .sub {
+            font-size: 10px;
+            color: #777;
+            margin-top: 4px;
+        }
+
+        .coords-box {
+            font-size: 12px;
+            color: #555;
+            padding: 7px 10px;
+            background: #0a0a18;
+            border: 1px solid #1a1a3a;
+            border-radius: 4px;
+        }
+
+        .modal-footer {
+            display: flex;
+            gap: 8px;
+            justify-content: flex-end;
+            margin-top: 20px;
+            padding-top: 16px;
+            border-top: 1px solid #1a1a3a;
+        }
+
+        /* ── Toast ── */
+        #toast {
+            display: none;
+            position: fixed;
+            bottom: 20px;
+            right: 20px;
+            background: #0d1f15;
+            border: 1px solid #00cc66;
+            color: #00ff88;
+            padding: 9px 15px;
+            border-radius: 4px;
+            font-size: 12px;
+            font-family: 'Courier New', monospace;
+            z-index: 2000;
+        }
+
+        /* ── Empty state ── */
+        .empty {
+            text-align: center;
+            padding: 32px 12px;
+            color: #888;
+            font-size: 11px;
+            line-height: 1.7;
+        }
+
+        /* ── Scrollbar ── */
+        ::-webkit-scrollbar { width: 5px; }
+        ::-webkit-scrollbar-track { background: #0d0d1a; }
+        ::-webkit-scrollbar-thumb { background: #2a2a4a; border-radius: 3px; }
+    </style>
+</head>
+<body>
+
+<!-- Sidebar -->
+<div id="sidebar">
+    <div id="sidebar-header">
+        <h1>GPX Generator</h1>
+        <p>Personal waypoint builder</p>
+    </div>
+
+    <div id="sidebar-actions">
+        <label class="btn btn-secondary" style="flex:1; cursor:pointer;">
+            ↑ Import GPX
+            <input type="file" id="import-input" accept=".gpx" style="display:none" />
+        </label>
+        <button class="btn btn-secondary" onclick="clearAll()" title="Clear all waypoints">✕ Clear</button>
+    </div>
+
+    <div id="waypoint-list">
+        <div class="empty">Click anywhere on the map<br>to place a waypoint</div>
+    </div>
+
+    <div id="sidebar-footer">
+        <button class="btn btn-primary btn-full" onclick="exportAll()">↓ Export All GPX</button>
+        <div id="wp-count">0 / 50 waypoints</div>
+    </div>
+</div>
+
+<!-- Map -->
+<div id="map"></div>
+<div id="map-hint">Click on the map to place a waypoint</div>
+
+<!-- Search bar -->
+<div id="search-bar">
+    <input id="search-input" type="text" placeholder="Search address or paste coordinates…" autocomplete="off" />
+    <button id="search-btn" onclick="searchLocation()">Go</button>
+</div>
+
+<!-- Modal -->
+<div id="modal-overlay">
+    <div id="modal">
+        <h2 id="modal-title">New Waypoint</h2>
+
+        <div class="form-row">
+            <div class="label-line"><label>Coordinates</label></div>
+            <div class="coords-box" id="modal-coords">—</div>
+        </div>
+
+        <div class="form-row">
+            <div class="label-line">
+                <label for="f-name">ID / Filename</label>
+                <span class="char-count" id="c-name">0 / 47</span>
+            </div>
+            <input type="text" id="f-name" maxlength="47" placeholder="e.g. METEORA_01"
+                   oninput="countChars('name',47)" />
+            <div class="sub">Short identifier — 47 chars max</div>
+        </div>
+
+        <div class="form-row">
+            <div class="label-line">
+                <label for="f-display">Display Name</label>
+                <span class="char-count" id="c-display">0 / 63</span>
+            </div>
+            <input type="text" id="f-display" maxlength="63" placeholder="e.g. Grand Meteora Monastery"
+                   oninput="countChars('display',63)" />
+            <div class="sub">Full name shown on device — 63 chars max</div>
+        </div>
+
+        <div class="form-row">
+            <div class="label-line">
+                <label for="f-desc">Description</label>
+                <span class="char-count" id="c-desc">0 / 1023</span>
+            </div>
+            <textarea id="f-desc" rows="4" maxlength="1023" placeholder="Location notes, access info, what to look for..."
+                      oninput="countChars('desc',1023)"></textarea>
+        </div>
+
+        <div class="form-row">
+            <div class="label-line">
+                <label for="f-hint">Hint</label>
+                <span class="char-count" id="c-hint">0 / 255</span>
+            </div>
+            <textarea id="f-hint" rows="2" maxlength="255" placeholder="Proximity hint or extra notes..."
+                      oninput="countChars('hint',255)"></textarea>
+        </div>
+
+        <div class="modal-footer">
+            <button class="btn btn-secondary" onclick="closeModal()">Cancel</button>
+            <button class="btn btn-primary" onclick="saveWaypoint()">Save Waypoint</button>
+        </div>
+    </div>
+</div>
+
+<div id="toast"></div>
+
+<script>
+// ── State ────────────────────────────────────────────────────────────────────
+let waypoints = [];
+let markerMap  = {};
+let editingId  = null;
+let pendingLL  = null;
+const MAX = 50;
+
+// ── Map ──────────────────────────────────────────────────────────────────────
+// Toei Animation Museum, Nerima, Tokyo — fallback if geolocation denied
+const FALLBACK_CENTER = [35.7383, 139.6519];
+
+const map = L.map('map', { zoomControl: false }).setView(FALLBACK_CENTER, 15);
+L.control.zoom({ position: 'bottomright' }).addTo(map);
+
+L.tileLayer('https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png', {
+    attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/">CARTO</a>',
+    maxZoom: 19
+}).addTo(map);
+
+if (navigator.geolocation) {
+    navigator.geolocation.getCurrentPosition(
+        p => map.setView([p.coords.latitude, p.coords.longitude], 16),
+        () => {}  // denied — stay on Toei Animation Museum
+    );
+}
+
+map.on('click', e => {
+    if (waypoints.length >= MAX) { toast('Max 50 waypoints reached'); return; }
+    pendingLL  = e.latlng;
+    editingId  = null;
+    openModal(null, e.latlng);
+});
+
+// ── Search ────────────────────────────────────────────────────────────────────
+let searchMarker = null;
+
+document.getElementById('search-input').addEventListener('keydown', e => {
+    if (e.key === 'Enter') searchLocation();
+});
+
+async function searchLocation() {
+    const raw = document.getElementById('search-input').value.trim();
+    if (!raw) return;
+
+    // Try to parse as coordinates first: "lat, lon" or "lat lon"
+    const coordMatch = raw.match(/^(-?\d+\.?\d*)[,\s]+(-?\d+\.?\d*)$/);
+    if (coordMatch) {
+        const lat = parseFloat(coordMatch[1]);
+        const lon = parseFloat(coordMatch[2]);
+        if (lat >= -90 && lat <= 90 && lon >= -180 && lon <= 180) {
+            flyTo(lat, lon, `${lat.toFixed(5)}, ${lon.toFixed(5)}`);
+            return;
+        }
+    }
+
+    // Geocode via Nominatim
+    document.getElementById('search-btn').textContent = '…';
+    try {
+        const url = `https://nominatim.openstreetmap.org/search?q=${encodeURIComponent(raw)}&format=json&limit=1`;
+        const res  = await fetch(url, { headers: { 'Accept-Language': 'en' } });
+        const data = await res.json();
+        if (data.length) {
+            flyTo(parseFloat(data[0].lat), parseFloat(data[0].lon), data[0].display_name);
+        } else {
+            toast('Location not found');
+        }
+    } catch {
+        toast('Search failed — check connection');
+    } finally {
+        document.getElementById('search-btn').textContent = 'Go';
+    }
+}
+
+function flyTo(lat, lon, label) {
+    map.flyTo([lat, lon], 16, { duration: 1.2 });
+    if (searchMarker) map.removeLayer(searchMarker);
+    searchMarker = L.circleMarker([lat, lon], {
+        radius: 8, color: '#00cc66', fillColor: '#00ff88',
+        fillOpacity: 0.6, weight: 2
+    }).addTo(map).bindPopup(label).openPopup();
+    // Auto-remove marker after 6s
+    setTimeout(() => { if (searchMarker) { map.removeLayer(searchMarker); searchMarker = null; } }, 6000);
+}
+
+// ── Marker icon ───────────────────────────────────────────────────────────────
+function makeIcon() {
+    return L.divIcon({
+        className: '',
+        html: `<div style="width:12px;height:12px;border-radius:50%;
+                   background:#ffcc00;border:2px solid #cc9900;
+                   box-shadow:0 0 7px #ffcc0099;"></div>`,
+        iconSize: [12,12], iconAnchor: [6,6], popupAnchor: [0,-8]
+    });
+}
+
+// ── Modal ─────────────────────────────────────────────────────────────────────
+function openModal(wp, latlng) {
+    document.getElementById('modal-title').textContent = wp ? 'Edit Waypoint' : 'New Waypoint';
+    document.getElementById('modal-coords').textContent =
+        `${latlng.lat.toFixed(6)},  ${latlng.lng.toFixed(6)}`;
+
+    document.getElementById('f-name').value    = wp ? wp.name         : '';
+    document.getElementById('f-display').value = wp ? wp.display_name : '';
+    document.getElementById('f-desc').value    = wp ? wp.desc         : '';
+    document.getElementById('f-hint').value    = wp ? wp.hint         : '';
+
+    countChars('name',47); countChars('display',63);
+    countChars('desc',1023); countChars('hint',255);
+
+    document.getElementById('modal-overlay').classList.add('open');
+    document.getElementById('f-name').focus();
+}
+
+function closeModal() {
+    document.getElementById('modal-overlay').classList.remove('open');
+    pendingLL = null; editingId = null;
+}
+
+document.getElementById('modal-overlay').addEventListener('click', e => {
+    if (e.target === document.getElementById('modal-overlay')) closeModal();
+});
+
+function countChars(field, max) {
+    const ids = { name:'f-name', display:'f-display', desc:'f-desc', hint:'f-hint' };
+    const len = document.getElementById(ids[field]).value.length;
+    const el  = document.getElementById('c-' + field);
+    el.textContent = `${len} / ${max}`;
+    el.className = 'char-count' + (len >= max ? ' over' : len > max * 0.85 ? ' warn' : '');
+}
+
+// ── Save ──────────────────────────────────────────────────────────────────────
+function saveWaypoint() {
+    const name    = document.getElementById('f-name').value.trim();
+    const display = document.getElementById('f-display').value.trim();
+    const desc    = document.getElementById('f-desc').value.trim();
+    const hint    = document.getElementById('f-hint').value.trim();
+
+    if (!name) {
+        const el = document.getElementById('f-name');
+        el.style.borderColor = '#ff4444';
+        el.focus();
+        setTimeout(() => el.style.borderColor = '', 1500);
+        return;
+    }
+
+    if (editingId !== null) {
+        const wp = waypoints.find(w => w.id === editingId);
+        if (wp) {
+            Object.assign(wp, { name, display_name: display, desc, hint });
+            markerMap[editingId]?.setTooltipContent(display || name);
+            toast('Waypoint updated');
+        }
+    } else {
+        const id = Date.now();
+        const wp = { id, lat: pendingLL.lat, lng: pendingLL.lng, name, display_name: display, desc, hint };
+        waypoints.push(wp);
+        addMarker(wp);
+        toast('Waypoint added');
+    }
+
+    renderList();
+    closeModal();
+}
+
+// ── Markers ───────────────────────────────────────────────────────────────────
+function addMarker(wp) {
+    const m = L.marker([wp.lat, wp.lng], { icon: makeIcon() })
+        .addTo(map)
+        .bindTooltip(wp.display_name || wp.name, {
+            permanent: false, direction: 'top', offset: [0,-6]
+        })
+        .on('click', () => {
+            editingId = wp.id;
+            pendingLL = { lat: wp.lat, lng: wp.lng };
+            openModal(waypoints.find(w => w.id === wp.id), pendingLL);
+        });
+    markerMap[wp.id] = m;
+}
+
+function removeMarker(id) {
+    if (markerMap[id]) { map.removeLayer(markerMap[id]); delete markerMap[id]; }
+}
+
+// ── List ──────────────────────────────────────────────────────────────────────
+function renderList() {
+    const list = document.getElementById('waypoint-list');
+    document.getElementById('wp-count').textContent = `${waypoints.length} / ${MAX} waypoints`;
+
+    if (!waypoints.length) {
+        list.innerHTML = '<div class="empty">Click anywhere on the map<br>to place a waypoint</div>';
+        return;
+    }
+
+    list.innerHTML = waypoints.map(wp => `
+        <div class="waypoint-item" onclick="focusWp(${wp.id})">
+            <div class="waypoint-item-info">
+                <div class="waypoint-name">${esc(wp.name)}</div>
+                ${wp.display_name ? `<div class="waypoint-display">${esc(wp.display_name)}</div>` : ''}
+                <div class="waypoint-coords">${wp.lat.toFixed(5)}, ${wp.lng.toFixed(5)}</div>
+            </div>
+            <div style="display:flex;gap:4px;align-items:center;flex-shrink:0;">
+                <button class="wp-dl" onclick="downloadOneGPX(event,${wp.id})" title="Download GPX">↓ GPX</button>
+                <button class="wp-delete" onclick="deleteWp(event,${wp.id})" title="Delete waypoint">✕</button>
+            </div>
+        </div>
+    `).join('');
+}
+
+function focusWp(id) {
+    const wp = waypoints.find(w => w.id === id);
+    if (wp) { map.setView([wp.lat, wp.lng], Math.max(map.getZoom(), 16)); }
+}
+
+function deleteWp(e, id) {
+    e.stopPropagation();
+    waypoints = waypoints.filter(w => w.id !== id);
+    removeMarker(id);
+    renderList();
+    toast('Waypoint deleted');
+}
+
+function clearAll() {
+    if (!waypoints.length) return;
+    if (!confirm(`Delete all ${waypoints.length} waypoints?`)) return;
+    waypoints.forEach(wp => removeMarker(wp.id));
+    waypoints = [];
+    renderList();
+    toast('All waypoints cleared');
+}
+
+// ── Export GPX ────────────────────────────────────────────────────────────────
+function sanitizeFilename(name) {
+    return (name || 'waypoint').replace(/[^a-zA-Z0-9_\-]/g, '_').slice(0, 47);
+}
+
+function buildGPX(wp) {
+    const lines = [
+        '<?xml version="1.0" encoding="UTF-8"?>',
+        '<gpx version="1.1" creator="GPX Generator"',
+        '     xmlns="http://www.topografix.com/GPX/1/1"',
+        '     xmlns:groundspeak="http://www.groundspeak.com/cache/1/0">',
+        `  <wpt lat="${wp.lat.toFixed(6)}" lon="${wp.lng.toFixed(6)}">`,
+        `    <name>${x(wp.name)}</name>`,
+    ];
+    if (wp.display_name) lines.push(`    <groundspeak:name>${x(wp.display_name)}</groundspeak:name>`);
+    if (wp.desc)         lines.push(`    <desc>${x(wp.desc)}</desc>`);
+    if (wp.hint)         lines.push(`    <groundspeak:encoded_hints>${x(wp.hint)}</groundspeak:encoded_hints>`);
+    lines.push('  </wpt>', '</gpx>');
+    return lines.join('\n');
+}
+
+function triggerDownload(content, filename) {
+    const blob = new Blob([content], { type: 'application/gpx+xml' });
+    const a    = Object.assign(document.createElement('a'), {
+        href: URL.createObjectURL(blob),
+        download: filename
+    });
+    a.click();
+    URL.revokeObjectURL(a.href);
+}
+
+function downloadOneGPX(e, id) {
+    e.stopPropagation();
+    const wp = waypoints.find(w => w.id === id);
+    if (!wp) return;
+    triggerDownload(buildGPX(wp), `${sanitizeFilename(wp.name)}.gpx`);
+    toast(`Downloaded ${sanitizeFilename(wp.name)}.gpx`);
+}
+
+function exportAll() {
+    if (!waypoints.length) { toast('No waypoints to export'); return; }
+    waypoints.forEach((wp, i) => {
+        setTimeout(() => triggerDownload(buildGPX(wp), `${sanitizeFilename(wp.name)}.gpx`), i * 200);
+    });
+    toast(`Downloading ${waypoints.length} GPX file${waypoints.length !== 1 ? 's' : ''}…`);
+}
+
+// ── Import GPX ────────────────────────────────────────────────────────────────
+document.getElementById('import-input').addEventListener('change', e => {
+    const file = e.target.files[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = ev => parseGPX(ev.target.result);
+    reader.readAsText(file);
+    e.target.value = '';
+});
+
+function parseGPX(text) {
+    const xml  = new DOMParser().parseFromString(text, 'application/xml');
+    const wpts = xml.querySelectorAll('wpt');
+    let added = 0, skipped = 0;
+
+    wpts.forEach(wpt => {
+        if (waypoints.length >= MAX) { skipped++; return; }
+
+        const lat = parseFloat(wpt.getAttribute('lat'));
+        const lng = parseFloat(wpt.getAttribute('lon'));
+        if (isNaN(lat) || isNaN(lng)) return;
+
+        // Helper: try namespaced and local-name lookup
+        const get = (...tags) => {
+            for (const tag of tags) {
+                const local = tag.includes(':') ? tag.split(':')[1] : tag;
+                const el = wpt.querySelector(tag)
+                        || [...wpt.getElementsByTagName('*')].find(e =>
+                               e.localName === local && !['wpt'].includes(e.localName) &&
+                               e.closest('wpt') === wpt);
+                if (el && el.textContent.trim()) return el.textContent.trim();
+            }
+            return '';
+        };
+
+        const name         = get('name').slice(0, 47);
+        const display_name = (get('groundspeak:name') || get('cmt') || '').slice(0, 63);
+        const desc         = (get('groundspeak:short_description', 'groundspeak:long_description', 'desc') || '').slice(0, 1023);
+        const hint         = (get('groundspeak:encoded_hints') || '').slice(0, 255);
+
+        if (!name) return;
+
+        const id = Date.now() + added;
+        waypoints.push({ id, lat, lng, name, display_name, desc, hint });
+        addMarker(waypoints[waypoints.length - 1]);
+        added++;
+    });
+
+    renderList();
+
+    if (added) {
+        const bounds = waypoints.map(w => [w.lat, w.lng]);
+        if (bounds.length) map.fitBounds(bounds, { padding: [40, 40] });
+        toast(`Imported ${added} waypoint${added !== 1 ? 's' : ''}${skipped ? `, ${skipped} skipped` : ''}`);
+    } else {
+        toast('No valid waypoints found');
+    }
+}
+
+// ── Utils ─────────────────────────────────────────────────────────────────────
+function x(s)   { return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+function esc(s) { return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;'); }
+
+function toast(msg) {
+    const el = document.getElementById('toast');
+    el.textContent = msg;
+    el.style.display = 'block';
+    clearTimeout(el._t);
+    el._t = setTimeout(() => el.style.display = 'none', 2500);
+}
+
+// Keyboard shortcuts
+document.addEventListener('keydown', e => {
+    if (e.key === 'Escape') closeModal();
+    if (e.key === 'Enter' && document.getElementById('modal-overlay').classList.contains('open')) {
+        if (document.activeElement.tagName !== 'TEXTAREA') saveWaypoint();
+    }
+});
+
+renderList();
+</script>
+</body>
+</html>
