@@ -9,6 +9,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+**Boot crash on first flash: `assert failed: __esp_system_init_fn_init_flash` (2026-08-10)**
+
+First real-hardware test of the public release binary (`v26.08.10`, flashed via the new browser web
+flasher) crashed immediately after the bootloader handed off to the app — before `app_main()`, during
+ESP-IDF's own flash-driver reinit. Root cause: `CONFIG_SPI_FLASH_AUTO_SUSPEND=y` (`sdkconfig.defaults`),
+enabled 2026-08-07 as an experimental fix for GPX-upload display corruption and already field-verified
+**not** to have resolved that problem (see the 2026-08-07 entry below) — but never reverted. Auto-suspend
+requires the flash driver to recognize the connected chip's specific variant as supporting the
+suspend/resume opcode; on a chip it doesn't recognize, flash reinit can fail outright, which is
+consistent with this crash. Reverted. Since the flag never delivered the benefit it was added for,
+there was no upside left to weigh against this risk. `sdkconfig.db-radar` regenerated and diffed —
+only the intended flag and its automatic Kconfig-dependency siblings changed. Build verified clean
+(RAM 51.2% / Flash 40.7%, unchanged). Also pinned `platform = espressif32@6.12.0` in `platformio.ini`
+(was unpinned, which floated to whatever's "latest" on a fresh install — the release workflow's first
+run landed on espressif32@7.0.1/ESP-IDF 6.0.1 and failed on a kconfig symbol-rename mismatch; this
+project is built, tested, and patched against ESP-IDF 5.5.0 throughout).
+
 ### Changed (docs)
 
 **Low-priority doc trim pass — audit findings items 28-33 (2026-08-09)**
