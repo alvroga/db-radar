@@ -13,7 +13,7 @@ evaluated in `docs/beacon_direction_finding.md` (dated 2026-07-31).
 **BT 5.1 Angle-of-Arrival/Angle-of-Departure is ruled out by hardware, not by preference.** The
 technique requires an antenna array with an RF switch to sample phase difference across elements, plus
 access to IQ samples of the advertisement's Constant Tone Extension. This board has one onboard
-antenna and no free GPIO for an RF switch (`memory/hardware_constraints.md`), and the ESP32-S3 radio
+antenna and no free GPIO for an RF switch (every remaining pin is allocated), and the ESP32-S3 radio
 does not produce CTE IQ samples — nor does ESP-IDF's NimBLE expose them if it did. The design doc is
 explicit that this is a hard stop: "No amount of software makes a single-antenna radio measure phase
 difference. Do not go looking for a library that claims otherwise"

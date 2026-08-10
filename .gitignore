@@ -9,6 +9,13 @@ CLAUDE.md.bak2
 # ships as a "coming soon" placeholder until then) — see docs/public_release_plan.md
 README.full.md
 
+# Private working docs — contain personal data (email, device MAC, real coordinates)
+# and internal process notes; must never reach the public repo
+docs/public_release_plan.md
+docs/pre_release_doc_audit_findings.md
+docs/konami_easter_egg_retry_notes.md
+docs/release_review_2026-08-09.md
+
 # PlatformIO Build Files
 .pio/
 .pioenvs/

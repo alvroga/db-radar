@@ -10,7 +10,7 @@ Decided by: Claude (proposed, you approved)
 before formatting in every `print`/`printf` overload — plus a `serial on|off` console command to
 toggle it, defaulting ON. Once verified working on hardware, the natural follow-up question was
 whether that default should instead track `dev_mode`: this project already has a "normal mode: all
-resources for radar function, no dev overhead" principle (`memory/normal_mode_resources.md`), applied
+resources for radar function, no dev overhead" principle, applied
 elsewhere to the on-screen DEV/perf HUD labels and the beacon proximity test path
 (`task_manager.cpp:1538`).
 

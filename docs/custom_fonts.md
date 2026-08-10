@@ -38,7 +38,7 @@ For a 480×480 circular display with GPS radar UI:
 | Size | Use Case | Examples |
 |------|----------|----------|
 | **14px** | Small labels, status text | `88%`, `GPS: 12 sats` |
-| **16px** | Body text, coordinates, primary labels — the most-used size in the shipped UI | `34.1334°N`, `Waypoint Alpha` |
+| **16px** | Body text, coordinates, primary labels — the most-used size in the shipped UI | `40.7580°N`, `Waypoint Alpha` |
 | **20px** | Section headers, larger status text | `2.4 km`, `Heading: 045°` |
 
 ### Sizes not currently used

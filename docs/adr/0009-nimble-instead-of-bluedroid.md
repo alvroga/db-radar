@@ -24,7 +24,8 @@ Bluedroid's ~65KB — a measured ~40KB freed.
 
 **Easier**: SD card logging stopped failing, double-press detection recovered (heap stalls gone), and
 the project carries ~40KB of SRAM headroom whenever BLE is active that did not exist before. This
-headroom was later a precondition for other work — see `memory/project_wifi_ble_sram.md`.
+headroom was later a precondition for other work — see the WiFi/BLE SRAM notes in
+`docs/beacon_proximity.md`.
 
 **Harder**: NimBLE's API differs enough from Bluedroid's that `beacon_proximity.cpp` needed a full
 rewrite of its callback layer (`BLEAdvertisedDeviceCallbacks` → `NimBLEAdvertisedDeviceCallbacks`,
@@ -33,11 +34,11 @@ changed from timer-based to `g_pScan->isScanning()`). The library also needs **t
 patches** to build against ESP-IDF 5.5 that are not part of the upstream v1.4.1 tag and are lost if
 `.pio/libdeps/` is ever wiped: a missing `#include <time.h>` in `NimBLEAttValue.h` (used
 unconditionally but only included behind a config flag), and a replacement for
-`esp_nimble_hci_and_controller_deinit()` in `NimBLEDevice.cpp`, which IDF 5.x removed (see
-`memory/feedback_nimble_patches.md`). Separately, NimBLE and WiFi cannot coexist in this board's SRAM
-budget — `esp_wifi_init()`'s ~60–80KB allocation doesn't fit alongside NimBLE and task stacks, so WiFi
-was made session-only and `beacon_proximity::deinit()` must run before `wifi_manager::init()`
-(`memory/project_wifi_ble_sram.md`).
+`esp_nimble_hci_and_controller_deinit()` in `NimBLEDevice.cpp`, which IDF 5.x removed (both patches
+are applied automatically at build time by `scripts/patch_nimble_cpp_idf5.py`). Separately, NimBLE
+and WiFi cannot coexist in this board's SRAM budget — `esp_wifi_init()`'s ~60–80KB allocation doesn't
+fit alongside NimBLE and task stacks, so WiFi was made session-only and `beacon_proximity::deinit()`
+must run before `wifi_manager::init()`.
 
 **Gave up**: nothing algorithmic — all beacon business logic (EMA, zones, hysteresis, trend, sonar)
 carried over unchanged (CHANGELOG). What was given up is the relative simplicity of depending on the

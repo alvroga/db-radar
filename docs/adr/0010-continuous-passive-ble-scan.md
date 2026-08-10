@@ -37,7 +37,7 @@ continuous (rather than zone-quantized) RSSI-driven UI and sonar viable — see 
 also a standing footgun in the NimBLE API: `setAdvertisedDeviceCallbacks(cb, wantDuplicates)`
 internally calls `setDuplicateFilter(!wantDuplicates)`, so calling it *after* the explicit
 `setDuplicateFilter(false)` silently restores 2 Hz filtering with nothing logged.
-`debugScanAll()` hit this once already (fixed) — see `memory/nimble_scan_footguns.md`.
+`debugScanAll()` hit this once already (fixed) — see `docs/beacon_proximity.md`'s scan-footgun notes.
 
 **Gave up**: nothing — passive scanning also draws less radio power than active, so neither half of
 this decision traded against the other.

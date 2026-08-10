@@ -2,6 +2,6 @@
 // Regenerated on every build. Committed fallback exists for IDEs.
 #pragma once
 #undef  FW_VERSION
-#define FW_VERSION "v26.08.71"
+#define FW_VERSION "v26.08.100"
 #undef  FW_BUILD_TS
-#define FW_BUILD_TS 1786296823u
+#define FW_BUILD_TS 1786327009u

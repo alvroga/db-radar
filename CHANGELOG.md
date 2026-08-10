@@ -59,12 +59,13 @@ absolute position), so the values were zeroed out in place across all 18 files �
 re-ran the script afterward and confirmed identical analytical output.
 
 Also fixed `docs/calibration/analyze.py`'s hardcoded absolute path
-(`/Users/dit/Documents/.../cc-radar/docs/calibration`) — replaced with
+(a machine-specific `.../cc-radar/docs/calibration` path) — replaced with
 `os.path.dirname(os.path.abspath(__file__))` so the script works regardless of where the repo is
 cloned, instead of only on the machine and folder name it was originally written on.
 
 **A third, more consequential instance found in the same sweep**: `ui_manager.cpp`'s radar-screen
-init hardcoded the same real coordinates (`34.133417, -118.145190`) as the pre-first-GPS-fix map
+init hardcoded the same real coordinates the CSVs carried (redacted here; the ~34.1°N, -118.1°W
+area) as the pre-first-GPS-fix map
 center fallback — used only until the very first NVS-saved GPS fix exists on a given device, but
 that means **every fresh install of every device would have centered its very first boot on this
 real location**, not a documentation example. Changed to `(0.0, 0.0)` — a neutral "no fix yet"
@@ -976,7 +977,7 @@ Decision record: [ADR-0019](docs/adr/0019-3-axis-tumble-calibration-not-ellipsoi
 WP-6 needs the fixed rotation between the magnetometer's and accelerometer's sensor frames — they sit
 on different PCBs, so this is a hardware fact, not something derivable from the mag-only field data
 already collected. Rather than guess it (the exact "un-instrumented constant" mistake this project has
-made before — see `memory/feedback_residual_attribution.md`), added the tooling to measure it directly
+made before — see "The residual trap" in `docs/performance_optimization_backlog.md`), added the tooling to measure it directly
 on the 6-pose bench protocol in [`docs/compass_tilt_bench.md`](docs/compass_tilt_bench.md).
 
 - **New `tilt_bench` module + Settings > DEV > Tilt Bench screen** — Start Session opens a CSV on the

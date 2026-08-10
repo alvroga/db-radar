@@ -1,5 +1,5 @@
 # ============================================================================
-# sdkconfig.defaults — ESP-IDF build configuration for cc-radar
+# sdkconfig.defaults — ESP-IDF build configuration for db-radar
 # Replaces Arduino framework build flags and board_build.arduino.memory_type
 # ============================================================================
 
@@ -64,7 +64,7 @@ CONFIG_ADC_ONESHOT_CTRL_FUNC_IN_IRAM=n
 # FAT filesystem (SD card at /sdcard)
 # FATFS_LONG_FILENAMES is the Kconfig *choice group* name, not a settable
 # symbol -- setting it =y is silently ignored (confirmed: regenerating
-# sdkconfig.cc-radar left CONFIG_FATFS_LFN_NONE=y unchanged). The actual
+# sdkconfig.db-radar left CONFIG_FATFS_LFN_NONE=y unchanged). The actual
 # selectable option is FATFS_LFN_HEAP. Heap over stack because the LFN
 # buffer (up to MAX_LFN chars) would otherwise land on task stacks that are
 # already tight (e.g. field_log's 6KB writer task).
