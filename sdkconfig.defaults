@@ -1,0 +1,116 @@
+# ============================================================================
+# sdkconfig.defaults — ESP-IDF build configuration for db-radar
+# Replaces Arduino framework build flags and board_build.arduino.memory_type
+# ============================================================================
+
+# Flash and PSRAM
+CONFIG_ESPTOOLPY_FLASHSIZE_16MB=y
+CONFIG_ESPTOOLPY_FLASHMODE_QIO=y
+CONFIG_ESPTOOLPY_FLASHFREQ_80M=y
+
+# CONFIG_SPI_FLASH_AUTO_SUSPEND — tried 2026-08-07 as a fix for GPX-upload display corruption,
+# field-verified NOT to resolve it (see CHANGELOG.md), and reverted 2026-08-10 after a real
+# board crashed on first boot with `assert failed: __esp_system_init_fn_init_flash` — the flash
+# driver failing to reinit immediately after the bootloader hands off to the app. Auto-suspend
+# requires the flash driver to recognize the specific chip variant as supporting the
+# suspend/resume opcode; on a chip that doesn't, this is a plausible and sufficient cause of
+# that crash. Given it never fixed the problem it was added for, there's no upside left to
+# balance against that risk. Do not re-add without a specific reason and a fresh field test.
+CONFIG_SPIRAM=y
+CONFIG_SPIRAM_MODE_OCT=y
+CONFIG_SPIRAM_SPEED_80M=y
+CONFIG_SPIRAM_USE_CAPS_ALLOC=y
+CONFIG_SPIRAM_IGNORE_NOTFOUND=y
+CONFIG_ESP32S3_SPIRAM_SUPPORT=y
+
+# PSRAM heap integration
+CONFIG_SPIRAM_USE_MALLOC=y
+CONFIG_SPIRAM_MALLOC_ALWAYSINTERNAL=16384
+
+# USB CDC (replaces -DARDUINO_USB_CDC_ON_BOOT=1)
+CONFIG_TINYUSB_ENABLED=y
+CONFIG_TINYUSB_CDC_ENABLED=y
+CONFIG_ESP_CONSOLE_USB_CDC=y
+CONFIG_ESP_CONSOLE_SECONDARY_NONE=y
+
+# FreeRTOS — 1000Hz tick rate (Arduino hardcodes this; vanilla IDF defaults 100Hz)
+# CRITICAL: Without this, pdMS_TO_TICKS(10) = 1 tick instead of 10 ticks
+# All task_manager delays assume millisecond precision
+CONFIG_FREERTOS_HZ=1000
+
+# FreeRTOS multicore (dual-core ESP32-S3)
+CONFIG_FREERTOS_UNICORE=n
+
+# CPU frequency — 240MHz (vanilla IDF defaults to 160MHz; the Arduino core used to
+# set 240 for us, so the ESP-IDF migration silently downclocked the whole binary).
+# Global ~1.5x on both cores: BLE stack, GPS UBX parsing, I2C transactions, compass
+# read, and the CPU-bound parts of the render. The two full-screen PSRAM writes in
+# the render path are bus-bound, not CPU-bound, so they gain much less than 1.5x.
+# Cost is power draw — see docs/performance_optimization_backlog.md for the
+# battery-life measurement this needs.
+# CONFIG_PM_ENABLE is off, so this is a fixed frequency, not a DFS ceiling.
+CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240=y
+
+# I2C master new API (ESP-IDF 5.x)
+CONFIG_I2C_ENABLE_DEBUG_LOG=n
+
+# UART — GPS on UART1
+CONFIG_UART_ISR_IN_IRAM=y
+
+# ADC oneshot driver
+CONFIG_ADC_ONESHOT_CTRL_FUNC_IN_IRAM=n
+
+# FAT filesystem (SD card at /sdcard)
+# FATFS_LONG_FILENAMES is the Kconfig *choice group* name, not a settable
+# symbol -- setting it =y is silently ignored (confirmed: regenerating
+# sdkconfig.db-radar left CONFIG_FATFS_LFN_NONE=y unchanged). The actual
+# selectable option is FATFS_LFN_HEAP. Heap over stack because the LFN
+# buffer (up to MAX_LFN chars) would otherwise land on task stacks that are
+# already tight (e.g. field_log's 6KB writer task).
+CONFIG_FATFS_LFN_HEAP=y
+CONFIG_FATFS_MAX_LFN=255
+CONFIG_FATFS_CODEPAGE_850=y
+
+# NVS (replaces Arduino Preferences library)
+CONFIG_NVS_ASSERT_ERROR_CHECK=n
+
+# WiFi
+CONFIG_ESP_WIFI_ENABLED=y
+CONFIG_ESP_WIFI_STATIC_RX_BUFFER_NUM=10
+CONFIG_ESP_WIFI_DYNAMIC_RX_BUFFER_NUM=32
+CONFIG_ESP_WIFI_TX_BUFFER=DYNAMIC
+CONFIG_ESP_WIFI_DYNAMIC_TX_BUFFER_NUM=32
+
+# BLE — NimBLE (stubbed in beacon_proximity.cpp for now)
+CONFIG_BT_ENABLED=y
+CONFIG_BT_NIMBLE_ENABLED=y
+CONFIG_BT_CONTROLLER_ENABLED=y
+
+# NimBLE host allocations go to PSRAM, not internal SRAM. This was set in the
+# committed sdkconfig but never in sdkconfig.defaults, so it survived only as long
+# as nobody regenerated the file — pinned here now. Internal SRAM is the scarce
+# resource on this board (static RAM already ~60%); IDF's default for this option
+# is INTERNAL, which would move the beacon-proximity stack back into it.
+CONFIG_BT_NIMBLE_MEM_ALLOC_MODE_EXTERNAL=y
+
+# Custom partition table — OTA dual-slot layout
+CONFIG_PARTITION_TABLE_CUSTOM=y
+CONFIG_PARTITION_TABLE_CUSTOM_FILENAME="partitions/partitions_ota.csv"
+
+# OTA rollback: if new firmware never calls esp_ota_mark_app_valid_cancel_rollback(),
+# the bootloader reverts to the previous partition on next reboot.
+CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
+
+# Main task stack (app_main runs here before spawning FreeRTOS tasks)
+CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
+CONFIG_ESP_MAIN_TASK_AFFINITY_CPU1=y
+
+# Watchdog
+CONFIG_ESP_TASK_WDT=y
+CONFIG_ESP_TASK_WDT_PANIC=n
+CONFIG_ESP_TASK_WDT_TIMEOUT_S=30
+
+# Compiler
+CONFIG_COMPILER_OPTIMIZATION_SIZE=y
+CONFIG_COMPILER_CXX_EXCEPTIONS=y
+CONFIG_COMPILER_CXX_RTTI=n
