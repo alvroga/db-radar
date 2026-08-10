@@ -248,9 +248,9 @@ bool loadSettings(RadarSettings& settings) {
     nvs_getstr(h, KEY_GPX_FILE, settings.active_gpx_file, sizeof(settings.active_gpx_file));
     settings.gpx_auto_load                = nvs_getbool(h, KEY_GPX_AUTO, false);
     settings.button_sound_enabled         = nvs_getbool(h, KEY_BTN_SOUND, false);
-    settings.dev_mode                     = nvs_getbool(h, KEY_DEV_MODE, true);
-    settings.dev_tab_visible              = nvs_getbool(h, KEY_DEV_TAB, true);
-    settings.logging_enabled              = nvs_getbool(h, KEY_LOGGING_EN, true);
+    settings.dev_mode                     = nvs_getbool(h, KEY_DEV_MODE, false);
+    settings.dev_tab_visible              = nvs_getbool(h, KEY_DEV_TAB, false);
+    settings.logging_enabled              = nvs_getbool(h, KEY_LOGGING_EN, false);
     settings.heading_up_mode              = nvs_getbool(h, KEY_HEADING_UP, true);
     // beacon_proximity_enabled: always on when a MAC is configured
     // Don't load from NVS — was previously saved as false, would block the feature

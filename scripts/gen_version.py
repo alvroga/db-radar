@@ -19,6 +19,14 @@ so the device always boots to radar mode on first boot after reflash.
 
 Generating a header file is more reliable than env.Append(CPPDEFINES)
 for ESP-IDF/CMake builds, where SCons flags may not propagate to CMake.
+
+FW_VERSION_OVERRIDE (env var, unset for normal/local builds): the release
+workflow sets this to the exact git tag it's building, so the embedded
+FW_VERSION always matches the tag precisely instead of drifting ahead of
+it by however many local builds happened first that month (see
+docs/firmware_installation.md's versioning-mismatch note — this is the
+fix for it). Must match vYY.MM.## or the build fails loudly rather than
+silently falling back to the counter.
 """
 Import("env")
 import datetime
@@ -33,17 +41,26 @@ header_path = os.path.join(
     env["PROJECT_DIR"], "include", "core", "fw_version_gen.h"
 )
 
-counter = 1
-try:
-    with open(header_path) as f:
-        prev = f.read()
-    m = re.search(r'FW_VERSION "v(\d{2})\.(\d{2})\.(\d+)"', prev)
-    if m and int(m.group(1)) == year and int(m.group(2)) == month:
-        counter = int(m.group(3)) + 1
-except OSError:
-    pass
+override = os.environ.get("FW_VERSION_OVERRIDE", "").strip()
+if override:
+    if not re.fullmatch(r"v\d{2}\.\d{2}\.\d+", override):
+        raise ValueError(
+            "FW_VERSION_OVERRIDE={!r} doesn't match vYY.MM.## — refusing to "
+            "embed a malformed release version.".format(override)
+        )
+    version = override
+else:
+    counter = 1
+    try:
+        with open(header_path) as f:
+            prev = f.read()
+        m = re.search(r'FW_VERSION "v(\d{2})\.(\d{2})\.(\d+)"', prev)
+        if m and int(m.group(1)) == year and int(m.group(2)) == month:
+            counter = int(m.group(3)) + 1
+    except OSError:
+        pass
+    version = "v{:02d}.{:02d}.{:02d}".format(year, month, counter)
 
-version = "v{:02d}.{:02d}.{:02d}".format(year, month, counter)
 build_ts = int(time.time())
 
 with open(header_path, "w") as f:

@@ -65,14 +65,24 @@ jobs:
         run: pip install platformio "esptool>=4,<6"
 
       - name: Build firmware (db-radar env)
+        env:
+          # Pins FW_VERSION to the exact tag being released instead of letting
+          # gen_version.py's per-build counter drift ahead of it — see
+          # scripts/gen_version.py's FW_VERSION_OVERRIDE doc comment.
+          FW_VERSION_OVERRIDE: ${{ inputs.tag || github.ref_name }}
         run: pio run -e db-radar
 
-      - name: Read embedded FW_VERSION
+      - name: Verify embedded FW_VERSION matches the release tag
         id: fwver
         run: |
+          EXPECTED="${{ inputs.tag || github.ref_name }}"
           VER=$(grep -oE 'FW_VERSION "v[0-9.]+"' include/core/fw_version_gen.h | grep -oE 'v[0-9.]+')
           echo "version=$VER" >> "$GITHUB_OUTPUT"
-          echo "Embedded firmware version: $VER"
+          echo "Embedded firmware version: $VER (tag: $EXPECTED)"
+          if [ "$VER" != "$EXPECTED" ]; then
+            echo "::error::Embedded FW_VERSION ($VER) does not match release tag ($EXPECTED)"
+            exit 1
+          fi
 
       - name: Merge into a single full-flash binary
         run: |
