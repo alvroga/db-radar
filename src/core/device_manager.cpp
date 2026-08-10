@@ -1,0 +1,1270 @@
+#include "device_manager.h"
+#include "system_config.h"
+#include "lcd_st7701.h"
+#include "cst820.h"
+#include "backlight.h"
+#include "rtc_pcf85063.h"
+#include "gps_bh880.h"
+#include "compass_qmc5883l.h"
+#include "navigation/gps_quality.h"
+#include "scanner.h"
+#include "wifi_manager.h"
+#include "settings_manager.h"
+#include "diagnostics.h"
+#include "navigation.h"
+#include "i2c_manager.h"
+#include "memory_manager.h"
+#include "hardware/input/button.h"
+#include "hardware/buzzer.h"
+#include "standby_manager.h"
+#include "task_manager.h"
+#include "ui/ui_manager.h"
+#include "system_logger.h"
+#include "esp_heap_caps.h"
+#include "esp_attr.h"
+#include <string.h>
+#include <time.h>
+#include "driver/sdmmc_host.h"
+#include "sdmmc_cmd.h"
+#include "esp_vfs_fat.h"
+#include <lvgl.h>
+
+namespace device_manager {
+
+// Global state
+static Config g_config;
+static DeviceState g_device_state;
+static volatile bool g_lvgl_unlocked = false;
+
+// LVGL buffers
+static lv_color_t *lv_buf1 = nullptr, *lv_buf2 = nullptr;
+static lv_disp_draw_buf_t draw_buf;
+static lv_disp_t* g_lv_disp = nullptr;   // Captured at register; needed by applyPendingSwRotate()
+
+// The panel's own two framebuffers (step 9). rotate90_tiled() writes directly into
+// the back one and esp_lcd_panel_draw_bitmap then swaps without copying.
+static lv_color_t* g_fb[2] = { nullptr, nullptr };
+static uint8_t     g_fb_back = 1;          // Index we are about to render into
+static volatile bool g_fb_swap_pending = false;  // Submitted, not yet latched by scan-out
+static SemaphoreHandle_t g_fb_swap_sem = nullptr;
+
+// Staging buffers for the tiled 90° rotation, used only when the dual-framebuffer
+// path is unavailable (allocation failure).
+//
+// One per LVGL draw buffer, paired by pointer. That pairing is what makes the DMA
+// safe: LVGL never re-renders into a draw buffer whose flush is still outstanding,
+// so a staging buffer tied to that draw buffer inherits the same guarantee and can
+// never be overwritten while esp_lcd is reading it.
+static lv_color_t* g_rot_buf[2] = { nullptr, nullptr };
+static size_t      g_lv_buf_px  = 0;     // Pixels per draw buffer (for the range check)
+
+// True when rotation can target the panel framebuffers directly (zero-copy flush).
+static inline bool dualFbRotateAvailable() { return g_fb[0] && g_fb[1]; }
+
+static volatile int g_rot_mode_request = -1;   // -1 = none pending
+
+// Default is TILED: measured 64.3ms/frame vs 162ms for LVGL's own in-place transpose
+// (230400px, on-device 2026-07-28). initLVGL() overrides this if the staging buffers
+// could not be allocated, or if built with -DRADAR_SW_ROTATE=0. `rot on` restores the
+// LVGL path at runtime for A/B comparison.
+static RotMode g_rot_mode = RotMode::TILED;
+static lv_disp_drv_t disp_drv;
+static lv_indev_drv_t indev_drv;
+
+// Global pointer for DMA callback synchronization
+static lv_disp_drv_t* g_current_disp_drv = nullptr;
+
+// VSYNC semaphore — given by on_vsync_cb ISR every ~26.6ms (37.6 Hz).
+// uiTask takes it to gate lv_timer_handler() to frame boundaries (tear-free).
+static SemaphoreHandle_t g_vsync_sem = nullptr;
+
+// Core the RGB panel's vsync ISR actually runs on. Written by the ISR, read by
+// `perf`. -1 until the first vsync fires. See §1.5 in the perf backlog.
+static volatile int8_t g_vsync_isr_core = -1;
+
+// Display timing pin array
+static const int DATA_PINS[16] = { 5,45,48,47,21, 14,13,12,11,10,9, 46,3,8,18,17 };
+
+// Forward declarations
+static void lvgl_flush_cb(lv_disp_drv_t* drv, const lv_area_t* area, lv_color_t* color_p);
+static void lvgl_monitor_cb(lv_disp_drv_t* drv, uint32_t time_ms, uint32_t px);
+static void lvgl_touch_read_cb(lv_indev_drv_t*, lv_indev_data_t* data);
+static inline int16_t scale_to_480(uint16_t raw);
+static bool on_color_trans_done(esp_lcd_panel_handle_t panel, const esp_lcd_rgb_panel_event_data_t* edata, void* user_ctx);
+static bool on_vsync_cb(esp_lcd_panel_handle_t panel, const esp_lcd_rgb_panel_event_data_t* edata, void* user_ctx);
+static bool on_frame_buf_complete(esp_lcd_panel_handle_t panel, const esp_lcd_rgb_panel_event_data_t* edata, void* user_ctx);
+
+const DeviceState& getDeviceState() {
+    return g_device_state;
+}
+
+bool initializeAll(const Config& config) {
+    g_config = config;
+    Serial.println("==== Device Manager: Initializing Hardware ====");
+
+    // 0. Memory Manager - Phase 2: Ultra-conservative pool enablement (2 blocks each)
+    memory_manager::Config mem_config;
+    mem_config.enable_tracking = true; // ENABLED: Ultra-conservative memory pools (2+2 blocks)
+    mem_config.enable_periodic_check = true; // Enable periodic integrity checks
+    mem_config.check_interval_ms = 30000; // Check every 30 seconds
+    mem_config.log_stats = false; // Avoid spam during init
+    if (!memory_manager::init(mem_config)) {
+        Serial.println("[WARNING] Memory manager failed to initialize, continuing without it");
+    }
+
+    // 1. LED - First indicator
+    g_device_state.led_ok = initLED(g_config.led_pin);
+
+    // 2. I2C Bus - Required by multiple devices
+    g_device_state.i2c_ok = initI2C(g_config.i2c_sda, g_config.i2c_scl, g_config.i2c_freq);
+    if (!g_device_state.i2c_ok) {
+        Serial.println("[ERROR] I2C initialization failed");
+        return false;
+    }
+
+    // 3. IO Expander - Required for LCD control
+    Serial.println("[DEVICE] Initializing IO Expander (EXIO)...");
+    static i2c_manager::exio::State exio_state;  // Static to persist across function calls
+    g_device_state.exio_ok = initEXIO(exio_state);
+    g_device_state.exio_state = &exio_state;
+    if (!g_device_state.exio_ok) {
+        Serial.println("[ERROR] EXIO initialization failed - SYSTEM HALTED");
+        Serial.println("[ERROR] This will cause buzzer stuck ON and no LCD display");
+        while(1) { delay(1000); } // Halt system to prevent damage
+    }
+    Serial.printf("[DEVICE] EXIO initialization complete, final state: 0x%02X\n", exio_state.out);
+
+    // 4. RTC - Optional but useful for timestamping
+    g_device_state.rtc_ok = initRTC();
+
+    // 4.5 Settings - Must load before WiFi/BLE mode decision
+    settings_manager::init();
+    Serial.println("[SETTINGS] Settings loaded");
+
+    // 5. WiFi — initialized in main.cpp only when wifi_ap_enabled or wifi_sta_boot is set.
+    // WiFi and NimBLE are mutually exclusive boot modes; wifi_manager::init() uses
+    // default buffer sizes since NimBLE never starts in WiFi boot modes.
+    // Radio stays dormant until user activates it.
+    g_device_state.scanner_ok = false;
+
+    // 6. GPS - Critical for radar application
+    g_device_state.gps_ok = initGPS();
+
+    // 6b. Compass - QMC5883L on BH-880 module (non-critical)
+    g_device_state.compass_ok = initCompass();
+
+    // 6c. Accelerometer - QMI8658 on the main board (non-critical).
+    // Already on the shared bus and ACKing before this change; only transactions
+    // are new. Honours the accel_enabled kill switch.
+    g_device_state.accel_ok = initAccel();
+
+    // 7. LCD Display - Critical component
+    g_device_state.lcd_ok = initLCD(g_config);
+    if (!g_device_state.lcd_ok) {
+        Serial.println("[ERROR] LCD initialization failed");
+        return false;
+    }
+
+    // 8. SD Card - Optional storage (dev-mode logging)
+    g_device_state.sd_ok = initSD(g_config);
+
+    // 8b. FFat - primary GPX waypoint storage (see ADR-0024). Independent of SD/EXIO,
+    // mounted here purely to land before gpx_loader::init()/gpx_server::init() in main.cpp.
+    g_device_state.ffat_ok = initFFat();
+
+    // 9. Backlight - Required for visibility
+    g_device_state.backlight_ok = initBacklight(g_config);
+
+    // 10. LVGL - UI framework
+    g_device_state.lvgl_ok = initLVGL(g_config);
+    if (!g_device_state.lvgl_ok) {
+        Serial.println("[ERROR] LVGL initialization failed");
+        return false;
+    }
+
+    // 11. Touch - UI input
+    g_device_state.touch_ok = initTouch();
+
+    // 12. Button - Physical button input (GPIO0)
+    g_device_state.button_ok = initButton();
+
+    // Final status
+    gpio_set_level((gpio_num_t)g_config.led_pin, 0);  // Turn off init indicator
+    logDeviceStatus();
+
+    return true;
+}
+
+bool initLED(int pin) {
+    gpio_config_t io = {};
+    io.pin_bit_mask = 1ULL << pin;
+    io.mode = GPIO_MODE_OUTPUT;
+    io.pull_up_en = GPIO_PULLUP_DISABLE;
+    io.pull_down_en = GPIO_PULLDOWN_DISABLE;
+    io.intr_type = GPIO_INTR_DISABLE;
+    gpio_config(&io);
+    gpio_set_level((gpio_num_t)pin, 1);  // On during initialization
+    return true;
+}
+
+bool initI2C(int sda, int scl, uint32_t freq) {
+    i2c_manager::Config config;
+    config.sda_pin = sda;
+    config.scl_pin = scl;
+    config.frequency = freq;
+
+    return i2c_manager::init(config);
+}
+
+bool initEXIO(i2c_manager::exio::State& state) {
+    Serial.println("[DEVICE] Starting EXIO initialization...");
+
+    if (!i2c_manager::exio::begin(state)) {
+        Serial.println("[EXIO] Failed to initialize");
+        return false;
+    }
+
+    Serial.printf("[DEVICE] EXIO begin successful, setting initial states...\n");
+
+    // Set initial states - BUZZER OFF is critical!
+    bool buzzer_ok = i2c_manager::exio::set(i2c_manager::exio::BUZZER, false, state);
+    Serial.printf("[DEVICE] Set BUZZER(pin7)=OFF: %s (state: 0x%02X)\n", buzzer_ok ? "OK" : "FAIL", state.out);
+
+    bool lcd_cs_ok = i2c_manager::exio::set(i2c_manager::exio::LCD_CS, true, state);
+    Serial.printf("[DEVICE] Set LCD_CS(pin2)=HIGH: %s (state: 0x%02X)\n", lcd_cs_ok ? "OK" : "FAIL", state.out);
+
+    bool lcd_rst_ok1 = i2c_manager::exio::set(i2c_manager::exio::LCD_RST, false, state);
+    Serial.printf("[DEVICE] Set LCD_RST(pin0)=LOW: %s (state: 0x%02X)\n", lcd_rst_ok1 ? "OK" : "FAIL", state.out);
+
+    delay(30);
+
+    bool lcd_rst_ok2 = i2c_manager::exio::set(i2c_manager::exio::LCD_RST, true, state);
+    Serial.printf("[DEVICE] Set LCD_RST(pin0)=HIGH: %s (state: 0x%02X)\n", lcd_rst_ok2 ? "OK" : "FAIL", state.out);
+
+    delay(150);
+
+    if (!buzzer_ok) {
+        Serial.println("[EXIO] CRITICAL: Failed to turn off buzzer!");
+        return false;
+    }
+
+    Serial.println("[EXIO] Initialized successfully");
+    return true;
+}
+
+bool initRTC() {
+    rtc::begin(0x51);
+
+    // Always update RTC with compile time to ensure current time
+    if (rtc::set_from_compile_time()) {
+        Serial.println("[RTC] Updated from compile time");
+    } else {
+        Serial.println("[RTC] Failed to set from compile time");
+        return false;
+    }
+
+    // Test read to verify RTC is working
+    rtc::Time test_time{};
+    if (rtc::read(test_time) && test_time.valid) {
+        Serial.printf("[RTC] Current time: %04d-%02d-%02d %02d:%02d:%02d\n",
+                      test_time.year, test_time.month, test_time.day,
+                      test_time.hour, test_time.minute, test_time.second);
+    } else {
+        Serial.println("[RTC] Warning: Time read failed or invalid");
+    }
+
+    Serial.println("[RTC] Initialized successfully");
+    return true;
+}
+
+bool initScanner() {
+    // Note: settings_manager::init() and wifi_manager::init() are now called
+    // conditionally in initializeAll() based on wifi_enabled setting.
+    // This function is kept for legacy/fallback compatibility only.
+    scanner::init();
+    return true;
+}
+
+bool initGPS() {
+    if (!system_config::features::ENABLE_GPS) {
+        Serial.println("[GPS] GPS disabled in configuration");
+        return false;
+    }
+
+    Serial.println("[GPS] Initializing GNSS module...");
+    Serial.printf("[GPS] UART: TX=GPIO%d, RX=GPIO%d\n",
+                  system_config::pins::GPS_TX,
+                  system_config::pins::GPS_RX);
+    Serial.println("[GPS] Auto-detecting baud rate...");
+
+    // Use Serial1 for GPS communication
+    // Pass baud=0 to auto-detect the module's baud rate
+    // BH-880 module: auto-detects between 9600 and 115200 baud
+    gps_bh880::begin(0,                           // Auto-detect baud rate
+                     system_config::pins::GPS_RX, // ESP32 RX = GPIO 44
+                     system_config::pins::GPS_TX); // ESP32 TX = GPIO 43
+
+    // Allow GPS module to boot before sending configuration commands
+    delay(200);
+
+    Serial.println("[GPS] BH-880 (B1301N) initialization complete");
+    Serial.println("[GPS] All constellations enabled by default (GPS/GLONASS/BDS/Galileo/QZSS)");
+
+    // ===========================================================================
+    // FAST FIX: Hot/Warm Start based on saved position
+    // ===========================================================================
+
+    double saved_lat, saved_lon;
+    uint32_t saved_fix_time;
+
+    if (settings_manager::loadGPSState(saved_lat, saved_lon, saved_fix_time)) {
+        rtc::Time rtc_time;
+        uint32_t current_time = 0;
+
+        if (g_device_state.rtc_ok && rtc::read(rtc_time) && rtc_time.valid) {
+            struct tm tm_time = {};
+            tm_time.tm_year = rtc_time.year - 1900;
+            tm_time.tm_mon = rtc_time.month - 1;
+            tm_time.tm_mday = rtc_time.day;
+            tm_time.tm_hour = rtc_time.hour;
+            tm_time.tm_min = rtc_time.minute;
+            tm_time.tm_sec = rtc_time.second;
+            current_time = mktime(&tm_time);
+        }
+
+        if (current_time > 0 && saved_fix_time > 0) {
+            uint32_t seconds_since_fix = current_time - saved_fix_time;
+            uint32_t hours_since_fix = seconds_since_fix / 3600;
+
+            Serial.printf("[GPS] Saved position: %.6f, %.6f (%u hours ago)\n",
+                         saved_lat, saved_lon, hours_since_fix);
+
+            if (hours_since_fix < 4) {
+                Serial.println("[GPS] Hot start (ephemeris valid, TTFF ~1s)");
+                gps_bh880::hotStart();
+            } else if (hours_since_fix < 24) {
+                Serial.println("[GPS] Warm start (almanac valid, TTFF ~28s)");
+                gps_bh880::warmStart();
+            } else {
+                Serial.println("[GPS] Data >24h old - cold start (TTFF ~28s)");
+            }
+        } else {
+            Serial.println("[GPS] RTC unavailable - warm start with saved position");
+            gps_bh880::warmStart();
+        }
+
+        delay(50);
+    } else {
+        Serial.println("[GPS] No saved position - cold start (TTFF ~28s)");
+    }
+
+    // Note: M10 ignores both legacy CFG-RATE and VALSET CFG-RATE-MEAS despite ACKing them.
+    // Rate control is not achievable on this module. Running at default 10Hz.
+
+    // Power mode controlled at runtime via serial: gps power full/agg1/interval
+
+    Serial.println("[GPS] Ready - waiting for satellite fix (outdoor clear sky view required)");
+
+    // Initialize GPS Quality Tracking (Phase 1.3)
+    gps_quality::init();
+
+    return true;
+}
+
+bool initCompass() {
+    Serial.println("[COMPASS] Initializing QMC5883L on BH-880 module...");
+
+    if (!i2c_manager::ping(i2c_manager::COMPASS_DEVICE)) {
+        Serial.println("[COMPASS] Device not found at 0x0D");
+        return false;
+    }
+
+    if (!compass_qmc5883l::begin()) {
+        Serial.println("[COMPASS] Initialization failed");
+        return false;
+    }
+
+    // Load saved hard-iron calibration offsets from NVS
+    const auto& settings = settings_manager::getSettings();
+    if (settings.compass_calibrated) {
+        compass_qmc5883l::setCalibration(settings.compass_cal_x, settings.compass_cal_y, settings.compass_cal_z);
+        Serial.printf("[COMPASS] Calibration loaded from NVS: X=%d Y=%d Z=%d\n",
+                      settings.compass_cal_x, settings.compass_cal_y, settings.compass_cal_z);
+    } else {
+        Serial.println("[COMPASS] No calibration saved — run 'Calibrate Compass' in Settings > Display");
+    }
+
+    Serial.println("[COMPASS] Initialized successfully");
+    return true;
+}
+
+bool initAccel() {
+    const auto& settings = settings_manager::getSettings();
+    if (!settings.accel_enabled) {
+        accel_qmi8658::setEnabled(false);
+        Serial.println("[ACCEL] Disabled in settings — not initializing");
+        return false;
+    }
+
+    Serial.println("[ACCEL] Initializing QMI8658 (accelerometer only)...");
+    accel_qmi8658::setEnabled(true);
+
+    // Gyro stays off. It is the wrong sensor for tilt (it measures rate, not
+    // which way is down) and it draws several times the accel's current. It is
+    // enabled only for field sample 9, from the Field Log screen.
+    if (!accel_qmi8658::begin(false)) {
+        Serial.println("[ACCEL] Initialization failed — tilt data unavailable");
+        return false;
+    }
+
+    Serial.println("[ACCEL] Initialized successfully");
+    return true;
+}
+
+bool initLCD(const Config& config) {
+    // Initialize SPI for ST7701 command interface
+    spi_bus_config_t buscfg = {};
+    buscfg.mosi_io_num = config.lcd_mosi_pin;
+    buscfg.miso_io_num = -1;
+    buscfg.sclk_io_num = config.lcd_clk_pin;
+
+    esp_err_t ret = spi_bus_initialize(SPI2_HOST, &buscfg, SPI_DMA_CH_AUTO);
+    if (ret != ESP_OK) {
+        Serial.printf("[LCD] SPI bus init failed: %d\n", ret);
+        return false;
+    }
+
+    spi_device_interface_config_t devcfg = {};
+    devcfg.command_bits = 1;
+    devcfg.address_bits = 8;
+    devcfg.mode = 0;
+    devcfg.clock_speed_hz = system_config::communication::SPI_FREQ_HZ;  // Configurable SPI frequency
+    devcfg.spics_io_num = -1;
+    devcfg.queue_size = 1;
+
+    ret = spi_bus_add_device(SPI2_HOST, &devcfg, &g_device_state.spi_handle);
+    if (ret != ESP_OK) {
+        Serial.printf("[LCD] SPI device add failed: %d\n", ret);
+        return false;
+    }
+
+    // Initialize ST7701 via SPI
+    if (!g_device_state.exio_state) {
+        Serial.println("[LCD] EXIO state not available");
+        return false;
+    }
+
+    i2c_manager::exio::set(i2c_manager::exio::LCD_CS, false, *g_device_state.exio_state);
+    st7701_init(g_device_state.spi_handle);
+    i2c_manager::exio::set(i2c_manager::exio::LCD_CS, true, *g_device_state.exio_state);
+
+    // Verify LCD_CS remains HIGH
+    bool lcd_cs_high = (g_device_state.exio_state->out & (1u << i2c_manager::exio::LCD_CS)) != 0;
+    Serial.printf("[LCD] LCD_CS after init: %s\n", lcd_cs_high ? "HIGH" : "LOW (unexpected)");
+
+    // Initialize RGB panel
+    esp_lcd_rgb_panel_config_t cfg = {};
+    cfg.data_width = 16;
+    cfg.clk_src = LCD_CLK_SRC_PLL160M;
+    cfg.dma_burst_size = 64;  // IDF 5.5: replaces deprecated psram_trans_align
+    cfg.pclk_gpio_num = config.lcd_pclk;
+    cfg.vsync_gpio_num = config.lcd_vsync;
+    cfg.hsync_gpio_num = config.lcd_hsync;
+    cfg.de_gpio_num = config.lcd_de;
+
+    for (int i = 0; i < 16; i++) {
+        cfg.data_gpio_nums[i] = DATA_PINS[i];
+    }
+
+    cfg.timings.h_res = config.screen_width;
+    cfg.timings.v_res = config.screen_height;
+    cfg.timings.pclk_hz = config.pclk_hz;
+    cfg.timings.hsync_pulse_width = 8;
+    cfg.timings.hsync_back_porch = 20;
+    cfg.timings.hsync_front_porch = 20;
+    cfg.timings.vsync_pulse_width = 4;
+    cfg.timings.vsync_back_porch = 8;
+    cfg.timings.vsync_front_porch = 10;
+    cfg.timings.flags.hsync_idle_low = 0;
+    cfg.timings.flags.vsync_idle_low = 0;
+    cfg.timings.flags.de_idle_high = 0;
+    cfg.timings.flags.pclk_active_neg = 0;
+    cfg.timings.flags.pclk_idle_high = 0;
+    cfg.flags.fb_in_psram = 1;
+    cfg.bounce_buffer_size_px = system_config::display::SCREEN_WIDTH * system_config::display::BOUNCE_BUFFER_LINES;  // IDF 5.5: SRAM staging eliminates PSRAM/DMA bus contention
+
+    // Two framebuffers (step 9). rotate90_tiled() transposes straight into the back
+    // buffer and hands the pointer to esp_lcd_panel_draw_bitmap, which recognises its
+    // own framebuffer and swaps instead of copying (esp_lcd_panel_rgb.c:614-624) —
+    // that deletes the 34ms full-screen memcpy the flush used to cost. Net PSRAM is
+    // still negative: +460KB here, -920KB from dropping the rotation staging buffers.
+    cfg.num_fbs = 2;
+
+    Serial.printf("[RGB] %dx%d pclk=%lu Hz | H:pw=%u bp=%u fp=%u | V:pw=%u bp=%u fp=%u\n",
+                  cfg.timings.h_res, cfg.timings.v_res, (unsigned)cfg.timings.pclk_hz,
+                  (unsigned)cfg.timings.hsync_pulse_width, (unsigned)cfg.timings.hsync_back_porch, (unsigned)cfg.timings.hsync_front_porch,
+                  (unsigned)cfg.timings.vsync_pulse_width, (unsigned)cfg.timings.vsync_back_porch, (unsigned)cfg.timings.vsync_front_porch);
+
+    ret = esp_lcd_new_rgb_panel(&cfg, &g_device_state.panel_handle);
+    if (ret != ESP_OK) {
+        Serial.printf("[LCD] RGB panel creation failed: %d\n", ret);
+        return false;
+    }
+
+    ret = esp_lcd_panel_reset(g_device_state.panel_handle);
+    if (ret != ESP_OK) {
+        Serial.printf("[LCD] Panel reset failed: %d\n", ret);
+        return false;
+    }
+
+    ret = esp_lcd_panel_init(g_device_state.panel_handle);
+    if (ret != ESP_OK) {
+        Serial.printf("[LCD] Panel init failed: %d\n", ret);
+        return false;
+    }
+
+    // Grab both framebuffer pointers so flush_cb can transpose straight into the
+    // back one. If this fails we simply never enter the zero-copy path.
+    if (esp_lcd_rgb_panel_get_frame_buffer(g_device_state.panel_handle, 2,
+                                           (void**)&g_fb[0], (void**)&g_fb[1]) != ESP_OK) {
+        g_fb[0] = g_fb[1] = nullptr;
+        Serial.println("[LCD] get_frame_buffer failed — falling back to staged flush");
+    }
+
+    // Register panel callbacks (ESP-IDF 5.x API)
+    // on_color_trans_done:  DMA complete → LVGL flush_ready
+    // on_vsync:             Frame boundary → unblock uiTask for tear-free rendering
+    // on_frame_buf_complete: scan-out latched cur_fb_index → back buffer is free again
+    g_vsync_sem = xSemaphoreCreateBinary();
+    g_fb_swap_sem = xSemaphoreCreateBinary();
+    esp_lcd_rgb_panel_event_callbacks_t cbs = {};
+    cbs.on_color_trans_done = on_color_trans_done;
+    cbs.on_vsync = on_vsync_cb;
+    cbs.on_frame_buf_complete = on_frame_buf_complete;
+    esp_lcd_rgb_panel_register_event_callbacks(g_device_state.panel_handle, &cbs, nullptr);
+
+    Serial.printf("[LCD] Display initialized successfully (fb0=%p fb1=%p)\n", g_fb[0], g_fb[1]);
+    return true;
+}
+
+bool initSD(const Config& config) {
+    if (!g_device_state.exio_state) {
+        Serial.println("[SD] EXIO state not available");
+        return false;
+    }
+
+    // Enable SD card power via EXIO4
+    i2c_manager::exio::set(i2c_manager::exio::EXIO4, true, *g_device_state.exio_state);
+    delay(10);
+
+    // SDMMC host in 1-bit mode (pins shared with LCD command SPI)
+    sdmmc_host_t host = SDMMC_HOST_DEFAULT();
+    host.flags = SDMMC_HOST_FLAG_1BIT;
+    host.max_freq_khz = SDMMC_FREQ_HIGHSPEED;
+
+    sdmmc_slot_config_t slot_config = SDMMC_SLOT_CONFIG_DEFAULT();
+    slot_config.clk   = (gpio_num_t)config.lcd_clk_pin;   // GPIO2
+    slot_config.cmd   = (gpio_num_t)config.lcd_mosi_pin;  // GPIO1
+    slot_config.d0    = GPIO_NUM_42;
+    slot_config.width = 1;
+    slot_config.flags = 0;  // No CD/WP pins
+
+    esp_vfs_fat_sdmmc_mount_config_t mount_config = {};
+    mount_config.format_if_mount_failed = false;
+    mount_config.max_files = 8;
+    mount_config.allocation_unit_size = 16 * 1024;
+
+    esp_err_t ret = esp_vfs_fat_sdmmc_mount("/sdcard", &host, &slot_config,
+                                             &mount_config, &g_device_state.sdmmc_card);
+    if (ret != ESP_OK) {
+        Serial.printf("[SD] Mount failed: %s\n", esp_err_to_name(ret));
+        return false;
+    }
+
+    // Compute card size from CSD
+    sdmmc_card_t* card = g_device_state.sdmmc_card;
+    uint64_t total_bytes = (uint64_t)card->csd.capacity * card->csd.sector_size;
+    g_device_state.sd_mb = (uint32_t)(total_bytes / (1024 * 1024));
+    Serial.printf("[SD] Mounted successfully: %u MB\n", (unsigned)g_device_state.sd_mb);
+
+    return true;
+}
+
+// Primary GPX waypoint storage (see ADR-0024) — wear-levelled FAT on the "ffat"
+// partition defined in partitions_ota.csv. Formats on first boot after a repartition
+// (fresh/resized partition has no valid FAT superblock yet); every boot after that
+// mounts the existing filesystem unchanged.
+static wl_handle_t g_ffat_wl_handle = WL_INVALID_HANDLE;
+
+bool initFFat() {
+    esp_vfs_fat_mount_config_t mount_config = {};
+    mount_config.format_if_mount_failed = true;
+    mount_config.max_files = 4;
+    mount_config.allocation_unit_size = 4096;
+
+    esp_err_t ret = esp_vfs_fat_spiflash_mount_rw_wl("/ffat", "ffat", &mount_config,
+                                                      &g_ffat_wl_handle);
+    if (ret != ESP_OK) {
+        Serial.printf("[FFAT] Mount failed: %s\n", esp_err_to_name(ret));
+        return false;
+    }
+
+    uint64_t total_bytes = 0, free_bytes = 0;
+    esp_vfs_fat_info("/ffat", &total_bytes, &free_bytes);
+    Serial.printf("[FFAT] Mounted successfully: %llu KB total, %llu KB free\n",
+                  (unsigned long long)(total_bytes / 1024), (unsigned long long)(free_bytes / 1024));
+
+    return true;
+}
+
+bool initBacklight(const Config& config) {
+    backlight::Cfg bl;
+    bl.pin = config.lcd_bl;
+    bl.ledcChan = 0;
+    bl.ledcTimer = 0;
+    bl.freqHz = config.backlight_freq;
+    bl.resBits = 8;
+    bl.usePwm = true;
+
+    if (!backlight::begin(bl)) {
+        Serial.println("[BACKLIGHT] Initialization failed");
+        return false;
+    }
+
+    // Set initial brightness
+    const uint8_t init_duty = (uint8_t)((config.backlight_init_percent * 255 + 50) / 100);
+    backlight::set(init_duty);
+
+    Serial.printf("[BACKLIGHT] Initialized: %d%% brightness\n", config.backlight_init_percent);
+    return true;
+}
+
+bool initLVGL(const Config& config) {
+    lv_init();
+
+    // Allocate LVGL buffers in PSRAM
+    const size_t buf_size = config.screen_width * config.buffer_lines * sizeof(lv_color_t);
+    lv_buf1 = (lv_color_t*)heap_caps_malloc(buf_size, MALLOC_CAP_SPIRAM);
+    lv_buf2 = (lv_color_t*)heap_caps_malloc(buf_size, MALLOC_CAP_SPIRAM);
+
+    if (!lv_buf1 || !lv_buf2) {
+        Serial.println("[LVGL] ERROR: failed to allocate frame buffers");
+        return false;
+    }
+
+    g_lv_buf_px = (size_t)config.screen_width * config.buffer_lines;
+
+    // Staging buffers for tiled rotation — only needed when we cannot transpose into
+    // the panel's own framebuffers. With num_fbs = 2 these 920KB are pure waste, so
+    // skip them. Failure is non-fatal either way: TILED refuses to engage and we stay
+    // on LVGL's own rotation.
+    if (!dualFbRotateAvailable()) {
+        g_rot_buf[0] = (lv_color_t*)heap_caps_malloc(buf_size, MALLOC_CAP_SPIRAM);
+        g_rot_buf[1] = (lv_color_t*)heap_caps_malloc(buf_size, MALLOC_CAP_SPIRAM);
+        if (!g_rot_buf[0] || !g_rot_buf[1]) {
+            Serial.println("[LVGL] WARN: rotation staging buffers unavailable — tiled rotation disabled");
+            if (g_rot_buf[0]) { heap_caps_free(g_rot_buf[0]); g_rot_buf[0] = nullptr; }
+            if (g_rot_buf[1]) { heap_caps_free(g_rot_buf[1]); g_rot_buf[1] = nullptr; }
+        }
+    }
+
+    lv_disp_draw_buf_init(&draw_buf, lv_buf1, lv_buf2, config.screen_width * config.buffer_lines);
+    lv_disp_drv_init(&disp_drv);
+    disp_drv.hor_res = config.screen_width;
+    disp_drv.ver_res = config.screen_height;
+    disp_drv.flush_cb = lvgl_flush_cb;
+    disp_drv.monitor_cb = lvgl_monitor_cb;   // Render timing for the DEV perf HUD
+    disp_drv.draw_buf = &draw_buf;
+
+    // full_refresh is decided below, once the rotation mode is known: the zero-copy
+    // dual-framebuffer path requires it (a partial area would leave the rest of the
+    // alternate buffer holding a two-frames-old image), every other path is faster
+    // without it. LVGL also rejects full_refresh outright when sw_rotate is set.
+    disp_drv.full_refresh = 0;
+
+    // Enable software rotation for RGB panel (MUST be set BEFORE registration)
+    //
+    // `rotated` and `sw_rotate` are set independently: `rotated` drives BOTH the pixel
+    // rotation and the touch-coordinate transform, but the pixel rotation additionally
+    // requires `sw_rotate`. Building with -DRADAR_SW_ROTATE=0 therefore renders sideways
+    // while keeping touch correct — see the comment on SW_ROTATE in system_config.h.
+    #if LV_VERSION_CHECK(8,0,0)
+        // Pick the rotation mode, then derive sw_rotate from it. These MUST agree:
+        // leaving sw_rotate=1 while g_rot_mode is TILED rotates the image twice.
+        if (!system_config::display::SW_ROTATE) {
+            g_rot_mode = RotMode::NONE;          // -DRADAR_SW_ROTATE=0 measurement build
+        } else if (dualFbRotateAvailable() || (g_rot_buf[0] && g_rot_buf[1])) {
+            g_rot_mode = RotMode::TILED;         // preferred — 64ms vs 162ms
+        } else {
+            g_rot_mode = RotMode::LVGL_SW;       // staging alloc failed, fall back
+        }
+        const uint8_t sw_rot = (g_rot_mode == RotMode::LVGL_SW) ? 1 : 0;
+
+        // Only the zero-copy path needs (and tolerates) a full-screen area per flush.
+        disp_drv.full_refresh = (g_rot_mode == RotMode::TILED && dualFbRotateAvailable()) ? 1 : 0;
+        Serial.printf("[LVGL] Rotation mode: %s (full_refresh=%u)\n",
+                      rotModeName(g_rot_mode), disp_drv.full_refresh);
+        if (system_config::display::ROTATION_DEGREES == 90) {
+            disp_drv.sw_rotate = sw_rot;
+            disp_drv.rotated = LV_DISP_ROT_90;
+            Serial.println("[LVGL] Rotation 90° CW (compensating for physical 90° CCW)");
+        } else if (system_config::display::ROTATION_DEGREES == 180) {
+            disp_drv.sw_rotate = sw_rot;
+            disp_drv.rotated = LV_DISP_ROT_180;
+            Serial.println("[LVGL] Rotation 180°");
+        } else if (system_config::display::ROTATION_DEGREES == 270) {
+            disp_drv.sw_rotate = sw_rot;
+            disp_drv.rotated = LV_DISP_ROT_270;
+            Serial.println("[LVGL] Rotation 270° CW (90° CCW)");
+        } else {
+            Serial.println("[LVGL] No display rotation applied");
+        }
+        if (!system_config::display::SW_ROTATE) {
+            Serial.println("[LVGL] *** MEASUREMENT BUILD: sw_rotate=0 — display will be SIDEWAYS,");
+            Serial.println("[LVGL] *** touch mapping stays correct. Read 'perf' for refresh cost.");
+        }
+    #else
+        #warning "LVGL rotation requires LVGL 8.0.0 or higher"
+        Serial.println("[LVGL] WARNING: Display rotation not supported in LVGL < 8.0.0");
+    #endif
+
+    Serial.printf("[LVGL] FB0=%p FB1=%p | BUF_LINES=%d\n", (void*)lv_buf1, (void*)lv_buf2, config.buffer_lines);
+
+    g_lv_disp = lv_disp_drv_register(&disp_drv);
+
+    return true;
+}
+
+bool initTouch() {
+    if (!cst820_begin(0x15)) {
+        Serial.println("[TOUCH] CST820 not found");
+        return false;
+    }
+
+    lv_indev_drv_init(&indev_drv);
+    indev_drv.type = LV_INDEV_TYPE_POINTER;
+    indev_drv.read_cb = lvgl_touch_read_cb;
+    lv_indev_drv_register(&indev_drv);
+
+    Serial.println("[TOUCH] Initialized successfully");
+    return true;
+}
+
+bool initButton() {
+    // Configure button on GPIO0 with hardware pull-up
+    button::Config btn_config;
+    btn_config.debounce_ms = 20;              // 20ms: safe for tactile switches (most bounce <5ms)
+    btn_config.long_press_ms = 2000;
+    btn_config.double_press_window_ms = 300;  // 300ms: fast enough for double-tap, short enough for snappy single-press
+
+    if (!button::begin(GPIO_NUM_0, btn_config)) {
+        Serial.println("[BUTTON] Failed to initialize");
+        return false;
+    }
+
+    // Register button event callback
+    // CRITICAL: This callback runs on UI Task (Core 1) during button::update()
+    // To avoid race conditions with lv_timer_handler(), we queue ALL UI updates
+    // instead of calling LVGL directly. This prevents:
+    // 1. LoadProhibited crash from concurrent LVGL access
+    // 2. UI_Task freeze from unprotected LVGL calls in standby functions
+    button::setEventCallback([](button::Event event) {
+        // Track when we last woke from standby to suppress the trailing
+        // SINGLE_PRESS that fires ~400ms after the RELEASED event that woke us
+        static uint32_t wake_time_ms = 0;
+
+        // Check if waking from standby - any button press wakes
+        if (standby_manager::isStandby()) {
+            Serial.println("[BUTTON] Wake from standby - queueing wake request");
+            system_logger::info("BUTTON", "Button press during standby - queued WAKE_STANDBY");
+            wake_time_ms = millis();
+            // CRITICAL FIX: Queue wake instead of direct call (was causing UI freeze)
+            task_manager::UIUpdate update;
+            update.type = task_manager::UIUpdateType::WAKE_STANDBY;
+            update.timestamp = millis();
+            if (!task_manager::queueUIUpdate(update)) {
+                Serial.println("[BUTTON] WARNING: Failed to queue wake - trying direct wake");
+                system_logger::warn("BUTTON", "Queue FULL - fallback to direct wake");
+                // Fallback: direct wake if queue fails (better than no wake)
+                standby_manager::wakeFromStandby();
+            }
+            return;  // Don't process other button events during wake
+        }
+
+        // Suppress button events shortly after wake (the SINGLE_PRESS that
+        // fires after the double-press window expires from the wake press)
+        if (wake_time_ms > 0 && (millis() - wake_time_ms) < 1200) {
+            Serial.println("[BUTTON] Suppressed post-wake button event");
+            return;
+        }
+        wake_time_ms = 0;
+
+        switch (event) {
+            case button::Event::SINGLE_PRESS:
+                {
+                    // Suppress zoom while settings screen is visible
+                    {
+                        const ui_manager::UIState& ui_s = ui_manager::getUIState();
+                        if (ui_s.screen_settings && lv_scr_act() == ui_s.screen_settings) {
+                            Serial.println("[BUTTON] Single press ignored — settings screen active");
+                            break;
+                        }
+                    }
+                    Serial.println("[BUTTON] Single press - queueing zoom change");
+                    system_logger::info("BUTTON", "Single press - queued ZOOM_CHANGE");
+                    // Queue zoom change instead of direct LVGL call (thread-safe)
+                    task_manager::UIUpdate update;
+                    update.type = task_manager::UIUpdateType::ZOOM_CHANGE;
+                    update.timestamp = millis();
+                    if (!task_manager::queueUIUpdate(update)) {
+                        Serial.println("[BUTTON] WARNING: Failed to queue zoom change");
+                        system_logger::error("BUTTON", "Queue FULL - dropped ZOOM_CHANGE");
+                    }
+                }
+                break;
+
+            case button::Event::DOUBLE_PRESS:
+                {
+                    // Suppress zoom while settings screen is visible
+                    {
+                        const ui_manager::UIState& ui_s = ui_manager::getUIState();
+                        if (ui_s.screen_settings && lv_scr_act() == ui_s.screen_settings) {
+                            Serial.println("[BUTTON] Double press ignored — settings screen active");
+                            break;
+                        }
+                    }
+                    Serial.println("[BUTTON] Double press - queueing zoom out");
+                    system_logger::info("BUTTON", "Double press - queued ZOOM_CHANGE_REVERSE");
+                    // Queue zoom change (reverse) instead of direct LVGL call (thread-safe)
+                    task_manager::UIUpdate update;
+                    update.type = task_manager::UIUpdateType::ZOOM_CHANGE_REVERSE;
+                    update.timestamp = millis();
+                    if (!task_manager::queueUIUpdate(update)) {
+                        Serial.println("[BUTTON] WARNING: Failed to queue zoom reverse");
+                        system_logger::error("BUTTON", "Queue FULL - dropped ZOOM_CHANGE_REVERSE");
+                    }
+                }
+                break;
+
+            case button::Event::LONG_PRESS:
+                {
+                    Serial.println("[BUTTON] Long press (2s) - queueing settings screen");
+                    system_logger::info("BUTTON", "Long press (2s) - queued SETTINGS_SCREEN");
+                    // Queue settings screen navigation instead of direct call (thread-safe)
+                    task_manager::UIUpdate update;
+                    update.type = task_manager::UIUpdateType::SETTINGS_SCREEN;
+                    update.timestamp = millis();
+                    if (!task_manager::queueUIUpdate(update)) {
+                        Serial.println("[BUTTON] WARNING: Failed to queue settings screen");
+                        system_logger::error("BUTTON", "Queue FULL - dropped SETTINGS_SCREEN");
+                    }
+                }
+                break;
+
+            case button::Event::EXTRA_LONG_PRESS:
+                {
+                    Serial.println("[BUTTON] Extra-long press (4s) - queueing standby mode");
+                    system_logger::info("BUTTON", "Extra-long press (4s) - queued ENTER_STANDBY");
+                    // CRITICAL FIX: Queue standby instead of direct call (was causing UI freeze)
+                    task_manager::UIUpdate update;
+                    update.type = task_manager::UIUpdateType::ENTER_STANDBY;
+                    update.timestamp = millis();
+                    if (!task_manager::queueUIUpdate(update)) {
+                        Serial.println("[BUTTON] WARNING: Failed to queue standby - trying direct");
+                        system_logger::warn("BUTTON", "Queue FULL - fallback to direct standby");
+                        // Fallback: direct call if queue fails
+                        standby_manager::enterStandby();
+                    }
+                }
+                break;
+
+            case button::Event::RELEASED:
+                // Optionally handle button release
+                break;
+
+            default:
+                break;
+        }
+    });
+
+    Serial.println("[BUTTON] Initialized on GPIO0 with event handlers");
+
+    // Initialize buzzer subsystem (uses I2C EXIO, must be after I2C init)
+    if (!buzzer::init()) {
+        Serial.println("[BUZZER] Warning: Buzzer initialization failed");
+        // Non-critical - continue anyway
+    }
+
+    return true;
+}
+
+void updateButton() {
+    button::update();
+    // NOTE: buzzer::update() is driven by I2C Task (task_manager.cpp), NOT here.
+    // Calling it from both UI Task and I2C Task caused race conditions on g_state.
+}
+
+void enableLVGLProcessing() {
+    g_lvgl_unlocked = true;
+    Serial.println("[LVGL] Processing enabled");
+}
+
+bool isLVGLUnlocked() {
+    return g_lvgl_unlocked;
+}
+
+void updateSDStatus() {
+    // Update SD status in device state if needed
+    // This can be called periodically to check SD card health
+}
+
+void logDeviceStatus() {
+    Serial.println("==== Device Status Summary ====");
+    Serial.printf("LED:       %s\n", g_device_state.led_ok ? "OK" : "FAIL");
+    Serial.printf("I2C:       %s\n", g_device_state.i2c_ok ? "OK" : "FAIL");
+    Serial.printf("EXIO:      %s\n", g_device_state.exio_ok ? "OK" : "FAIL");
+    Serial.printf("RTC:       %s\n", g_device_state.rtc_ok ? "OK" : "FAIL");
+    Serial.printf("Scanner:   %s\n", g_device_state.scanner_ok ? "OK" : "FAIL");
+    Serial.printf("GPS:       %s\n", g_device_state.gps_ok ? "OK" : "FAIL");
+    Serial.printf("Compass:   %s\n", g_device_state.compass_ok ? "OK" : "FAIL");
+    Serial.printf("LCD:       %s\n", g_device_state.lcd_ok ? "OK" : "FAIL");
+    Serial.printf("SD:        %s", g_device_state.sd_ok ? "OK" : "FAIL");
+    if (g_device_state.sd_ok) Serial.printf(" (%u MB)", (unsigned)g_device_state.sd_mb);
+    Serial.println();
+    Serial.printf("FFat:      %s\n", g_device_state.ffat_ok ? "OK" : "FAIL");
+    Serial.printf("Backlight: %s\n", g_device_state.backlight_ok ? "OK" : "FAIL");
+    Serial.printf("LVGL:      %s\n", g_device_state.lvgl_ok ? "OK" : "FAIL");
+    Serial.printf("Touch:     %s\n", g_device_state.touch_ok ? "OK" : "FAIL");
+    Serial.printf("Button:    %s\n", g_device_state.button_ok ? "OK" : "FAIL");
+    Serial.println("===============================");
+}
+
+// LVGL callback implementations
+// DMA callback - called when frame transfer actually completes
+static bool IRAM_ATTR on_color_trans_done(esp_lcd_panel_handle_t panel, const esp_lcd_rgb_panel_event_data_t* edata, void* user_ctx) {
+    // Notify LVGL that flush is complete - NOW it's safe to start next frame
+    if (g_current_disp_drv) {
+        lv_disp_flush_ready(g_current_disp_drv);
+    }
+    return false;  // No high-priority task woken
+}
+
+// VSYNC callback - fires at the start of every hardware frame (~37.6 Hz, ~26.6ms period).
+// Unblocks uiTask so lv_timer_handler() runs at frame boundaries → tear-free rendering.
+// Phase 3 — Item 3: VSYNC flush scheduling (tickets/ui_espidf_improvements.md)
+static bool IRAM_ATTR on_vsync_cb(esp_lcd_panel_handle_t panel, const esp_lcd_rgb_panel_event_data_t* edata, void* user_ctx) {
+    BaseType_t hp_woken = pdFALSE;
+
+    // §1.5 measurement, not a behaviour change. esp_intr_alloc() binds an interrupt
+    // to whichever core called it, and esp_lcd_new_rgb_panel() runs from the boot
+    // path — which sdkconfig pins to Core 1, the same core as uiTask. If that is
+    // true, the panel's DMA/bounce ISR is stealing cycles from the render loop.
+    // Recorded rather than printed: printf is not ISR-safe. Read it with `perf`.
+    g_vsync_isr_core = (int8_t)xPortGetCoreID();
+
+    if (g_vsync_sem) {
+        xSemaphoreGiveFromISR(g_vsync_sem, &hp_woken);
+    }
+    return hp_woken == pdTRUE;  // Yield to higher-priority task if woken
+}
+
+// Fires when the scan-out wraps to a new frame and latches bb_fb_index = cur_fb_index
+// (esp_lcd_panel_rgb.c:831-834). Until that happens the "back" buffer is still the one
+// being read out, so writing into it would tear. At ~115ms/frame vs a 26.6ms panel
+// period this never actually blocks — it is here so that raising PCLK or shaving the
+// frame further cannot silently reintroduce tearing.
+static bool IRAM_ATTR on_frame_buf_complete(esp_lcd_panel_handle_t panel, const esp_lcd_rgb_panel_event_data_t* edata, void* user_ctx) {
+    BaseType_t hp_woken = pdFALSE;
+    g_fb_swap_pending = false;
+    if (g_fb_swap_sem) {
+        xSemaphoreGiveFromISR(g_fb_swap_sem, &hp_woken);
+    }
+    return hp_woken == pdTRUE;
+}
+
+SemaphoreHandle_t getVsyncSemaphore() {
+    return g_vsync_sem;
+}
+
+int getVsyncIsrCore() {
+    return (int)g_vsync_isr_core;
+}
+
+// ---------------------------------------------------------------------------
+// Runtime software-rotation toggle (Option B viability experiment)
+//
+// LVGL stores a POINTER to disp_drv (lv_hal_disp.c:185), not a copy, so writing
+// disp_drv.sw_rotate is seen by the next refresh. lv_disp_drv_update() is then
+// called to do the bookkeeping a rotation change needs: it clears the pending
+// invalid-area list and re-invalidates the active screen, so no stale partial
+// areas are reinterpreted under the new rotation. The screen is square, so its
+// resolution-swap path is a no-op here.
+// ---------------------------------------------------------------------------
+void requestRotMode(RotMode mode) {
+    g_rot_mode_request = (int)mode;
+}
+
+RotMode getRotMode() { return g_rot_mode; }
+
+bool isTiledRotateAvailable() { return dualFbRotateAvailable() || (g_rot_buf[0] && g_rot_buf[1]); }
+
+const char* rotModeName(RotMode m) {
+    switch (m) {
+        case RotMode::LVGL_SW: return "LVGL sw_rotate (baseline)";
+        case RotMode::NONE:    return "no rotation (sideways — measurement only)";
+        case RotMode::TILED:   return "tiled transpose in flush_cb";
+    }
+    return "?";
+}
+
+bool applyPendingRotMode() {
+    const int req = g_rot_mode_request;
+    if (req < 0) return false;
+    g_rot_mode_request = -1;
+
+    RotMode want = (RotMode)req;
+    if (want == RotMode::TILED && !isTiledRotateAvailable()) {
+        Serial.println("[ROT] TILED unavailable (no staging buffers) — staying put");
+        return false;
+    }
+    if (want == g_rot_mode) return false;
+    if (!g_lv_disp) return false;
+
+    g_rot_mode = want;
+
+    // LVGL only rotates pixels when sw_rotate is set; NONE and TILED both need it
+    // off, the difference being whether flush_cb puts the rotation back.
+    disp_drv.sw_rotate = (want == RotMode::LVGL_SW) ? 1 : 0;
+    // Must move in lockstep: the zero-copy path needs whole-screen areas, and LVGL
+    // rejects full_refresh together with sw_rotate.
+    disp_drv.full_refresh = (want == RotMode::TILED && dualFbRotateAvailable()) ? 1 : 0;
+    lv_disp_drv_update(g_lv_disp, &disp_drv);
+    lv_obj_invalidate(lv_scr_act());
+
+    Serial.printf("[ROT] mode -> %s\n", rotModeName(want));
+    return true;
+}
+
+/**
+ * @brief Cache-friendly 90° rotation, matching LVGL's LV_DISP_ROT_90 convention.
+ *
+ * Mapping (verified against lv_refr.c:1198-1222):
+ *     dst_x = src_y
+ *     dst_y = (ver_res - 1) - src_x
+ *
+ * In area-local terms, with i = sx-x1 (0..w-1) and j = sy-y1 (0..h-1), the
+ * destination is h wide and w tall:
+ *     dst[((w-1) - i) * h + j] = src[j * w + i]
+ *
+ * Why tiles: LVGL's draw_buf_rotate_90_sqr walks four points 960 bytes apart and
+ * misses the data cache on roughly three of every four accesses — each 2-byte
+ * pixel drags in a 32-byte line, a ~16x read amplification. Processing TILE×TILE
+ * blocks keeps both the source rows and destination columns of a tile resident
+ * (32×32×2B = 2KB each, trivially inside the 32KB dcache), so the same pixel count
+ * moves with near-full cache-line utilisation.
+ *
+ * Why the SRAM scratch (step 9b): tiling alone still leaves one of the two PSRAM
+ * streams strided — whichever loop is innermost gets sequential access and the other
+ * hops by a 960-byte row stride. Transposing via a 2KB internal-SRAM staging tile
+ * splits the work so that *both* PSRAM sides are sequential: read a source row run,
+ * scatter into SRAM (free), then emit each destination row run as one memcpy. The
+ * only strided accesses left are inside the scratch, which never leaves L1/SRAM.
+ *
+ * IRAM_ATTR keeps the loop body out of flash. The function is ~1% of the code but
+ * runs 230,400 iterations per frame, and it competes for the 16KB instruction cache
+ * with the whole LVGL draw path that ran immediately before it.
+ */
+static IRAM_ATTR void rotate90_tiled(const lv_color_t* __restrict src,
+                                     lv_color_t* __restrict dst,
+                                     int w, int h) {
+    // 64 makes each destination run 128 bytes — four full cache lines per memcpy,
+    // which is where the PSRAM write burst stops being dominated by per-run setup.
+    constexpr int TILE = 32;
+
+    // Internal SRAM (.bss), 8KB. Not cached on the S3 (internal SRAM is directly
+    // addressed), so the strided halves of the transpose cost no cache traffic at all.
+    // Safe as a static because flush_cb only ever runs from the UI Task — LVGL is
+    // single-threaded here by construction.
+    static lv_color_t scratch[TILE * TILE];
+
+    for (int jj = 0; jj < h; jj += TILE) {
+        const int th = ((jj + TILE < h) ? (jj + TILE) : h) - jj;
+        for (int ii = 0; ii < w; ii += TILE) {
+            const int tw = ((ii + TILE < w) ? (ii + TILE) : w) - ii;
+
+            // Gather: sequential reads from PSRAM, strided writes into SRAM.
+            // Walk the scratch with a running pointer rather than `i * th` — at -Os
+            // the compiler does not reliably strength-reduce that multiply, and this
+            // loop body executes once per pixel.
+            for (int j = 0; j < th; j++) {
+                const lv_color_t* __restrict srow = src + (size_t)(jj + j) * w + ii;
+                lv_color_t* __restrict sc = scratch + j;
+                for (int i = 0; i < tw; i++) {
+                    *sc = srow[i];
+                    sc += th;
+                }
+            }
+
+            // Scatter: each destination row run is contiguous, so it is one memcpy.
+            const lv_color_t* __restrict sc = scratch;
+            for (int i = 0; i < tw; i++) {
+                lv_color_t* __restrict drow = dst + (size_t)(w - 1 - (ii + i)) * h + jj;
+                memcpy(drow, sc, (size_t)th * sizeof(lv_color_t));
+                sc += th;
+            }
+        }
+    }
+}
+
+// Render-time monitor - LVGL calls this at the end of every refresh with the
+// elapsed time and pixel count. This is the cost of blit + software rotation +
+// flush dispatch (i.e. everything AFTER the canvas has been painted), which is
+// the half of the frame we suspect software rotation dominates.
+// Per-refresh accumulators. flush_cb can fire several times for one refresh (one
+// per invalidated area), so these sum and the monitor callback — which LVGL calls
+// once at the end of a refresh — latches and clears them.
+static volatile uint32_t s_rot_acc   = 0;
+static volatile uint32_t s_flush_acc = 0;
+
+static void lvgl_monitor_cb(lv_disp_drv_t* drv, uint32_t time_ms, uint32_t px) {
+    navigation::NavState& nav = navigation::getNavState();
+    nav.refr_ms  = time_ms;
+    nav.refr_px  = px;
+    nav.rot_us   = s_rot_acc;
+    nav.flush_us = s_flush_acc;
+    s_rot_acc    = 0;
+    s_flush_acc  = 0;
+}
+
+static void lvgl_flush_cb(lv_disp_drv_t* drv, const lv_area_t* area, lv_color_t* color_p) {
+    // Check if diagnostics wants to skip flush (freeze feature)
+    if (diagnostics::shouldSkipLVGLFlush()) {
+        lv_disp_flush_ready(drv);
+        return;
+    }
+
+    // Store driver pointer for DMA callback
+    g_current_disp_drv = drv;
+
+    if (g_rot_mode == RotMode::TILED && dualFbRotateAvailable()) {
+        // Zero-copy path (step 9). full_refresh = 1 guarantees `area` is the whole
+        // screen, which is what makes writing into the alternate framebuffer safe:
+        // every pixel of it is rewritten, so nothing stale survives the swap.
+        const int w = area->x2 - area->x1 + 1;
+        const int h = area->y2 - area->y1 + 1;
+
+        // Wait for scan-out to pick up the previous swap before overwriting what is,
+        // until that moment, still the buffer being displayed.
+        if (g_fb_swap_pending && g_fb_swap_sem) {
+            xSemaphoreTake(g_fb_swap_sem, pdMS_TO_TICKS(50));
+        }
+
+        const int64_t t0 = esp_timer_get_time();
+        rotate90_tiled(color_p, g_fb[g_fb_back], w, h);
+        const int64_t t1 = esp_timer_get_time();
+        s_rot_acc += (uint32_t)(t1 - t0);
+
+        // Pointer lies inside a framebuffer, so this sets cur_fb_index and returns —
+        // no copy. It still invokes on_color_trans_done, so LVGL is released as before.
+        g_fb_swap_pending = true;
+        esp_lcd_panel_draw_bitmap(g_device_state.panel_handle,
+                                  0, 0, h, w, g_fb[g_fb_back]);
+        g_fb_back ^= 1;
+        s_flush_acc += (uint32_t)(esp_timer_get_time() - t1);
+    } else if (g_rot_mode == RotMode::TILED && g_rot_buf[0] && g_rot_buf[1]) {
+        const int w = area->x2 - area->x1 + 1;
+        const int h = area->y2 - area->y1 + 1;
+
+        // Pair the staging buffer to the draw buffer we were handed, so an in-flight
+        // DMA can never be reading the buffer LVGL is about to render into.
+        lv_color_t* stage = g_rot_buf[0];
+        if (lv_buf2 && color_p >= lv_buf2 && color_p < lv_buf2 + g_lv_buf_px) {
+            stage = g_rot_buf[1];
+        }
+
+        const int64_t t0 = esp_timer_get_time();
+        rotate90_tiled(color_p, stage, w, h);
+        const int64_t t1 = esp_timer_get_time();
+        s_rot_acc += (uint32_t)(t1 - t0);
+
+        // Destination is the transposed rectangle: h wide, w tall.
+        const int ver  = system_config::display::SCREEN_HEIGHT;
+        const int dx1  = area->y1;
+        const int dy1  = ver - 1 - area->x2;
+        esp_lcd_panel_draw_bitmap(g_device_state.panel_handle,
+                                  dx1, dy1, dx1 + h, dy1 + w, stage);
+        s_flush_acc += (uint32_t)(esp_timer_get_time() - t1);
+    } else {
+        // Start DMA transfer (asynchronous - callback will fire when done)
+        const int64_t t1 = esp_timer_get_time();
+        esp_lcd_panel_draw_bitmap(g_device_state.panel_handle, area->x1, area->y1, area->x2+1, area->y2+1, color_p);
+        s_flush_acc += (uint32_t)(esp_timer_get_time() - t1);
+    }
+
+    // Increment FPS counter for navigation module
+    navigation::getNavState().flush_count = navigation::getNavState().flush_count + 1;
+
+    // CRITICAL: Do NOT call lv_disp_flush_ready() here!
+    // The on_color_trans_done callback will call it when DMA actually finishes
+}
+
+static inline int16_t scale_to_480(uint16_t raw) {
+    if (raw <= 600)  return (raw > 479) ? 479 : raw;
+    if (raw <= 1500) return (int32_t)raw * 480 / 1023;
+    return (int32_t)raw * 480 / 4095;
+}
+
+static void lvgl_touch_read_cb(lv_indev_drv_t*, lv_indev_data_t* data) {
+    CST820Point pt;
+    static int16_t last_x = 240, last_y = 240;  // Screen center
+
+    // Don't poll the CST820 during standby — continuous I2C reads at 100Hz
+    // with the display off corrupt the touch controller's state over time.
+    if (standby_manager::isStandby()) {
+        data->state = LV_INDEV_STATE_RELEASED;
+        return;
+    }
+
+    if (cst820_read(pt, 0x15) && pt.pressed) {
+        int16_t lx = scale_to_480(pt.x);
+        int16_t ly = scale_to_480(pt.y);
+
+        // Clamp to screen bounds
+        if (lx < 0) lx = 0; else if (lx >= g_config.screen_width) lx = g_config.screen_width - 1;
+        if (ly < 0) ly = 0; else if (ly >= g_config.screen_height) ly = g_config.screen_height - 1;
+
+        // Circle mask: ignore touches outside circular display area
+        int dx = lx - g_config.screen_width/2;
+        int dy = ly - g_config.screen_height/2;
+        const int R = (g_config.screen_width/2) - 2;  // Slightly smaller than actual radius
+
+        if ((dx*dx + dy*dy) > R*R) {
+            data->state = LV_INDEV_STATE_RELEASED;
+            data->point.x = last_x;
+            data->point.y = last_y;
+
+            // Update navigation state
+            navigation::getNavState().touch_pressed = false;
+            return;
+        }
+
+        standby_manager::notifyUserActivity();  // Reset inactivity timer
+        data->state = LV_INDEV_STATE_PRESSED;
+        data->point.x = last_x = lx;
+        data->point.y = last_y = ly;
+
+        // Update navigation state
+        navigation::getNavState().touch_x = lx;
+        navigation::getNavState().touch_y = ly;
+        navigation::getNavState().touch_pressed = true;
+    } else {
+        data->state = LV_INDEV_STATE_RELEASED;
+        data->point.x = last_x;
+        data->point.y = last_y;
+
+        // Update navigation state
+        navigation::getNavState().touch_pressed = false;
+    }
+}
+
+} // namespace device_manager
