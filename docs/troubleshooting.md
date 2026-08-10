@@ -164,6 +164,20 @@ to see current frame timing broken down by stage rather than guessing at the bot
 2. Try a different USB cable — charge-only cables have no data lines
 3. Hold GPIO0 during reset if the board doesn't enter bootloader mode automatically
 
+#### Local build fails with host-toolchain errors (`-arch arm64`, `-mlongcalls` unknown, missing `src.c`, etc.)
+**Symptoms**: `pio run` fails inside a CMake `TryCompile` step, with errors that make no sense for an
+Xtensa cross-build — e.g. `unrecognized command-line option '-arch'`, `cc: error: unknown argument
+'-mlongcalls'; did you mean '-mlong-calls'?`, or `Cannot find source file: .../TryCompile-XXXXXX/src.c`.
+Look closely and the compiler path in the error is the **host** Apple clang
+(`/Library/Developer/CommandLineTools/usr/bin/cc`), not
+`toolchain-xtensa-esp-elf/bin/xtensa-esp32s3-elf-gcc` — CMake's cached toolchain detection got
+confused, not a real code problem. Seen after switching the `platform` version pin in
+`platformio.ini` and after several back-to-back builds in the same session; root cause not fully
+pinned down, but it's consistently a stale `.pio/build` cache, never the source.
+
+**Solution**: `rm -rf .pio/build` (the whole directory, not just the env subfolder) and rebuild.
+`pio run -t clean` alone has not reliably fixed this — go straight to the manual `rm -rf`.
+
 #### Serial Monitor Not Working
 **Symptoms**: no serial output, or output stops mid-session
 
