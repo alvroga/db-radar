@@ -14,6 +14,20 @@ None currently open. See Resolved below for FT-03, FT-05, FT-09.
 
 ## Planned
 
+### Dual GPS Module Support (BH-880 + LC76G) — built, not yet field-tested
+**Severity**: Feature — restores LC76G compatibility (dropped when the project moved to the BH-880)
+without needing a separate build
+
+**Status**: implemented on the `feature/dual-gps-module` branch, deliberately **not** merged into
+`initial-release` — build-verified clean but not yet tested on real hardware for either module.
+`gps_bh880.cpp` now speaks both UBX (BH-880) and NMEA/PAIR (LC76G), auto-identified on first boot and
+then pinned as a persisted choice (Settings > GPS) rather than re-detected every boot. A board with no
+compass (LC76G-only) is forced to North-Up automatically. See
+[CHANGELOG.md](CHANGELOG.md) and [ADR-0032](docs/adr/0032-pinned-gps-module-not-always-auto-detect.md)
+for full detail. Merge into `initial-release` once verified on both a BH-880 and an LC76G board.
+
+---
+
 ### Quests *(design substantially resolved, feature not yet built)*
 **Severity**: Feature — design largely settled, implementation not started
 

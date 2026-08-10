@@ -550,12 +550,40 @@ disorientation.
 
 **Heading Source — the compass (QMC5883L), not GPS.** GPS heading fusion was removed entirely; the
 compass is read at 10Hz and is the sole source of `ui.current_heading`. GPS still supplies *position*
-(UBX NAV-PVT), not heading. **There is no stationary fallback/timeout anymore** — a compass works
-standing still, so the old "10s then revert to north-up" behavior this project once had doesn't exist
-in current code (two struct fields survive as dead leftovers — see the doc for which ones, don't
-resurrect logic around them without checking first).
+(not heading) regardless of which GPS module is fitted — see GPS Module Support below. **There is no
+stationary fallback/timeout anymore** — a compass works standing still, so the old "10s then revert to
+north-up" behavior this project once had doesn't exist in current code (two struct fields survive as
+dead leftovers — see the doc for which ones, don't resurrect logic around them without checking first).
 
 **Full guide** (rotation math, settings persistence, code references): [`docs/navigation_modes.md`](docs/navigation_modes.md).
+
+---
+
+## GPS Module Support: BH-880 (primary) or LC76G
+
+**Status**: Complete, not yet field-tested | [Full Guide](docs/bh880_module.md) | [ADR-0032](docs/adr/0032-pinned-gps-module-not-always-auto-detect.md)
+
+One firmware image supports either module (`gps_bh880.cpp`, both protocols). Module identification is
+**two strict sequential passes**, not one interleaved pass — UBX (`detectBaudUBX()`, byte-identical to
+the original BH-880-only algorithm) always runs first across all 6 candidate baud rates; NMEA
+(`detectBaudNMEA()`) is only attempted if that entire pass finds nothing. **Do not merge these back
+into one interleaved loop** — a BH-880 that also emits default NMEA chatter before `begin()` enables
+NAV-PVT could otherwise complete 2 valid NMEA lines before 3 UBX sync pairs, misdetecting it. See
+ADR-0032 for the full reasoning.
+
+The module type is a **persisted choice**, not re-detected every boot (`settings_manager`'s
+`gps_module_type`/`gps_module_configured`) — a one-time picker appears on first boot
+(`main.cpp::showGpsModulePickerBlocking()`), and every later boot calls
+`gps_bh880::beginWithProtocol()` (single-pass baud scan only, no protocol guessing). Changing the pin
+later is via Settings > GPS, requires a reboot to apply (`esp_restart()`, same pattern as the WiFi/AP
+screens).
+
+**LC76G has no compass** — a board with `!device_manager::getDeviceState().compass_ok` is forced to
+North-Up automatically at `ui_manager::init()` (not persisted to NVS — a saved Heading-Up preference
+from a BH-880 session survives if the compass returns), and the Settings nav-mode dropdown is disabled
+rather than offering a Heading-Up option that would silently do nothing.
+
+**Full guide** (detection design, module pinning detail, PAIR command reference, code references): [`docs/bh880_module.md`](docs/bh880_module.md).
 
 ---
 
@@ -769,4 +797,4 @@ belongs at the link, not duplicated above it.
 
 *This document serves as the master reference for ESP32-S3 Touch LCD projects. Keep it updated as the architecture evolves.*
 
-**Last updated**: 2026-08-07 — see [CHANGELOG.md](CHANGELOG.md) for the full history.
+**Last updated**: 2026-08-10 — see [CHANGELOG.md](CHANGELOG.md) for the full history.

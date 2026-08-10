@@ -42,6 +42,85 @@ static void setLoadingStatus(const char* message) {
     lv_task_handler();
 }
 
+// One-time first-boot GPS module picker. Shown only when settings.gps_module_configured
+// is false; once the user picks, device_manager::initGPS() skips protocol auto-detection
+// on every future boot (see gps_bh880::beginWithProtocol()). GPS itself already ran full
+// auto-detect THIS boot (device_manager::initializeAll(), before display was even up), so
+// this doesn't block GPS from working this session — it only pins what future boots do.
+// Blocking here on a tap is safe: LVGL is still single-threaded (task_manager::startTasks()
+// hasn't run yet) — same precondition setLoadingStatus() above relies on.
+static void showGpsModulePickerBlocking() {
+    Serial.println("[MAIN] First boot — showing GPS module picker");
+
+    lv_obj_t* picker = lv_obj_create(NULL);
+    lv_obj_set_style_bg_color(picker, lv_color_hex(0x1A1A1A), 0);
+    lv_obj_set_style_bg_opa(picker, LV_OPA_COVER, 0);
+    lv_obj_clear_flag(picker, LV_OBJ_FLAG_SCROLLABLE);
+    lv_scr_load(picker);
+
+    lv_obj_t* title = lv_label_create(picker);
+    lv_label_set_text(title, "Select GPS Module");
+    lv_obj_set_style_text_color(title, lv_color_white(), 0);
+    lv_obj_set_style_text_font(title, &iosevka_16, 0);
+    lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 100);
+
+    char detected[56];
+    snprintf(detected, sizeof(detected), "Detected this boot: %s", gps_bh880::protocolName());
+    lv_obj_t* subtitle = lv_label_create(picker);
+    lv_label_set_text(subtitle, detected);
+    lv_obj_set_style_text_color(subtitle, lv_color_hex(0x888888), 0);
+    lv_obj_set_style_text_font(subtitle, &iosevka_16, 0);
+    lv_obj_align(subtitle, LV_ALIGN_TOP_MID, 0, 128);
+
+    static bool s_picked = false;
+    static uint8_t s_picked_type = 0;
+    s_picked = false;
+
+    lv_obj_t* btn_bh880 = lv_btn_create(picker);
+    lv_obj_set_size(btn_bh880, 220, 55);
+    lv_obj_align(btn_bh880, LV_ALIGN_TOP_MID, 0, 175);
+    lv_obj_set_style_bg_color(btn_bh880, lv_color_hex(0x0080FF), 0);
+    lv_obj_add_event_cb(btn_bh880, [](lv_event_t*) { s_picked_type = 0; s_picked = true; }, LV_EVENT_CLICKED, nullptr);
+    lv_obj_t* lbl_bh880 = lv_label_create(btn_bh880);
+    lv_label_set_text(lbl_bh880, "BH-880\n(GPS + Compass)");
+    lv_label_set_long_mode(lbl_bh880, LV_LABEL_LONG_WRAP);
+    lv_obj_set_style_text_align(lbl_bh880, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_text_font(lbl_bh880, &iosevka_16, 0);
+    lv_obj_center(lbl_bh880);
+
+    lv_obj_t* btn_lc76g = lv_btn_create(picker);
+    lv_obj_set_size(btn_lc76g, 220, 55);
+    lv_obj_align(btn_lc76g, LV_ALIGN_TOP_MID, 0, 245);
+    lv_obj_set_style_bg_color(btn_lc76g, lv_color_hex(0x0080FF), 0);
+    lv_obj_add_event_cb(btn_lc76g, [](lv_event_t*) { s_picked_type = 1; s_picked = true; }, LV_EVENT_CLICKED, nullptr);
+    lv_obj_t* lbl_lc76g = lv_label_create(btn_lc76g);
+    lv_label_set_text(lbl_lc76g, "LC76G\n(GPS only, North-Up)");
+    lv_label_set_long_mode(lbl_lc76g, LV_LABEL_LONG_WRAP);
+    lv_obj_set_style_text_align(lbl_lc76g, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_text_font(lbl_lc76g, &iosevka_16, 0);
+    lv_obj_center(lbl_lc76g);
+
+    lv_obj_t* hint = lv_label_create(picker);
+    lv_label_set_text(hint, "One-time choice - change later in\nSettings > GPS");
+    lv_label_set_long_mode(hint, LV_LABEL_LONG_WRAP);
+    lv_obj_set_style_text_align(hint, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_text_color(hint, lv_color_hex(0x666666), 0);
+    lv_obj_set_style_text_font(hint, &iosevka_16, 0);
+    lv_obj_set_width(hint, 280);
+    lv_obj_align(hint, LV_ALIGN_TOP_MID, 0, 320);
+
+    lv_task_handler();
+    while (!s_picked) {
+        lv_task_handler();
+        delay(5);
+    }
+
+    settings_manager::saveGPSModuleSelection(s_picked_type);
+    Serial.printf("[MAIN] GPS module selected: %s\n", s_picked_type == 1 ? "LC76G" : "BH-880");
+
+    lv_obj_del(picker);
+}
+
 extern "C" void app_main() {
     // Serial is USB CDC — begin() is a no-op in ESP-IDF
     Serial.begin(115200);
@@ -178,6 +257,15 @@ extern "C" void app_main() {
         while (1) { delay(1000); }
     }
     system_logger::info("BOOT", "Phase 6 - UI manager initialized");
+
+    // First boot only: pin the GPS module (BH-880 vs LC76G) so every future boot skips
+    // protocol auto-detection entirely. See device_manager::initGPS() and
+    // gps_bh880::beginWithProtocol(). GPS already ran full auto-detect this session
+    // (device_manager::initializeAll(), before display was up) — this picker doesn't
+    // block THIS boot's GPS, it only determines what subsequent boots do.
+    if (!settings_manager::getSettings().gps_module_configured) {
+        showGpsModulePickerBlocking();
+    }
 
     // Create and display loading screen
     Serial.println("[MAIN] Displaying loading screen...");

@@ -25,6 +25,12 @@ struct RadarSettings {
     uint32_t gps_last_fix_time = 0;           // Unix timestamp of last valid fix (seconds since epoch)
     bool gps_has_saved_position = false;      // True if we have a saved position
 
+    // GPS module selection (pinned via the one-time first-boot picker, or Settings > GPS).
+    // 0=BH-880 (UBX), 1=LC76G (NMEA/PAIR) — see gps_bh880::GpsModule. Only meaningful once
+    // gps_module_configured is true; until then, initGPS() still runs full auto-detect.
+    uint8_t gps_module_type = 0;
+    bool gps_module_configured = false;
+
     // Waypoint settings
     bool waypoints_persistent = true;    // Save waypoints to NVS
     uint8_t max_visible_waypoints = 50;
@@ -182,6 +188,13 @@ bool saveGPSState(double lat, double lon, uint32_t fix_time);
  * @return true if valid saved state exists
  */
 bool loadGPSState(double& lat, double& lon, uint32_t& fix_time);
+
+/**
+ * @brief Pin the GPS module type, skipping auto-detect on future boots.
+ * @param module_type 0=BH-880 (UBX), 1=LC76G (NMEA/PAIR) — see gps_bh880::GpsModule
+ * Also sets gps_module_configured=true. Takes effect on next boot (reboot required).
+ */
+bool saveGPSModuleSelection(uint8_t module_type);
 
 /**
  * @brief Save individual waypoint setting

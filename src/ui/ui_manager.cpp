@@ -4,6 +4,7 @@
 #include "navigation.h"
 #include "gps_bh880.h"
 #include "settings_manager.h"
+#include "core/device_manager.h"
 #include "utils/system_logger.h"
 #include "core/arduino_compat.h"
 #include "esp_heap_caps.h"
@@ -74,6 +75,16 @@ bool init(const Config& config) {
     // Load settings from cache (including heading_up_mode)
     const auto& settings = settings_manager::getSettings();
     g_ui_state.heading_up_mode = settings.heading_up_mode;  // Apply navigation mode
+
+    // No compass hardware present (e.g. an LC76G-only board, which has no QMC5883L) —
+    // heading-up has nothing to rotate by, so force North-Up regardless of the saved
+    // preference. Not persisted to NVS: a saved Heading-Up preference from a BH-880
+    // session is preserved and reapplied if the compass is ever present again.
+    if (!device_manager::getDeviceState().compass_ok) {
+        g_ui_state.heading_up_mode = false;
+        Serial.println("[UI] No compass detected — forcing North-Up navigation mode");
+    }
+
     Serial.printf("[UI] Navigation mode loaded: %s\n",
                   g_ui_state.heading_up_mode ? "Heading-Up" : "North-Up");
 

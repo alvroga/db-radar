@@ -34,11 +34,22 @@ struct GPSData {
 };
 
 namespace gps_bh880 {
+    // Which physical GPS module to talk to — see settings_manager's gps_module_type/
+    // gps_module_configured (pinned via the one-time first-boot picker or Settings > GPS).
+    enum class GpsModule : uint8_t { BH880_UBX = 0, LC76G_NMEA = 1 };
+
     // Start GPS on ESP-IDF UART driver (UART1, RX=GPIO44, TX=GPIO43 by default)
-    // If baud=0, auto-detects baud rate by trying common rates.
+    // If baud=0, auto-detects both baud rate AND protocol (UBX vs NMEA/PAIR) — see
+    // detectBaud(). Slower (up to ~18s worst case) but makes no assumption about
+    // which module is wired in.
     void begin(uint32_t baud = 115200, int rxPin = 44, int txPin = 43);
 
-    // Auto-detect baud rate. Returns detected rate or 0 if failed.
+    // Skips protocol detection — the module is already known (pinned via Settings > GPS).
+    // Still auto-detects baud within that one protocol (single pass, ~1.5-9s worst case),
+    // since baud can vary per unit/config even when the module type is known.
+    void beginWithProtocol(GpsModule module, int rxPin = 44, int txPin = 43);
+
+    // Auto-detect baud rate AND protocol. Returns detected rate or 0 if failed.
     uint32_t detectBaud(int rxPin, int txPin);
 
     // Feed and parse UART bytes. Returns true when a full UBX NAV-PVT was parsed.
@@ -60,4 +71,11 @@ namespace gps_bh880 {
     void printModuleInfo();
     bool ping(uint32_t timeout_ms = 1000);
     void dumpRaw(uint32_t duration_ms = 5000);
+
+    // Protocol actually detected on the wire (set by detectBaud()/begin(), or as soon as
+    // read() parses a first valid frame if baud was passed explicitly). Lets callers tell a
+    // BH-880 (UBX binary) apart from an LC76G or other NMEA/PAIR module without hardcoding
+    // module identity — see docs/peripherals.md.
+    bool isNmeaProtocol();
+    const char* protocolName();
 }

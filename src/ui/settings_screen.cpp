@@ -421,8 +421,6 @@ static void openCalibrationOverlay() {
 }
 
 // Forward declarations for callbacks
-static void showHelpModal(const char* title, const char* content);
-static void onHelpModalClose(lv_event_t* e);
 static void onRefreshWaypoints(lv_event_t* e);
 static void updateWaypointCountLabel();
 
@@ -699,10 +697,6 @@ static void openBeaconMacDialog(lv_obj_t* value_label) {
     lv_obj_center(lbl_save);
 }
 
-// GPS Help modal (for info/help dialogs)
-static lv_obj_t* g_help_modal = nullptr;
-
-
 // GPX waypoint count indicator (shows current/max waypoint count)
 static lv_obj_t* g_waypoint_count_label = nullptr;
 
@@ -740,7 +734,6 @@ void create() {
     g_sound_all_sw         = nullptr;
     g_sound_proximity_sw   = nullptr;
     g_sound_button_sw      = nullptr;
-    g_help_modal           = nullptr;
     g_waypoint_count_label = nullptr;
     // Calibration overlay — also null any running timer
     if (g_cal_timer) { lv_timer_del(g_cal_timer); g_cal_timer = nullptr; }
@@ -983,110 +976,53 @@ void createGPSTab(lv_obj_t* parent) {
 
     int y_offset = 0;
 
-    // Constellations info (read-only - BH-880 has all enabled)
+    // Active module/protocol info (read-only — reflects what's actually running this
+    // session, from gps_bh880's runtime-detected/pinned protocol, not a hardcoded string).
     lv_obj_t* gnss_info = lv_label_create(parent);
-    lv_label_set_text(gnss_info, "Constellations: All enabled (BH-880)");
+    lv_label_set_text_fmt(gnss_info, "Active module: %s", gps_bh880::protocolName());
     lv_obj_set_style_text_color(gnss_info, lv_color_hex(0x888888), 0);
     lv_obj_set_style_text_font(gnss_info, &iosevka_16, 0);
     lv_obj_align(gnss_info, LV_ALIGN_TOP_LEFT, 0, y_offset);
 
     y_offset += 30;
 
-    // GPS Restart section
-    lv_obj_t* restart_label = lv_label_create(parent);
-    lv_label_set_text(restart_label, "GPS Restart:");
-    lv_obj_set_style_text_color(restart_label, lv_color_white(), 0);
-    lv_obj_set_style_text_font(restart_label, &iosevka_16, 0);
-    lv_obj_align(restart_label, LV_ALIGN_TOP_LEFT, 0, y_offset);
+    // GPS Module selection — pins which protocol initGPS() talks to on future boots,
+    // skipping detection entirely (see device_manager::initGPS() and
+    // gps_bh880::beginWithProtocol()). Hot/Warm/Cold Start and Factory Reset were
+    // removed from here (2026-08) — the web flasher gives full reflash control, and
+    // those UBX-only commands are still available via the serial 'gps' command for
+    // anyone who wants them.
+    lv_obj_t* module_label = lv_label_create(parent);
+    lv_label_set_text(module_label, "GPS Module:");
+    lv_obj_set_style_text_color(module_label, lv_color_white(), 0);
+    lv_obj_set_style_text_font(module_label, &iosevka_16, 0);
+    lv_obj_align(module_label, LV_ALIGN_TOP_LEFT, 0, y_offset);
 
-    // Info icon for GPS Restart
-    lv_obj_t* restart_help_btn = lv_btn_create(parent);
-    lv_obj_set_size(restart_help_btn, 24, 24);
-    lv_obj_align(restart_help_btn, LV_ALIGN_TOP_LEFT, 250, y_offset - 2);
-    lv_obj_set_style_radius(restart_help_btn, LV_RADIUS_CIRCLE, 0);
-    lv_obj_set_style_bg_color(restart_help_btn, lv_color_hex(0x0080FF), 0);
-    lv_obj_t* restart_help_label = lv_label_create(restart_help_btn);
-    lv_label_set_text(restart_help_label, "?");
-    lv_obj_set_style_text_color(restart_help_label, lv_color_white(), 0);
-    lv_obj_center(restart_help_label);
-    lv_obj_add_event_cb(restart_help_btn, [](lv_event_t* e) {
-        if (lv_event_get_code(e) == LV_EVENT_CLICKED) {
-            showHelpModal(
-                "GPS Restart Modes",
-                "Force GPS to reset with different data:\n\n"
-                "• Hot Start (1-5 seconds)\n"
-                "  Keeps: Position, time, satellite data\n"
-                "  Use when: GPS off briefly, same location\n\n"
-                "• Warm Start (30-60 seconds)\n"
-                "  Keeps: Time, basic satellite data\n"
-                "  Use when: Moved far (100+ km), off for hours\n\n"
-                "• Cold Start (2-5 minutes)\n"
-                "  Clears: Everything, full reset\n"
-                "  Use when: GPS stuck at wrong location,\n"
-                "           traveled internationally,\n"
-                "           troubleshooting GPS issues\n\n"
-                "Most common use: Cold start when GPS shows wrong position and won't update"
-            );
-        }
-    }, LV_EVENT_CLICKED, nullptr);
+    lv_obj_t* module_dropdown = lv_dropdown_create(parent);
+    lv_dropdown_set_options(module_dropdown, "BH-880 (UBX)\nLC76G (NMEA)");
+    lv_obj_set_width(module_dropdown, 200);
+    lv_obj_align(module_dropdown, LV_ALIGN_TOP_LEFT, 130, y_offset);
+    lv_dropdown_set_selected(module_dropdown, settings_manager::getSettings().gps_module_type);
 
-    y_offset += 25;
+    y_offset += 40;
 
-    const char* restart_names[] = {"Hot", "Warm", "Cold"};
-    for (int i = 0; i < 3; i++) {
-        lv_obj_t* btn = lv_btn_create(parent);
-        lv_obj_set_size(btn, 70, 35);
-        lv_obj_align(btn, LV_ALIGN_TOP_LEFT, i * 80, y_offset);
+    lv_obj_t* module_reboot_btn = lv_btn_create(parent);
+    lv_obj_set_size(module_reboot_btn, 200, 35);
+    lv_obj_align(module_reboot_btn, LV_ALIGN_TOP_LEFT, 0, y_offset);
+    lv_obj_set_style_bg_color(module_reboot_btn, lv_color_hex(0xFF6600), LV_PART_MAIN);
+    lv_obj_t* module_reboot_label = lv_label_create(module_reboot_btn);
+    lv_label_set_text(module_reboot_label, "Save + Reboot to Apply");
+    lv_obj_center(module_reboot_label);
 
-        lv_obj_t* label = lv_label_create(btn);
-        lv_label_set_text(label, restart_names[i]);
-        lv_obj_center(label);
-
-        lv_obj_add_event_cb(btn, [](lv_event_t* e) {
-            if (lv_event_get_code(e) == LV_EVENT_CLICKED) {
-                lv_obj_t* btn = lv_event_get_target(e);
-                lv_obj_t* label = lv_obj_get_child(btn, 0);
-                const char* text = lv_label_get_text(label);
-
-                bool success = false;
-                if (strcmp(text, "Hot") == 0) {
-                    success = gps_bh880::hotStart();
-                } else if (strcmp(text, "Warm") == 0) {
-                    success = gps_bh880::warmStart();
-                } else if (strcmp(text, "Cold") == 0) {
-                    success = gps_bh880::coldStart();
-                }
-
-                if (success) {
-                    Serial.printf("[GPS] %s start initiated\n", text);
-                } else {
-                    Serial.printf("[GPS] Failed to perform %s start\n", text);
-                }
-            }
-        }, LV_EVENT_CLICKED, nullptr);
-    }
-    y_offset += 50;
-
-    // Factory Reset button
-    lv_obj_t* factory_btn = lv_btn_create(parent);
-    lv_obj_set_size(factory_btn, 150, 40);
-    lv_obj_align(factory_btn, LV_ALIGN_TOP_LEFT, 0, y_offset);
-    lv_obj_set_style_bg_color(factory_btn, lv_color_hex(0xFF4444), LV_PART_MAIN);
-
-    lv_obj_t* factory_label = lv_label_create(factory_btn);
-    lv_label_set_text(factory_label, "Factory Reset");
-    lv_obj_center(factory_label);
-
-    lv_obj_add_event_cb(factory_btn, [](lv_event_t* e) {
-        if (lv_event_get_code(e) == LV_EVENT_CLICKED) {
-            Serial.println("[GPS] Factory reset requested");
-            if (gps_bh880::factoryReset()) {
-                Serial.println("[GPS] Factory reset complete - all settings cleared");
-            } else {
-                Serial.println("[GPS] Failed to perform factory reset");
-            }
-        }
-    }, LV_EVENT_CLICKED, nullptr);
+    lv_obj_add_event_cb(module_reboot_btn, [](lv_event_t* e) {
+        if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
+        lv_obj_t* dropdown = (lv_obj_t*)lv_event_get_user_data(e);
+        uint16_t selected = lv_dropdown_get_selected(dropdown);
+        settings_manager::saveGPSModuleSelection((uint8_t)selected);
+        Serial.println("[GPS] Module selection saved — rebooting to apply...");
+        delay(200);
+        esp_restart();
+    }, LV_EVENT_CLICKED, module_dropdown);
 
     y_offset += 60;
 
@@ -1511,8 +1447,10 @@ void createDisplayTab(lv_obj_t* parent) {
     y_offset += 50;
 
     // Navigation Mode dropdown
+    const bool has_compass = device_manager::getDeviceState().compass_ok;
+
     lv_obj_t* nav_mode_label = lv_label_create(parent);
-    lv_label_set_text(nav_mode_label, "Navigation Mode:");
+    lv_label_set_text(nav_mode_label, has_compass ? "Navigation Mode:" : "Navigation Mode: (no compass)");
     lv_obj_set_style_text_color(nav_mode_label, lv_color_white(), 0);
     lv_obj_set_style_text_font(nav_mode_label, &iosevka_16, 0);
     lv_obj_align(nav_mode_label, LV_ALIGN_TOP_LEFT, 0, y_offset);
@@ -1524,6 +1462,13 @@ void createDisplayTab(lv_obj_t* parent) {
 
     // Load current setting from cache
     lv_dropdown_set_selected(nav_mode_dropdown, settings_manager::getSettings().heading_up_mode ? 0 : 1);
+
+    // No compass (e.g. LC76G-only board) — Heading-Up has nothing to rotate by. Lock the
+    // dropdown to North-Up rather than leaving a selectable option that silently does nothing.
+    if (!has_compass) {
+        lv_dropdown_set_selected(nav_mode_dropdown, 1);
+        lv_obj_add_state(nav_mode_dropdown, LV_STATE_DISABLED);
+    }
 
     // Event handler for navigation mode changes
     lv_obj_add_event_cb(nav_mode_dropdown, [](lv_event_t* e) {
@@ -2106,80 +2051,6 @@ void updateAPModeStatus() {
 }
 
 } // namespace settings_screen
-
-// ============================================================================
-// GPS Help Modal Implementation
-// ============================================================================
-
-static void showHelpModal(const char* title, const char* content) {
-    Serial.printf("[HELP] Showing help modal: %s\n", title);
-
-    // Create modal background
-    g_help_modal = lv_obj_create(lv_scr_act());
-    lv_obj_set_size(g_help_modal, 480, 480);
-    lv_obj_set_style_bg_color(g_help_modal, lv_color_hex(0x000000), 0);
-    lv_obj_set_style_bg_opa(g_help_modal, LV_OPA_80, 0);
-    lv_obj_set_style_border_width(g_help_modal, 0, 0);
-    lv_obj_clear_flag(g_help_modal, LV_OBJ_FLAG_SCROLLABLE);
-
-    // Create dialog box
-    lv_obj_t* dialog_box = lv_obj_create(g_help_modal);
-    lv_obj_set_size(dialog_box, 360, 400);
-    lv_obj_align(dialog_box, LV_ALIGN_CENTER, 0, 0);
-    lv_obj_set_style_bg_color(dialog_box, lv_color_hex(0x2A2A2A), 0);
-    lv_obj_set_style_border_width(dialog_box, 2, 0);
-    lv_obj_set_style_border_color(dialog_box, lv_color_hex(0x0080FF), 0);
-    lv_obj_clear_flag(dialog_box, LV_OBJ_FLAG_SCROLLABLE);
-
-    // Title
-    lv_obj_t* lbl_title = lv_label_create(dialog_box);
-    lv_label_set_text(lbl_title, title);
-    lv_obj_set_style_text_font(lbl_title, &iosevka_16, 0);
-    lv_obj_set_style_text_color(lbl_title, lv_color_hex(0x00AAFF), 0);  // Blue title
-    lv_obj_set_pos(lbl_title, 10, 10);
-
-    // Scrollable content area
-    lv_obj_t* content_container = lv_obj_create(dialog_box);
-    lv_obj_set_size(content_container, 340, 290);
-    lv_obj_set_pos(content_container, 10, 35);
-    lv_obj_set_style_bg_color(content_container, lv_color_hex(0x1A1A1A), 0);
-    lv_obj_set_style_border_width(content_container, 1, 0);
-    lv_obj_set_style_border_color(content_container, lv_color_hex(0x404040), 0);
-    lv_obj_set_scrollbar_mode(content_container, LV_SCROLLBAR_MODE_AUTO);
-
-    // Content label (scrollable)
-    lv_obj_t* lbl_content = lv_label_create(content_container);
-    lv_label_set_text(lbl_content, content);
-    lv_obj_set_width(lbl_content, 320);
-    lv_obj_set_style_text_color(lbl_content, lv_color_hex(0xCCCCCC), 0);
-    lv_obj_set_style_text_font(lbl_content, &iosevka_16, 0);
-    lv_label_set_long_mode(lbl_content, LV_LABEL_LONG_WRAP);
-    lv_obj_set_pos(lbl_content, 5, 5);
-
-    // Close button at bottom
-    lv_obj_t* btn_close = lv_btn_create(dialog_box);
-    lv_obj_set_size(btn_close, 340, 45);
-    lv_obj_set_pos(btn_close, 10, 340);
-    lv_obj_set_style_bg_color(btn_close, lv_color_hex(0x666666), 0);
-    lv_obj_add_event_cb(btn_close, onHelpModalClose, LV_EVENT_CLICKED, nullptr);
-
-    lv_obj_t* lbl_close = lv_label_create(btn_close);
-    lv_label_set_text(lbl_close, "Close");
-    lv_obj_set_style_text_color(lbl_close, lv_color_hex(0xFFFFFF), 0);
-    lv_obj_center(lbl_close);
-
-    Serial.println("[HELP] Help modal created");
-}
-
-static void onHelpModalClose(lv_event_t* e) {
-    Serial.println("[HELP] Help modal close button clicked");
-
-    if (g_help_modal) {
-        lv_obj_del(g_help_modal);
-        g_help_modal = nullptr;
-    }
-}
-
 
 // ============================================================================
 // GPX Waypoint Management Implementation

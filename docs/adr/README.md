@@ -62,11 +62,12 @@ date — sort on that for chronology, not on the filename.
 | [0029](0029-custom-canvas-fixed-waypoint-icon.md) | Custom `lv_canvas` icon for the fixed-waypoint status indicator, not an `LV_SYMBOL_*` glyph or image asset | 2026-08-07 | Accepted |
 | [0030](0030-release-pipeline-build-time-pages-not-committed-binaries.md) | Release pipeline builds once, publishes to both GitHub Releases and GitHub Pages — no binaries committed to git | 2026-08-08 | Accepted |
 | [0031](0031-single-part-manifest-not-multi-part.md) | ESP Web Tools manifest uses one merged-binary part at offset 0, not four separate parts | 2026-08-08 | Accepted |
+| [0032](0032-pinned-gps-module-not-always-auto-detect.md) | Pinned GPS module selection (first-boot picker), not always-auto-detect | 2026-08-10 | Accepted |
 
 ## Status
 
 - **Going forward**: new architectural decisions get an ADR at the time they're made (see CLAUDE.md
-  → Documentation Standards). Next free number: **0032**.
+  → Documentation Standards). Next free number: **0033**.
 - **Historical backfill**: ✅ complete (2026-08-01). ADRs 0004–0017 were reconstructed from
   CHANGELOG.md, ROADMAP.md, `docs/performance_optimization_backlog.md`, the component docs and git
   history. They carry

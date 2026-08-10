@@ -1,10 +1,18 @@
-# Beitian BH-880 GPS + Compass Module
+# GPS Modules: Beitian BH-880 (primary) and LC76G (supported alternative)
 
-**Status**: GPS ✅ Working | Compass ✅ Working (WMM declination applied)
+**Status**: GPS ✅ Working | Compass ✅ Working (WMM declination applied) | Dual-module support ✅ (2026-08-10)
 
 ## Module Overview
 
-The BH-880 is a combined GNSS + magnetometer module that replaces the original LC76G GPS-only module. It is a drop-in replacement using the same UART pins (GPIO43/44) for GPS and adds a compass via the shared I2C bus.
+The BH-880 is a combined GNSS + magnetometer module and is the primary/recommended module — it's the
+only one of the two with a compass, so it's the only one that supports heading-up navigation. It uses
+the same UART pins (GPIO43/44) as the original LC76G GPS-only module it initially replaced.
+
+**LC76G support was brought back 2026-08-10** (see [ADR-0032](adr/0032-pinned-gps-module-not-always-auto-detect.md))
+so a board built with either module works from the same firmware — see "Dual-Protocol Support" below.
+A board running the LC76G has no compass, so navigation is forced to North-Up automatically (there's
+nothing to rotate a heading-up view by); this is a real, permanent hardware constraint of that module,
+not a bug or a temporary limitation.
 
 | Feature | Value |
 |---------|-------|
@@ -127,15 +135,89 @@ gps reset               - Factory reset (clears all settings)
 
 ### Differences from LC76G
 
-| Feature | LC76G (old) | BH-880 (new) |
-|---------|-------------|--------------|
+| Feature | LC76G | BH-880 |
+|---------|-------|--------|
 | Protocol | NMEA text + PAIR commands | UBX binary |
 | Baud detect | Look for `$` character | Look for 0xB5 0x62 sync |
-| Config commands | PAIR001, PAIR062, etc. | UBX-CFG-RATE, CFG-RST, etc. |
+| Config commands | PAIR004/005/006/007/513/050/864 | UBX-CFG-RATE, CFG-RST, etc. |
 | Default rate | 1 Hz | 10 Hz |
-| GNSS systems | Configurable via PAIR066 | All enabled by default |
-| Positioning mode | PAIR062 (normal/fitness/etc) | Not applicable |
-| Compass | None | QMC5883L built-in |
+| GNSS systems | Configurable via PAIR066 (not exposed — see below) | All enabled by default |
+| Compass | None — North-Up only | QMC5883L built-in |
+
+`gps_bh880.cpp` now speaks both — see "Dual-Protocol Support" below for how the right one gets picked.
+`setGNSSSystems()`/PAIR066 from the pre-BH-880 LC76G driver was **not** ported back; every other PAIR
+command (`hotStart`/`warmStart`/`coldStart`/`factoryReset`/`saveConfig`/`setUpdateRate`/`setBaudrate`)
+was.
+
+---
+
+## Dual-Protocol Support: BH-880 + LC76G
+
+One firmware image supports either module, auto-identified from the byte stream at first boot and
+then pinned as a persisted choice — not re-detected on every boot. Full design rationale, alternatives
+considered, and why the detection had to be two strict sequential passes rather than one interleaved
+pass: [ADR-0032](adr/0032-pinned-gps-module-not-always-auto-detect.md).
+
+### How module identification works
+
+`gps_bh880::detectBaud()` runs **two sequential passes**, each cycling the same 6 candidate baud rates
+(115200, 9600, 38400, 57600, 230400, 460800):
+
+1. **UBX pass** (`detectBaudUBX()`) — byte-identical to the original BH-880-only algorithm: look for
+   the `0xB5 0x62` sync pair repeating 3 times. If found on any rate, done — a BH-880 always resolves
+   here, at the same speed it always has.
+2. **NMEA pass** (`detectBaudNMEA()`) — only reached if pass 1 finds nothing on all 6 rates. Looks for
+   2 complete, checksum-valid NMEA sentences (`$...*CC\r\n`).
+
+Once a session confirms a protocol (either pass, or the first successfully-parsed live frame),
+`read()`'s byte parser locks to it — a `'$'` byte is thereafter ignored exactly like any other
+non-sync byte, the same as the original UBX-only parser always did. This is what makes a BH-880 that
+also happens to emit default NMEA chatter alongside UBX immune to ever being misclassified mid-session.
+
+### Module pinning (Settings > GPS)
+
+Detection above only ever runs on a board that hasn't been configured yet. `settings_manager` persists
+`gps_module_type` (0=BH-880, 1=LC76G) and `gps_module_configured` (NVS, survives both the OTA-only and
+full-flash web-flasher images — see [`docs/firmware_installation.md`](firmware_installation.md) for why
+NVS's `0x9000-0xd000` region is never touched by either). Once pinned, `device_manager::initGPS()`
+calls `gps_bh880::beginWithProtocol()` instead of `begin()` — skips protocol detection entirely and
+runs only the single relevant pass (`detectBaudUBX()` or `detectBaudNMEA()` directly) for baud, since
+baud can still vary per unit/config even when the module type is known.
+
+**First boot**: before `gps_module_configured` is ever true, a one-time full-screen picker appears
+(`main.cpp`, right after `ui_manager::init()`, before the loading-screen sequence) showing what the
+auto-detect scan found this boot as a hint, but always requiring an explicit tap. GPS itself isn't
+gated by this picker — it already came up via the two-pass auto-detect earlier in boot (before display
+was even ready); the picker only decides what *future* boots do.
+
+**Changing the pin later**: Settings > GPS has a module dropdown + "Save + Reboot to Apply" button
+(same `esp_restart()` pattern as the WiFi/AP screens). The tab's old Hot/Warm/Cold Start and Factory
+Reset touch buttons were removed in the same change — the web flasher gives full reflash control now,
+so those are redundant UI weight. The underlying commands are unaffected and still reachable via
+`gps restart hot|warm|cold` and `gps reset` on serial (see Serial Commands above; PAIR-equivalent
+branches were added to each so they work correctly against an LC76G too, not just a BH-880).
+
+### No compass on LC76G — North-Up is forced automatically
+
+`device_manager`'s `compass_ok` flag (already false-safe: `initCompass()` probes the I2C address
+before ever attempting a real register read, so a genuinely absent chip fails cleanly with no bus
+errors or retries) now also drives navigation mode. If `compass_ok` is false at `ui_manager::init()`,
+`heading_up_mode` is forced off in RAM (not written to NVS — a saved Heading-Up preference from a
+BH-880 session is preserved and reapplied if the compass is ever present again), and the Settings
+nav-mode dropdown is locked to North-Up (`LV_STATE_DISABLED`) instead of offering a Heading-Up option
+that would silently do nothing.
+
+### Key files added/changed for dual-protocol support
+
+| File | Role |
+|------|------|
+| `src/hardware/sensors/gps_bh880.cpp` | NMEA/PAIR parser ported in alongside UBX; two-pass `detectBaud()`; `beginWithProtocol()` |
+| `include/hardware/sensors/gps_bh880.h` | `GpsModule` enum, `beginWithProtocol()`, `isNmeaProtocol()`/`protocolName()` |
+| `src/core/device_manager.cpp` | `initGPS()` branches on `gps_module_configured` |
+| `src/utils/settings_manager.cpp` / `.h` | `gps_module_type`/`gps_module_configured`, `saveGPSModuleSelection()` |
+| `src/core/main.cpp` | First-boot picker (`showGpsModulePickerBlocking()`) |
+| `src/ui/ui_manager.cpp` | Forces North-Up when `!compass_ok` |
+| `src/ui/settings_screen.cpp` | GPS Module dropdown + reboot button; nav-mode dropdown disabled when no compass; Restart/Factory-Reset buttons removed |
 
 ---
 
@@ -275,6 +357,5 @@ at a reserved I2C address that survives even a double-ACK confirmation guard. Se
 
 **Compass software implementation**: See [`docs/compass.md`](compass.md) for heading pipeline, calibration, WMM declination, I2C constraints, and upgrade path.
 
-*Last updated: 2026-08-09 (I2C bus speed, IMU address table, and calibration section
-corrected against current code — see [`docs/compass.md`](compass.md) for the compass
-software pipeline in full)*
+*Last updated: 2026-08-10 (dual-protocol LC76G support added — see "Dual-Protocol Support" above and
+[ADR-0032](adr/0032-pinned-gps-module-not-always-auto-detect.md))*

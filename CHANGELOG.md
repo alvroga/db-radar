@@ -9,6 +9,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+**Dual GPS module support: BH-880 + LC76G in one firmware, pinned module selection (2026-08-10)**
+
+**NOT included in the next release build** — isolated on the `feature/dual-gps-module` branch,
+untested on real hardware yet. `initial-release` is untouched.
+
+LC76G support (removed when the project switched to the BH-880, since the LC76G has no compass) is
+back, running from the same firmware image as the BH-880 rather than a separate build. `gps_bh880.cpp`
+gained a second protocol parser — the pre-BH-880 LC76G NMEA/PAIR driver, ported from a project backup
+onto the current ESP-IDF UART style (checksum validation, hemisphere/coordinate/speed sanity checks
+kept as-is from the original, field-tested logic). Module identification runs as two strict sequential
+passes (`detectBaudUBX()` first — byte-identical to the pre-existing BH-880-only algorithm — then
+`detectBaudNMEA()` only if that finds nothing on any of 6 baud rates), specifically to make a BH-880
+misdetection structurally impossible rather than merely unlikely; see
+[ADR-0032](docs/adr/0032-pinned-gps-module-not-always-auto-detect.md) for why an earlier single-pass
+interleaved design was rejected.
+
+The module type is a persisted choice, not re-detected every boot: a one-time picker appears on first
+boot (before display is even fully in the normal flow — shown right after `ui_manager::init()`), and
+every later boot calls `gps_bh880::beginWithProtocol()` (single-pass baud scan, no protocol guessing)
+instead of the full two-pass `begin()`. Settings > GPS gained a module dropdown + "Save + Reboot to
+Apply" button; its old Hot/Warm/Cold Start and Factory Reset touch buttons were removed (redundant now
+that the web flasher gives full reflash control — the commands remain on serial: `gps restart
+hot|warm|cold`, `gps reset`).
+
+A board with no compass (LC76G-only) now forces North-Up navigation automatically at `ui_manager::init()`
+(driven by the already-existing `compass_ok` flag) and locks the Settings nav-mode dropdown instead of
+offering a Heading-Up option that would silently do nothing.
+
+Build-verified clean (RAM 51.4%/168,264 B, Flash 40.8%/1,712,147 B — negligible growth). Not yet
+field-tested on either module.
+
+**Full detail**: [`docs/bh880_module.md`](docs/bh880_module.md)'s "Dual-Protocol Support" section,
+[ADR-0032](docs/adr/0032-pinned-gps-module-not-always-auto-detect.md).
+
 ### Fixed
 
 **Boot crash on first flash: `assert failed: __esp_system_init_fn_init_flash` (2026-08-10)**

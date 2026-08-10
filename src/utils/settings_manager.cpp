@@ -21,6 +21,8 @@ static const char* KEY_GPS_LAST_LAT = "gps_lat";
 static const char* KEY_GPS_LAST_LON = "gps_lon";
 static const char* KEY_GPS_LAST_FIX = "gps_fix";
 static const char* KEY_GPS_HAS_POS = "gps_haspos";
+static const char* KEY_GPS_MODULE_TYPE = "gps_mod_ty";
+static const char* KEY_GPS_MODULE_CFG  = "gps_mod_cf";
 static const char* KEY_WP_PERSIST = "wp_persist";
 static const char* KEY_WP_MAX = "wp_max";
 static const char* KEY_BRIGHTNESS = "brightness";
@@ -201,6 +203,8 @@ bool loadSettings(RadarSettings& settings) {
     settings.gps_last_lat                 = nvs_getdouble(h, KEY_GPS_LAST_LAT, 0.0);
     settings.gps_last_lon                 = nvs_getdouble(h, KEY_GPS_LAST_LON, 0.0);
     settings.gps_last_fix_time            = nvs_getu32(h, KEY_GPS_LAST_FIX, 0);
+    settings.gps_module_type              = nvs_getu8(h, KEY_GPS_MODULE_TYPE, 0);
+    settings.gps_module_configured        = nvs_getbool(h, KEY_GPS_MODULE_CFG, false);
     settings.waypoints_persistent         = nvs_getbool(h, KEY_WP_PERSIST, true);
     settings.max_visible_waypoints        = nvs_getu8(h, KEY_WP_MAX, 50);
     settings.brightness                   = nvs_getu8(h, KEY_BRIGHTNESS, 128);
@@ -298,6 +302,8 @@ bool saveSettings(const RadarSettings& settings) {
     nvs_set_u16(h, KEY_GPS_UPDATE, settings.gps_update_interval_ms);
     nvs_set_u16(h, KEY_GPS_LOG, settings.gps_log_interval_sec);
     nvs_setbool(h, KEY_GPS_LOG_EN, settings.gps_logging_enabled);
+    nvs_set_u8(h, KEY_GPS_MODULE_TYPE, settings.gps_module_type);
+    nvs_setbool(h, KEY_GPS_MODULE_CFG, settings.gps_module_configured);
     nvs_setbool(h, KEY_WP_PERSIST, settings.waypoints_persistent);
     nvs_set_u8(h, KEY_WP_MAX, settings.max_visible_waypoints);
     nvs_set_u8(h, KEY_BRIGHTNESS, settings.brightness);
@@ -406,6 +412,18 @@ bool saveHeadingUpMode(bool heading_up) {
     NVS_SAVE_OPEN(); nvs_setbool(h, KEY_HEADING_UP, heading_up); NVS_SAVE_CLOSE();
     g_cached_settings.heading_up_mode = heading_up;
     Serial.printf("[SETTINGS] Navigation mode: %s\n", heading_up ? "heading-up" : "north-up");
+    return true; }
+
+bool saveGPSModuleSelection(uint8_t module_type) {
+    if (!is_initialized) return false;
+    NVS_SAVE_OPEN();
+    nvs_set_u8(h, KEY_GPS_MODULE_TYPE, module_type);
+    nvs_setbool(h, KEY_GPS_MODULE_CFG, true);
+    NVS_SAVE_CLOSE();
+    g_cached_settings.gps_module_type = module_type;
+    g_cached_settings.gps_module_configured = true;
+    Serial.printf("[SETTINGS] GPS module pinned: %s (reboot to apply)\n",
+                  module_type == 1 ? "LC76G (NMEA/PAIR)" : "BH-880 (UBX)");
     return true; }
 
 bool saveHUDAutoHide(bool enabled) {

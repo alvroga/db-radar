@@ -54,7 +54,7 @@ static_assert(sizeof(UBX_NAV_PVT) == 92, "UBX_NAV_PVT must be 92 bytes");
 // ============================================================================
 
 enum class UBXState : uint8_t {
-  SYNC1,    // Looking for 0xB5
+  SYNC1,    // Looking for 0xB5 (UBX) or '$' (NMEA) — the only two frame starts we recognize
   SYNC2,    // Looking for 0x62
   CLASS,    // Message class byte
   ID,       // Message ID byte
@@ -62,8 +62,27 @@ enum class UBXState : uint8_t {
   LEN2,     // Length high byte
   PAYLOAD,  // Payload bytes
   CK_A,     // Checksum A
-  CK_B      // Checksum B
+  CK_B,     // Checksum B
+  NMEA_LINE // Accumulating an NMEA sentence until CR/LF (LC76G and other NMEA/PAIR modules)
 };
+
+// ============================================================================
+// Protocol Detection
+// ============================================================================
+// The BH-880 (B1301N chipset) speaks UBX binary. The LC76G and other NMEA/PAIR
+// modules speak plain-text NMEA-0183 with Quectel PAIR sentences for config.
+// Both are wired to the same UART pins on this board, so the module in use is
+// detected on the wire rather than picked at compile time (see docs/peripherals.md).
+enum class GpsProtocol : uint8_t { UNKNOWN, UBX, NMEA };
+static GpsProtocol s_protocol = GpsProtocol::UNKNOWN;
+
+static const char* protocolNameStr(GpsProtocol p) {
+  switch (p) {
+    case GpsProtocol::UBX:  return "UBX (e.g. BH-880)";
+    case GpsProtocol::NMEA: return "NMEA/PAIR (e.g. LC76G)";
+    default:                return "unknown";
+  }
+}
 
 // ============================================================================
 // Module State
@@ -79,6 +98,10 @@ static uint16_t  s_msg_len;
 static uint16_t  s_payload_idx;
 static uint8_t   s_payload[96]; // NAV-PVT is 92 bytes
 static uint8_t   s_ck_a, s_ck_b;
+
+// NMEA parser state — sized/capped to match the field-tested LC76G driver this was ported from.
+static char      s_nmea_line[200];
+static size_t    s_nmea_idx = 0;
 
 // ============================================================================
 // Coordinate Validation
@@ -143,6 +166,174 @@ static void parseNavPVT(const uint8_t* payload, GPSData& g) {
     g.second = pvt.sec;
     g.hasTime = true;
   }
+
+  g.last_update_ms = millis();
+}
+
+// ============================================================================
+// NMEA Sentence Parser (LC76G and other NMEA/PAIR-protocol modules)
+// ============================================================================
+// Ported from the pre-BH-880 gps_lc76g driver (field-validated 2026-02) — the
+// validation logic (checksum, hemisphere sanity, plausible-speed bounds, coordinate
+// range) caught real corrupted-sentence cases in the field and is kept as-is, just
+// moved off Arduino String/HardwareSerial onto the same char-buffer/UART style as
+// the UBX parser above.
+
+// NMEA checksum: XOR of all chars between '$' and '*'. Missing checksum is accepted
+// (some modules omit it); a present-but-wrong checksum rejects the sentence outright —
+// this is what catches sentences corrupted by a UART buffer overflow.
+static bool validateNMEAChecksum(const char* sentence) {
+  const char* asterisk = strchr(sentence, '*');
+  if (!asterisk) return true;
+  if (strlen(asterisk) < 3) return false;  // truncated checksum
+
+  char checksumStr[3] = {asterisk[1], asterisk[2], '\0'};
+  uint8_t provided = (uint8_t)strtol(checksumStr, nullptr, 16);
+
+  uint8_t calculated = 0;
+  const char* p = sentence;
+  if (*p == '$') p++;
+  while (*p && p < asterisk) { calculated ^= (uint8_t)*p; p++; }
+
+  return calculated == provided;
+}
+
+static bool isValidLatHemisphere(char h) { return (h == 'N' || h == 'S'); }
+static bool isValidLonHemisphere(char h) { return (h == 'E' || h == 'W'); }
+
+// Rejects impossible speeds from corrupted data (max realistic ~600kn for fast jets).
+static bool isPlausibleSpeed(double speed_knots) {
+  return (speed_knots >= 0.0 && speed_knots < 1000.0);
+}
+
+static double nmeaDegMinToDeg(const char* dm, bool isLon) {
+  if (!dm || !*dm) return NAN;
+  double val = atof(dm);
+  int deg = int(val / 100);  // 2 digits (lat) or 3 digits (lon) — same formula either way
+  double minutes = val - (deg * 100);
+  return double(deg) + (minutes / 60.0);
+}
+
+static int twoDigits(const char* p) {
+  if (!p || !*p) return 0;
+  return ((p[0] ? (p[0] - '0') : 0) * 10) + (p[1] ? (p[1] - '0') : 0);
+}
+
+static void parseTimeHHMMSS(const char* hhmmss, int& hh, int& mm, int& ss) {
+  if (!hhmmss || !*hhmmss) { hh = mm = ss = 0; return; }
+  hh = twoDigits(hhmmss);
+  mm = twoDigits(hhmmss + 2);
+  ss = twoDigits(hhmmss + 4);
+}
+
+// $GNRMC,hhmmss.sss,A,lat,NS,lon,EW,sog,cog,ddmmyy,...
+// fields (0-based, split on ','): 0:tag 1:time 2:status 3:lat 4:N/S 5:lon 6:E/W
+//                                 7:speed(kn) 8:course 9:date
+static void parseRMC(char* sentence, GPSData& g) {
+  char* tok = strtok(sentence, ",");
+  int idx = 0;
+
+  const char *f_time = nullptr, *f_status = nullptr, *f_lat = nullptr, *f_ns = nullptr;
+  const char *f_lon = nullptr, *f_ew = nullptr, *f_speed = nullptr, *f_course = nullptr, *f_date = nullptr;
+
+  while (tok) {
+    switch (idx) {
+      case 1: f_time = tok;   break;
+      case 2: f_status = tok; break;
+      case 3: f_lat = tok;    break;
+      case 4: f_ns = tok;     break;
+      case 5: f_lon = tok;    break;
+      case 6: f_ew = tok;     break;
+      case 7: f_speed = tok;  break;
+      case 8: f_course = tok; break;
+      case 9: f_date = tok;   break;
+    }
+    tok = strtok(nullptr, ",");
+    idx++;
+  }
+
+  bool valid = (f_status && *f_status == 'A');
+  g.valid = valid;
+
+  if (f_lat && *f_lat && f_ns && *f_ns && f_lon && *f_lon && f_ew && *f_ew) {
+    if (!isValidLatHemisphere(*f_ns) || !isValidLonHemisphere(*f_ew)) return;
+
+    double lat = nmeaDegMinToDeg(f_lat, false);
+    if (*f_ns == 'S') lat = -lat;
+    double lon = nmeaDegMinToDeg(f_lon, true);
+    if (*f_ew == 'W') lon = -lon;
+
+    if (isValidCoordinate(lat, lon)) { g.lat = lat; g.lon = lon; }
+  }
+
+  if (f_speed && *f_speed) {
+    double speed = atof(f_speed);
+    if (isPlausibleSpeed(speed)) g.speed = speed;
+  }
+  if (f_course && *f_course) {
+    double course = atof(f_course);
+    if (course >= 0.0 && course <= 360.0) g.course = course;
+  }
+
+  // Reliable heading needs actual movement — GPS wander can show 1-5kn phantom speed at rest.
+  g.hasHeading = (f_speed && *f_speed && f_course && *f_course &&
+                  g.speed > 2.0 && isPlausibleSpeed(g.speed));
+
+  bool has_time = false, has_date = false;
+  if (f_time && *f_time) {
+    int hh = 0, mm = 0, ss = 0;
+    parseTimeHHMMSS(f_time, hh, mm, ss);
+    g.hour = hh; g.minute = mm; g.second = ss;
+    has_time = true;
+  }
+  if (f_date && *f_date && strlen(f_date) >= 6) {
+    int dd = twoDigits(f_date), mo = twoDigits(f_date + 2), yy = twoDigits(f_date + 4);
+    g.day = dd; g.month = mo; g.year = (yy < 80) ? 2000 + yy : 1900 + yy;
+    has_date = true;
+  }
+  g.hasTime = has_time && has_date && (g.year >= 2020);
+
+  g.last_update_ms = millis();
+}
+
+// $GNGGA,hhmmss.sss,lat,NS,lon,EW,fix,sats,hdop,alt,M,...
+// fields: 0:tag 1:time 2:lat 3:N/S 4:lon 5:E/W 6:fix 7:sats 8:hdop 9:alt
+static void parseGGA(char* sentence, GPSData& g) {
+  char* tok = strtok(sentence, ",");
+  int idx = 0;
+
+  const char *f_lat = nullptr, *f_ns = nullptr, *f_lon = nullptr, *f_ew = nullptr;
+  const char *f_fix = nullptr, *f_sats = nullptr, *f_hdop = nullptr, *f_alt = nullptr;
+
+  while (tok) {
+    switch (idx) {
+      case 2: f_lat = tok;  break;
+      case 3: f_ns = tok;   break;
+      case 4: f_lon = tok;  break;
+      case 5: f_ew = tok;   break;
+      case 6: f_fix = tok;  break;
+      case 7: f_sats = tok; break;
+      case 8: f_hdop = tok; break;
+      case 9: f_alt = tok;  break;
+    }
+    tok = strtok(nullptr, ",");
+    idx++;
+  }
+
+  // GGA is a backup position source — RMC carries validity + date and is primary.
+  if (f_lat && *f_lat && f_ns && *f_ns && f_lon && *f_lon && f_ew && *f_ew &&
+      isValidLatHemisphere(*f_ns) && isValidLonHemisphere(*f_ew)) {
+    double lat = nmeaDegMinToDeg(f_lat, false);
+    if (*f_ns == 'S') lat = -lat;
+    double lon = nmeaDegMinToDeg(f_lon, true);
+    if (*f_ew == 'W') lon = -lon;
+    if (isValidCoordinate(lat, lon)) { g.lat = lat; g.lon = lon; }
+  }
+
+  if (f_fix && *f_fix) g.valid = (atoi(f_fix) > 0) || g.valid;  // keep RMC's validity if already set
+  if (f_sats && *f_sats) g.sats = atoi(f_sats);
+  if (f_hdop && *f_hdop) g.hdop = atof(f_hdop);
+  if (f_alt && *f_alt)   g.alt  = atof(f_alt);
 
   g.last_update_ms = millis();
 }
@@ -237,6 +428,23 @@ bool sendUBX(uint8_t cls, uint8_t id, const uint8_t* payload, uint16_t len) {
   return true;
 }
 
+// LC76G/PAIR protocol: "$PAIRxxx,args*CC\r\n" — checksum is XOR of bytes between $ and *,
+// same rule as any NMEA sentence. No ACK frame exists for this protocol (unlike UBX), so
+// callers can't wait for confirmation — the module just applies it.
+static bool sendPAIR(const char* cmd) {
+  if (!s_uart_installed) return false;
+
+  uint8_t checksum = 0;
+  for (const char* p = cmd; *p; p++) checksum ^= (uint8_t)*p;
+
+  char full[136];
+  int n = snprintf(full, sizeof(full), "$%s*%02X\r\n", cmd, checksum);
+  if (n > 0) uart_write_bytes(GPS_UART, full, n);
+
+  Serial.printf("[GPS] Sent: $%s*%02X\n", cmd, checksum);
+  return true;
+}
+
 static void uart_install_at_baud(uint32_t baud, int rxPin, int txPin) {
     // Remove previous driver if installed
     if (s_uart_installed) {
@@ -256,7 +464,12 @@ static void uart_install_at_baud(uint32_t baud, int rxPin, int txPin) {
     s_uart_installed = true;
 }
 
-uint32_t detectBaud(int rxPin, int txPin) {
+// Pass 1 of detectBaud(): the original, unmodified UBX-only sync-pair scan. Kept as its own
+// pass — not interleaved with the NMEA scan — so a real BH-880 takes EXACTLY the code path
+// and timing it always has, with zero chance of a coincidentally-early NMEA match (e.g. from
+// a module that free-runs default NMEA output before NAV-PVT gets enabled by begin()) ever
+// pre-empting a correct UBX detection. See docs/peripherals.md for the two-pass rationale.
+static uint32_t detectBaudUBX(int rxPin, int txPin) {
   static const uint32_t rates[] = {115200, 9600, 38400, 57600, 230400, 460800};
 
   for (auto rate : rates) {
@@ -281,6 +494,7 @@ uint32_t detectBaud(int rxPin, int txPin) {
             Serial.printf("FOUND! (%d UBX sync pairs detected)\n", sync_count);
             uart_driver_delete(GPS_UART);
             s_uart_installed = false;
+            s_protocol = GpsProtocol::UBX;
             return rate;
           }
         }
@@ -291,9 +505,109 @@ uint32_t detectBaud(int rxPin, int txPin) {
     Serial.printf("no UBX (%d bytes, %d sync pairs)\n", total_bytes, sync_count);
   }
 
-  Serial.println("[GPS] Auto-detect FAILED - no baud rate produced UBX data");
-  Serial.println("[GPS] Check wiring: Module TX -> GPIO44 (ESP RX)");
   return 0;
+}
+
+// Pass 2 of detectBaud(): only reached if pass 1 found no UBX module on any rate. Scans the
+// same rates for valid, checksummed NMEA sentences (LC76G and similar NMEA/PAIR modules).
+static uint32_t detectBaudNMEA(int rxPin, int txPin) {
+  static const uint32_t rates[] = {115200, 9600, 38400, 57600, 230400, 460800};
+
+  for (auto rate : rates) {
+    Serial.printf("[GPS] Trying %u baud (NMEA)... ", rate);
+
+    uart_install_at_baud(rate, rxPin, txPin);
+    uart_flush(GPS_UART);
+    uart_flush_input(GPS_UART);
+
+    uint32_t start = millis();
+    int total_bytes = 0;
+    char nmea_buf[96];
+    int  nmea_idx = 0;
+    bool nmea_capturing = false;
+    int  nmea_lines = 0;
+
+    while (millis() - start < 1500) {
+      uint8_t c;
+      if (uart_read_bytes(GPS_UART, &c, 1, pdMS_TO_TICKS(1)) > 0) {
+        total_bytes++;
+
+        if (c == '$') {
+          nmea_capturing = true;
+          nmea_idx = 0;
+          nmea_buf[nmea_idx++] = c;
+        } else if (nmea_capturing) {
+          if (c == '\n') {
+            nmea_buf[(nmea_idx < (int)sizeof(nmea_buf)) ? nmea_idx : (int)sizeof(nmea_buf) - 1] = '\0';
+            if (nmea_idx >= 6 && validateNMEAChecksum(nmea_buf)) {
+              nmea_lines++;
+              if (nmea_lines >= 2) {
+                Serial.printf("FOUND! (%d valid NMEA sentences detected)\n", nmea_lines);
+                uart_driver_delete(GPS_UART);
+                s_uart_installed = false;
+                s_protocol = GpsProtocol::NMEA;
+                return rate;
+              }
+            }
+            nmea_capturing = false;
+            nmea_idx = 0;
+          } else if (c == '\r') {
+            // ignore
+          } else if (nmea_idx < (int)sizeof(nmea_buf) - 1) {
+            nmea_buf[nmea_idx++] = c;
+          } else {
+            nmea_capturing = false;  // malformed/oversized line — drop and resync on next '$'
+            nmea_idx = 0;
+          }
+        }
+      }
+    }
+
+    Serial.printf("no NMEA (%d bytes, %d valid lines)\n", total_bytes, nmea_lines);
+  }
+
+  return 0;
+}
+
+uint32_t detectBaud(int rxPin, int txPin) {
+  uint32_t rate = detectBaudUBX(rxPin, txPin);
+  if (rate != 0) return rate;
+
+  Serial.println("[GPS] No UBX module found — retrying rates for NMEA/PAIR (e.g. LC76G)...");
+  rate = detectBaudNMEA(rxPin, txPin);
+  if (rate != 0) return rate;
+
+  Serial.println("[GPS] Auto-detect FAILED - no baud rate produced recognizable GPS data");
+  Serial.println("[GPS] Check wiring: Module TX -> GPIO44 (ESP RX)");
+  s_protocol = GpsProtocol::UNKNOWN;
+  return 0;
+}
+
+// Shared tail of begin()/beginWithProtocol(): UART is opened at the given baud, and
+// s_protocol is expected to already be set (by detection, or pinned by the caller).
+static void configureAndEnable(uint32_t baud, int rxPin, int txPin) {
+  uart_install_at_baud(baud, rxPin, txPin);
+
+  s_last = GPSData{};
+  s_state = UBXState::SYNC1;
+  s_nmea_idx = 0;
+  Serial.printf("[GPS] UART started at %u baud (%s)\n", baud, protocolNameStr(s_protocol));
+
+  // Flush stale data before sending config commands
+  delay(150);
+  uart_flush_input(GPS_UART);
+
+  if (s_protocol == GpsProtocol::NMEA) {
+    // No UBX config to send — the module already free-runs NMEA at its default rate.
+    return;
+  }
+
+  // Enable NAV-PVT output at rate=1 (every navigation solution). Harmless no-op/timeout
+  // if the protocol is actually NMEA but wasn't detected (e.g. an explicit baud was
+  // passed, skipping detectBaud()) — read()'s parser will still pick up NMEA sentences.
+  uint8_t enablePVT[] = {0x01, 0x07, 0x01};
+  sendUBX(0x06, 0x01, enablePVT, sizeof(enablePVT));
+  waitForAck(0x06, 0x01);
 }
 
 void begin(uint32_t baud, int rxPin, int txPin) {
@@ -304,21 +618,25 @@ void begin(uint32_t baud, int rxPin, int txPin) {
       baud = 115200;
     }
   }
+  configureAndEnable(baud, rxPin, txPin);
+}
 
-  uart_install_at_baud(baud, rxPin, txPin);
+void beginWithProtocol(GpsModule module, int rxPin, int txPin) {
+  s_protocol = (module == GpsModule::LC76G_NMEA) ? GpsProtocol::NMEA : GpsProtocol::UBX;
+  Serial.printf("[GPS] Module pinned: %s — skipping protocol detection, single-pass baud scan only\n",
+                protocolNameStr(s_protocol));
 
-  s_last = GPSData{};
-  s_state = UBXState::SYNC1;
-  Serial.printf("[GPS] UART started at %u baud (UBX binary mode)\n", baud);
-
-  // Flush stale data before sending config commands
-  delay(150);
-  uart_flush_input(GPS_UART);
-
-  // Enable NAV-PVT output at rate=1 (every navigation solution)
-  uint8_t enablePVT[] = {0x01, 0x07, 0x01};
-  sendUBX(0x06, 0x01, enablePVT, sizeof(enablePVT));
-  waitForAck(0x06, 0x01);
+  uint32_t baud = (module == GpsModule::LC76G_NMEA) ? detectBaudNMEA(rxPin, txPin)
+                                                      : detectBaudUBX(rxPin, txPin);
+  if (baud == 0) {
+    Serial.printf("[GPS] No baud rate confirmed %s — falling back to 115200 and trying anyway\n",
+                  protocolNameStr(s_protocol));
+    baud = 115200;
+    // detectBaudUBX()/detectBaudNMEA() only set s_protocol on a confirmed match; a
+    // fallback here must not leave it at whatever they left it as (e.g. UNKNOWN).
+    s_protocol = (module == GpsModule::LC76G_NMEA) ? GpsProtocol::NMEA : GpsProtocol::UBX;
+  }
+  configureAndEnable(baud, rxPin, txPin);
 }
 
 bool read(GPSData &out) {
@@ -344,7 +662,43 @@ bool read(GPSData &out) {
 
     switch (s_state) {
       case UBXState::SYNC1:
-        if (c == 0xB5) s_state = UBXState::SYNC2;
+        if (c == 0xB5) {
+          s_state = UBXState::SYNC2;
+        } else if (c == '$' && s_protocol != GpsProtocol::UBX) {
+          // Once a session is confirmed UBX (detectBaud(), or a NAV-PVT frame already
+          // parsed this session), stray '$' bytes are ignored exactly like any other
+          // non-sync byte — same as the original UBX-only parser. This is what keeps a
+          // BH-880 that also happens to emit default NMEA chatter from ever being
+          // reinterpreted as an NMEA/PAIR module mid-session.
+          s_nmea_idx = 0;
+          s_nmea_line[s_nmea_idx++] = c;
+          s_state = UBXState::NMEA_LINE;
+        }
+        break;
+
+      case UBXState::NMEA_LINE:
+        if (c == '\r') {
+          // ignore — wait for '\n'
+        } else if (c == '\n') {
+          s_nmea_line[s_nmea_idx] = '\0';
+          if (s_nmea_idx >= 6 && validateNMEAChecksum(s_nmea_line)) {
+            if (strncmp(s_nmea_line, "$GNRMC", 6) == 0 || strncmp(s_nmea_line, "$GPRMC", 6) == 0) {
+              parseRMC(s_nmea_line, s_last);
+              updated = true;
+              s_protocol = GpsProtocol::NMEA;
+            } else if (strncmp(s_nmea_line, "$GNGGA", 6) == 0 || strncmp(s_nmea_line, "$GPGGA", 6) == 0) {
+              parseGGA(s_nmea_line, s_last);
+              updated = true;
+              s_protocol = GpsProtocol::NMEA;
+            }
+          }
+          s_state = UBXState::SYNC1;
+        } else if (s_nmea_idx < sizeof(s_nmea_line) - 1) {
+          s_nmea_line[s_nmea_idx++] = c;
+        } else {
+          // Oversized/malformed line — drop and resync on the next '$'.
+          s_state = UBXState::SYNC1;
+        }
         break;
 
       case UBXState::SYNC2:
@@ -402,6 +756,7 @@ bool read(GPSData &out) {
           if (s_msg_class == 0x01 && s_msg_id == 0x07 && s_msg_len == 92) {
             parseNavPVT(s_payload, s_last);
             updated = true;
+            s_protocol = GpsProtocol::UBX;
           }
         }
         s_state = UBXState::SYNC1;
@@ -418,6 +773,18 @@ bool read(GPSData &out) {
 // ============================================================================
 
 bool setUpdateRate(uint32_t intervalMs) {
+  if (s_protocol == GpsProtocol::NMEA) {
+    // PAIR050: valid range is 100-1000ms (1-10Hz) on the LC76G, narrower than UBX's.
+    if (intervalMs < 100 || intervalMs > 1000) {
+      Serial.printf("[GPS] Invalid update rate: %u ms (valid: 100-1000ms for NMEA/PAIR)\n", intervalMs);
+      return false;
+    }
+    char cmd[32];
+    snprintf(cmd, sizeof(cmd), "PAIR050,%u", intervalMs);
+    Serial.printf("[GPS] Setting update rate: %u ms (%.1f Hz)\n", intervalMs, 1000.0f / intervalMs);
+    return sendPAIR(cmd);
+  }
+
   if (intervalMs < 25 || intervalMs > 10000) {
     Serial.printf("[GPS] Invalid update rate: %u ms (valid: 25-10000)\n", intervalMs);
     return false;
@@ -437,6 +804,11 @@ bool setUpdateRate(uint32_t intervalMs) {
 }
 
 bool setPowerMode(uint8_t mode, uint16_t periodMs, uint16_t onTimeMs) {
+  if (s_protocol == GpsProtocol::NMEA) {
+    Serial.println("[GPS] setPowerMode: no PAIR equivalent — not supported on NMEA/PAIR modules (LC76G)");
+    return false;
+  }
+
   // UBX-CFG-PMS (0x06, 0x86): Power Management Settings
   // mode:
   //   0x00 = Full power (default)
@@ -472,6 +844,11 @@ bool setPowerMode(uint8_t mode, uint16_t periodMs, uint16_t onTimeMs) {
 }
 
 bool setUpdateRateVALSET(uint32_t intervalMs, uint8_t layers) {
+  if (s_protocol == GpsProtocol::NMEA) {
+    Serial.println("[GPS] setUpdateRateVALSET: UBX-only — not supported on NMEA/PAIR modules (LC76G), use setUpdateRate()");
+    return false;
+  }
+
   if (intervalMs < 25 || intervalMs > 10000) {
     Serial.printf("[GPS] Invalid interval: %u ms (valid: 25-10000)\n", intervalMs);
     return false;
@@ -503,6 +880,24 @@ bool setUpdateRateVALSET(uint32_t intervalMs, uint8_t layers) {
 }
 
 bool setBaudrate(uint32_t baud) {
+  if (s_protocol == GpsProtocol::NMEA) {
+    const uint32_t validBauds[] = {9600, 115200, 230400, 460800, 921600, 3000000};
+    bool valid = false;
+    for (auto vb : validBauds) { if (baud == vb) { valid = true; break; } }
+    if (!valid) {
+      Serial.printf("[GPS] Invalid baudrate: %u\n", baud);
+      return false;
+    }
+    // PAIR864: PortType 0 = UART, PortIndex 0 = primary UART
+    char cmd[64];
+    snprintf(cmd, sizeof(cmd), "PAIR864,0,0,%u", baud);
+    bool result = sendPAIR(cmd);
+    if (result) {
+      Serial.printf("[GPS] Baudrate change to %u sent - reconnect serial!\n", baud);
+    }
+    return result;
+  }
+
   const uint32_t validBauds[] = {9600, 115200, 230400, 460800, 921600};
   bool valid = false;
   for (auto vb : validBauds) {
@@ -542,6 +937,10 @@ bool setBaudrate(uint32_t baud) {
 }
 
 bool hotStart() {
+  if (s_protocol == GpsProtocol::NMEA) {
+    Serial.println("[GPS] Hot start (PAIR004)");
+    return sendPAIR("PAIR004");
+  }
   // UBX-CFG-RST (0x06, 0x04): navBbrMask=0x0000 (keep all), resetMode=0x02 (GPS only)
   uint8_t payload[] = {0x00, 0x00, 0x02, 0x00};
   Serial.println("[GPS] Hot start (UBX-CFG-RST, keep all BBR data)");
@@ -550,6 +949,10 @@ bool hotStart() {
 }
 
 bool warmStart() {
+  if (s_protocol == GpsProtocol::NMEA) {
+    Serial.println("[GPS] Warm start (PAIR005)");
+    return sendPAIR("PAIR005");
+  }
   // UBX-CFG-RST: navBbrMask=0x0001 (clear ephemeris), resetMode=0x02
   uint8_t payload[] = {0x01, 0x00, 0x02, 0x00};
   Serial.println("[GPS] Warm start (UBX-CFG-RST, clear ephemeris)");
@@ -558,6 +961,10 @@ bool warmStart() {
 }
 
 bool coldStart() {
+  if (s_protocol == GpsProtocol::NMEA) {
+    Serial.println("[GPS] Cold start (PAIR006)");
+    return sendPAIR("PAIR006");
+  }
   // UBX-CFG-RST: navBbrMask=0xFFFF (clear all), resetMode=0x02
   uint8_t payload[] = {0xFF, 0xFF, 0x02, 0x00};
   Serial.println("[GPS] Cold start (UBX-CFG-RST, clear all BBR data)");
@@ -566,6 +973,11 @@ bool coldStart() {
 }
 
 bool factoryReset() {
+  if (s_protocol == GpsProtocol::NMEA) {
+    bool result = sendPAIR("PAIR007");
+    if (result) Serial.println("[GPS] Factory reset (PAIR007) - all settings cleared");
+    return result;
+  }
   // UBX-CFG-CFG (0x06, 0x09): clear all, load defaults
   // clearMask=0x0000001F, saveMask=0x00000000, loadMask=0x0000001F
   uint8_t payload[12] = {0};
@@ -581,6 +993,12 @@ bool factoryReset() {
 }
 
 bool saveConfig() {
+  if (s_protocol == GpsProtocol::NMEA) {
+    // PAIR513 saves current configuration to flash — required for e.g. update-rate to persist.
+    bool result = sendPAIR("PAIR513");
+    if (result) Serial.println("[GPS] Configuration saved to flash (PAIR513)");
+    return result;
+  }
   // UBX-CFG-CFG (0x06, 0x09): save all sections
   // clearMask=0, saveMask=0x1F, loadMask=0
   uint8_t payload[12] = {0};
@@ -598,6 +1016,10 @@ bool saveConfig() {
 void printModuleInfo() {
   if (!s_uart_installed) {
     Serial.println("[GPS] No serial port initialized");
+    return;
+  }
+  if (s_protocol == GpsProtocol::NMEA) {
+    Serial.println("[GPS] printModuleInfo: UBX-MON-VER has no PAIR equivalent — not available for NMEA/PAIR modules (LC76G)");
     return;
   }
 
@@ -677,8 +1099,39 @@ bool ping(uint32_t timeout_ms) {
     return false;
   }
 
-  // Flush any stale data
   uart_flush_input(GPS_UART);
+
+  if (s_protocol == GpsProtocol::NMEA) {
+    // No poll command to send/wait on for an ACK-equivalent — NMEA/PAIR modules free-run
+    // sentences continuously, so "pong" is just receiving one valid, checksummed line.
+    Serial.println("[GPS] Waiting for a valid NMEA sentence...");
+    char line[96]; int idx = 0; bool capturing = false;
+    uint32_t start = millis();
+    while (millis() - start < timeout_ms) {
+      uint8_t c;
+      if (uart_read_bytes(GPS_UART, &c, 1, 0) <= 0) { delay(1); continue; }
+      if (c == '$') { capturing = true; idx = 0; line[idx++] = c; }
+      else if (capturing) {
+        if (c == '\n') {
+          line[(idx < (int)sizeof(line)) ? idx : (int)sizeof(line) - 1] = '\0';
+          if (idx >= 6 && validateNMEAChecksum(line)) {
+            Serial.printf("[GPS] PONG! %s in %lu ms — TX/RX lines OK\n", line, millis() - start);
+            return true;
+          }
+          capturing = false; idx = 0;
+        } else if (c == '\r') {
+          // ignore
+        } else if (idx < (int)sizeof(line) - 1) {
+          line[idx++] = c;
+        } else {
+          capturing = false; idx = 0;
+        }
+      }
+    }
+    Serial.println("[GPS] PING FAILED — no valid NMEA sentence within timeout");
+    Serial.println("  Check: Module TX -> GPIO44 (ESP RX)");
+    return false;
+  }
 
   // Send UBX-MON-VER poll (no payload) — module responds immediately with firmware version
   Serial.println("[GPS] Sending UBX-MON-VER poll...");
@@ -737,6 +1190,77 @@ static const char* ubxMsgName(uint8_t cls, uint8_t id) {
 void dumpRaw(uint32_t duration_ms) {
   if (!s_uart_installed) {
     Serial.println("[GPS] No serial port initialized");
+    return;
+  }
+
+  if (s_protocol == GpsProtocol::NMEA) {
+    // Sentence-type counter table (up to 16 unique types, keyed by the 3-char type
+    // after the 2-char talker ID, e.g. "GGA"/"RMC"/"GSA" — talker varies GP/GN/GL/...).
+    struct SentCount { char type[4]; uint32_t count; uint32_t bad_crc; };
+    static SentCount table[16];
+    uint8_t table_len = 0;
+    memset(table, 0, sizeof(table));
+
+    char line[96]; int idx = 0; bool capturing = false;
+    uint32_t start = millis();
+    uint32_t bytes_read = 0, good = 0, bad_crc = 0;
+
+    Serial.printf("[GPS] Counting NMEA sentences for %lu ms...\n", duration_ms);
+
+    while (millis() - start < duration_ms) {
+      if (Serial.available()) { Serial.read(); break; }
+
+      uint8_t c;
+      while (uart_read_bytes(GPS_UART, &c, 1, 0) > 0) {
+        bytes_read++;
+        if (c == '$') { capturing = true; idx = 0; line[idx++] = c; }
+        else if (capturing) {
+          if (c == '\n') {
+            line[(idx < (int)sizeof(line)) ? idx : (int)sizeof(line) - 1] = '\0';
+            if (idx >= 6) {
+              if (validateNMEAChecksum(line)) {
+                good++;
+                char type[4] = {line[3], line[4], line[5], '\0'};
+                bool found = false;
+                for (uint8_t i = 0; i < table_len; i++) {
+                  if (strncmp(table[i].type, type, 3) == 0) { table[i].count++; found = true; break; }
+                }
+                if (!found && table_len < 16) {
+                  SentCount sc = {}; strncpy(sc.type, type, 3); sc.count = 1;
+                  table[table_len++] = sc;
+                }
+              } else {
+                bad_crc++;
+              }
+            }
+            capturing = false; idx = 0;
+          } else if (c == '\r') {
+            // ignore
+          } else if (idx < (int)sizeof(line) - 1) {
+            line[idx++] = c;
+          } else {
+            capturing = false; idx = 0;  // oversized line, drop
+          }
+        }
+      }
+      delay(1);
+    }
+
+    uint32_t elapsed = millis() - start;
+
+    Serial.println("-------- NMEA SENTENCE BREAKDOWN --------");
+    for (uint8_t i = 0; i < table_len; i++) {
+      uint32_t rate_x10 = elapsed ? (table[i].count * 10000UL) / elapsed : 0;
+      Serial.printf("  %s: %u msgs (%u.%u Hz)\n", table[i].type, table[i].count, rate_x10 / 10, rate_x10 % 10);
+    }
+    Serial.println("  ---");
+    Serial.printf("  Total: %u sentences, %u bad checksum, %u bytes in %u ms\n",
+                  good, bad_crc, bytes_read, elapsed);
+    Serial.println("------------------------------------------");
+
+    if (bytes_read == 0) {
+      Serial.println("[GPS] No data received! Check module power and TX->GPIO44 wiring.");
+    }
     return;
   }
 
@@ -838,5 +1362,8 @@ void dumpRaw(uint32_t duration_ms) {
     Serial.println("  - Baud rate match (expecting 115200)");
   }
 }
+
+bool isNmeaProtocol() { return s_protocol == GpsProtocol::NMEA; }
+const char* protocolName() { return protocolNameStr(s_protocol); }
 
 } // namespace gps_bh880

@@ -295,20 +295,36 @@ bool initGPS() {
     Serial.printf("[GPS] UART: TX=GPIO%d, RX=GPIO%d\n",
                   system_config::pins::GPS_TX,
                   system_config::pins::GPS_RX);
-    Serial.println("[GPS] Auto-detecting baud rate...");
 
-    // Use Serial1 for GPS communication
-    // Pass baud=0 to auto-detect the module's baud rate
-    // BH-880 module: auto-detects between 9600 and 115200 baud
-    gps_bh880::begin(0,                           // Auto-detect baud rate
-                     system_config::pins::GPS_RX, // ESP32 RX = GPIO 44
-                     system_config::pins::GPS_TX); // ESP32 TX = GPIO 43
+    const auto& gps_settings = settings_manager::getSettings();
+    if (gps_settings.gps_module_configured) {
+        // Module pinned via the first-boot picker / Settings > GPS — skip protocol
+        // detection entirely, single-pass baud scan only for the known protocol.
+        gps_bh880::GpsModule module = (gps_settings.gps_module_type == 1)
+                                           ? gps_bh880::GpsModule::LC76G_NMEA
+                                           : gps_bh880::GpsModule::BH880_UBX;
+        Serial.printf("[GPS] Module pinned: %s\n",
+                      gps_settings.gps_module_type == 1 ? "LC76G (NMEA/PAIR)" : "BH-880 (UBX)");
+        gps_bh880::beginWithProtocol(module,
+                                     system_config::pins::GPS_RX,
+                                     system_config::pins::GPS_TX);
+    } else {
+        // Never configured (fresh flash / pre-upgrade NVS) — full two-pass auto-detect,
+        // same as always. main.cpp shows the one-time picker after this returns, using
+        // whatever got detected here to pre-fill it.
+        Serial.println("[GPS] No module pinned yet — auto-detecting baud rate and protocol...");
+        gps_bh880::begin(0,                           // Auto-detect baud rate + protocol
+                         system_config::pins::GPS_RX, // ESP32 RX = GPIO 44
+                         system_config::pins::GPS_TX); // ESP32 TX = GPIO 43
+    }
 
     // Allow GPS module to boot before sending configuration commands
     delay(200);
 
-    Serial.println("[GPS] BH-880 (B1301N) initialization complete");
-    Serial.println("[GPS] All constellations enabled by default (GPS/GLONASS/BDS/Galileo/QZSS)");
+    Serial.printf("[GPS] Module initialization complete — protocol: %s\n", gps_bh880::protocolName());
+    if (!gps_bh880::isNmeaProtocol()) {
+        Serial.println("[GPS] All constellations enabled by default (GPS/GLONASS/BDS/Galileo/QZSS)");
+    }
 
     // ===========================================================================
     // FAST FIX: Hot/Warm Start based on saved position
