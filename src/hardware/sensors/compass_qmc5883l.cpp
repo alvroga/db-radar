@@ -1,4 +1,14 @@
+// This file is the single public compass entry point for the whole codebase (see the
+// ChipType comment in compass_qmc5883l.h) -- it now orchestrates either a QMC5883L
+// (BH-880) or an HMC5883L (BN-880, compass_hmc5883l.cpp) depending on the pinned GPS
+// module, even though the filename/namespace still says "qmc5883l". Kept unrenamed
+// deliberately: every other caller (task_manager.cpp, settings_screen.cpp,
+// navigation.cpp, diagnostics.cpp, tilt_bench.cpp) already calls compass_qmc5883l::,
+// and a rename would touch all of them for no functional gain -- see the "internal
+// dispatch, not a public rename" ADR. Calibration, health classification, and the
+// heading formula below are chip-agnostic and unaffected by which chip is active.
 #include "compass_qmc5883l.h"
+#include "compass_hmc5883l.h"
 #include "i2c_manager.h"
 #include <math.h>
 
@@ -25,6 +35,10 @@ namespace {
 
     bool initialized = false;
 
+    // Which chip begin() was last told to talk to -- remembered so reset() (called from
+    // task_manager.cpp's I2C recovery paths with no arguments) knows what to re-init as.
+    compass_qmc5883l::ChipType active_chip = compass_qmc5883l::ChipType::QMC5883L;
+
     // Level 1 health classification state (docs/compass_calibration_foundation.md §5).
     // Single instance -- there is exactly one compass on this board.
     float    health_h_mag_ema  = 0.0f;
@@ -35,7 +49,15 @@ namespace {
 
 namespace compass_qmc5883l {
 
-bool begin() {
+bool begin(ChipType chip) {
+    active_chip = chip;
+    initialized = false;
+
+    if (chip == ChipType::HMC5883L) {
+        initialized = compass_hmc5883l::begin();
+        return initialized;
+    }
+
     // Verify chip ID
     uint8_t chip_id = 0;
     if (!i2c_manager::readByte(i2c_manager::COMPASS_DEVICE, REG_CHIP_ID, chip_id)) {
@@ -72,12 +94,23 @@ bool begin() {
 }
 
 bool reset() {
+    if (active_chip == ChipType::HMC5883L) {
+        // The HMC5883L has no documented soft-reset register bit (unlike the QMC5883L's
+        // CONTROL2 bit7) -- re-running begin() re-applies the same config registers,
+        // which is the HMC5883L datasheet's own recommended recovery.
+        Serial.println("[COMPASS] Re-initializing HMC5883L...");
+        initialized = false;
+        bool ok = begin(ChipType::HMC5883L);
+        Serial.println(ok ? "[COMPASS] Re-init successful" : "[COMPASS] Re-init failed — device may need power cycle");
+        return ok;
+    }
+
     Serial.println("[COMPASS] Sending soft reset (CONTROL2 bit7)...");
     initialized = false;
     // Writing 0x80 to CONTROL2 triggers chip soft-reset
     i2c_manager::writeByte(i2c_manager::COMPASS_DEVICE, REG_CONTROL2, 0x80);
     delay(10);  // Datasheet: allow 5ms for reset to complete
-    bool ok = begin();
+    bool ok = begin(ChipType::QMC5883L);
     if (ok) {
         Serial.println("[COMPASS] Soft reset successful, re-initialized");
     } else {
@@ -88,6 +121,9 @@ bool reset() {
 
 bool isReady() {
     if (!initialized) return false;
+    if (active_chip == ChipType::HMC5883L) {
+        return compass_hmc5883l::isReady();
+    }
     uint8_t status = 0;
     if (!i2c_manager::readByte(i2c_manager::COMPASS_DEVICE, REG_STATUS, status)) {
         return false;
@@ -98,29 +134,38 @@ bool isReady() {
 bool read(CompassData& out) {
     if (!initialized) return false;
 
-    // Check status register
-    uint8_t status = 0;
-    if (!i2c_manager::readByte(i2c_manager::COMPASS_DEVICE, REG_STATUS, status)) {
-        return false;
+    if (active_chip == ChipType::HMC5883L) {
+        if (!compass_hmc5883l::readRaw(out.x_raw, out.y_raw, out.z_raw, out.overflow)) {
+            return false;
+        }
+    } else {
+        // Check status register
+        uint8_t status = 0;
+        if (!i2c_manager::readByte(i2c_manager::COMPASS_DEVICE, REG_STATUS, status)) {
+            return false;
+        }
+
+        if (!(status & STATUS_DRDY)) {
+            return false;  // No new data available
+        }
+
+        // Read 6 bytes of XYZ data
+        uint8_t data[6];
+        if (!i2c_manager::read(i2c_manager::COMPASS_DEVICE, REG_DATA, data, 6)) {
+            return false;
+        }
+
+        // Parse raw values (little-endian)
+        out.x_raw = (int16_t)(data[1] << 8 | data[0]);
+        out.y_raw = (int16_t)(data[3] << 8 | data[2]);
+        out.z_raw = (int16_t)(data[5] << 8 | data[4]);
+
+        // Check overflow
+        out.overflow = (status & STATUS_OVL) != 0;
     }
 
-    if (!(status & STATUS_DRDY)) {
-        return false;  // No new data available
-    }
-
-    // Read 6 bytes of XYZ data
-    uint8_t data[6];
-    if (!i2c_manager::read(i2c_manager::COMPASS_DEVICE, REG_DATA, data, 6)) {
-        return false;
-    }
-
-    // Parse raw values (little-endian)
-    out.x_raw = (int16_t)(data[1] << 8 | data[0]);
-    out.y_raw = (int16_t)(data[3] << 8 | data[2]);
-    out.z_raw = (int16_t)(data[5] << 8 | data[4]);
-
-    // Check overflow
-    out.overflow = (status & STATUS_OVL) != 0;
+    // From here on, chip-agnostic -- both chips have populated x_raw/y_raw/z_raw/overflow
+    // above, and calibration/heading math treats them identically.
 
     // Apply hard-iron calibration offsets. cal_z_offset comes from the calibration overlay's
     // tumble/figure-8 step (WP-5) -- a flat 360 spin alone cannot calibrate Z, since the axis never

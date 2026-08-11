@@ -68,7 +68,7 @@ const Stats& getStats();
 // this exists because a wedge that starts on ONE device (e.g. a marginal compass connection)
 // looks identical to Stats:: until it's bad enough to fail everything — by then the ramp
 // that would have identified the culprit is gone.
-static constexpr int NUM_DEVICES = 6;
+static constexpr int NUM_DEVICES = 7;
 struct DeviceStatSnapshot {
     const char* name = "";
     uint8_t addr = 0;
@@ -78,7 +78,7 @@ struct DeviceStatSnapshot {
     uint32_t max_latency_us = 0;   // worst single transaction since boot
     uint32_t ms_since_last_fail = 0xFFFFFFFF;  // 0xFFFFFFFF = never failed
 };
-// Fills out[0..NUM_DEVICES-1] in IMU_LOW, IMU_HIGH, RTC, TOUCH, EXIO, COMPASS order.
+// Fills out[0..NUM_DEVICES-1] in IMU_LOW, IMU_HIGH, RTC, TOUCH, EXIO, COMPASS, COMPASS_HMC order.
 void getDeviceStats(DeviceStatSnapshot out[NUM_DEVICES]);
 
 // Common device handles (defined in i2c_manager.cpp, registered at init)
@@ -88,6 +88,10 @@ extern DeviceHandle RTC_DEVICE;       // 0x51
 extern DeviceHandle TOUCH_DEVICE;     // 0x15
 extern DeviceHandle EXIO_DEVICE;      // 0x20
 extern DeviceHandle COMPASS_DEVICE;   // 0x0D (QMC5883L on BH-880)
+extern DeviceHandle COMPASS_DEVICE_HMC; // 0x1E (HMC5883L on BN-880) — registered unconditionally
+                                         // like every other device handle here regardless of
+                                         // which module is actually pinned; only the pinned
+                                         // chip's driver ever talks to it (see compass_qmc5883l.cpp).
 
 // TCA9554 IO Expander (was exio.cpp, now consolidated here)
 namespace exio {

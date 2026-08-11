@@ -29,18 +29,20 @@ void clear_initialized();
 
 **Queued access from the I2C Task**: in addition to the direct `rtc::read()`/`rtc::write()` calls above (used at boot and from diagnostic tooling), `task_manager.cpp` also handles RTC reads and a GPS-driven one-shot `RTC_TIME_SET` as queued `I2COperation` requests, consistent with this project's queue-based I2C access pattern for cross-task safety (see the Task Management section of [CLAUDE.md](../CLAUDE.md)).
 
-## GPS (Beitian BH-880, or LC76G)
+## GPS (Beitian BH-880, LC76G, or BN-880)
 
-Full hardware detail, wiring, and the dual-protocol design: [`bh880_module.md`](bh880_module.md). Summary relevant to integration:
+Full hardware detail, wiring, and the multi-module design: [`bh880_module.md`](bh880_module.md). Summary relevant to integration:
 
-- UART on GPIO43 (TX)/GPIO44 (RX). One firmware image supports either module — **BH-880** (UBX binary
-  protocol, NAV-PVT) or **LC76G** (NMEA/PAIR text protocol) — auto-identified on first boot, then
-  pinned as a persisted choice (Settings > GPS) so every later boot skips detection entirely. See
+- UART on GPIO43 (TX)/GPIO44 (RX). One firmware image supports all three modules — **BH-880** (UBX
+  binary protocol, NAV-PVT), **LC76G**, or **BN-880** (both NMEA/PAIR text protocol, same parser) —
+  auto-identified on first boot, then pinned as a persisted choice (Settings > GPS, or serial `gps
+  module set ...`) so every later boot skips detection entirely. See
   [ADR-0032](adr/0032-pinned-gps-module-not-always-auto-detect.md).
-- Position only — heading is **not** derived from GPS on either module. On a BH-880, the QMC5883L
-  compass on the same module is the sole heading source (see the Navigation Modes section of
-  [CLAUDE.md](../CLAUDE.md)); GPS heading fusion was removed from the codebase entirely. The LC76G has
-  no compass at all, so a board running one is forced to North-Up navigation automatically.
+- Position only — heading is **not** derived from GPS on any module. On a BH-880 or BN-880, a compass
+  on the same module is the sole heading source (QMC5883L or HMC5883L respectively, chosen from the
+  pinned module with no runtime probing — see the Navigation Modes section of [CLAUDE.md](../CLAUDE.md));
+  GPS heading fusion was removed from the codebase entirely. The LC76G has no compass at all, so a
+  board running one is forced to North-Up navigation automatically.
 - Parsing entry point: `src/hardware/sensors/gps_bh880.cpp`, namespace `gps_bh880` (handles both
   protocols despite the filename — kept for call-site stability, see the module doc).
 - The compass side of the BH-880 shares the I2C bus (`COMPASS_DEVICE`, address `0x0D`) — see [`i2c.md`](i2c.md) for the full device list and [`compass.md`](compass.md) for compass-specific calibration/tilt-compensation detail.

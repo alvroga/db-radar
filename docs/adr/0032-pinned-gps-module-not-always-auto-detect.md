@@ -75,3 +75,59 @@ factored out for reuse). Changing the pin (Settings > GPS) requires a reboot to 
   same change (unrelated to the pinning decision itself, but done together) — the web flasher gives
   full reflash control now, making those buttons redundant UI weight; the underlying commands remain
   available via the serial `gps hot|warm|cold|reset` commands for anyone who wants them.
+
+## Addendum 2026-08-11: BN-880 as a third pinned option
+
+**Context**: a field report (GitHub issue #1) found a board using a **BN-880** module — a
+visually/name-similar but different module from the Beitian BH-880 this project targets. BN-880
+speaks the same NMEA/PAIR protocol as the LC76G (confirmed on real hardware: the existing two-pass
+`detectBaud()` finds it via the NMEA pass with zero code changes), but commonly carries an
+**HMC5883L** magnetometer (I2C `0x1E`) rather than the BH-880's QMC5883L (`0x0D`) — a chip this
+firmware had no driver for at all.
+
+**Decision**: added `GpsModule::BN880_NMEA` as a third pinned value, reusing the NMEA protocol path
+exactly (no new GPS parser). The picker and Settings > GPS dropdown both grew a third option. The one
+genuinely new piece is a low-level `compass_hmc5883l` driver, dispatched to internally from
+`compass_qmc5883l.cpp` — see the separate ADR on that dispatch design for why it wasn't a rename.
+
+**No auto-detection for the compass chip, at all, ever — including on an unconfigured first boot.**
+This extends the "pin the physical fact once" reasoning above one step further than GPS baud/protocol
+detection already goes: `initCompass()` doesn't attempt any chip until `gps_module_configured` is
+true. An earlier draft considered "try QMC5883L, fall back to HMC5883L" as a first-boot convenience —
+rejected before implementation, explicitly, because the module lineup won't stay fixed at two
+compass-bearing types forever, and an auto-probe can't be trusted to disambiguate a future module that
+might, say, share an I2C address with an existing chip while behaving differently. Only an explicit,
+physical, user-confirmed choice can. (This is the same shape of reasoning as the two-pass-not-
+interleaved GPS detection above — a plausible shortcut was rejected because it can't be trusted to
+stay correct as more real-world variety shows up, not because it's slow.)
+
+**New serial escape hatch**: `gps module`, `gps module set bh880|lc76g|bn880`,
+`gps module reset` (`src/utils/diagnostics.cpp`) — lets the pin be inspected, changed, or cleared
+(re-showing the first-boot picker on next reboot) without touch. Doubles as a real fallback: the board
+that originally reported the compass issue also had a dead touch controller, which would otherwise
+make Settings > GPS physically unreachable.
+
+**A real bug found by this field test, unrelated to the chip work itself**: picking a module in the
+first-boot picker crashed (`Guru Meditation Error: LoadProhibited`) the first time it was actually
+exercised on hardware — `showGpsModulePickerBlocking()` deleted the picker screen while it was still
+LVGL's active screen, before the loading screen replaced it. Fixed by returning the picker object and
+deleting it only after `lv_scr_load(ui.screen_loading)` in `main.cpp`. See CHANGELOG.md and the
+project's existing LVGL screen-lifecycle rule (never delete the active screen before its replacement
+loads) — this is that rule's second known violation, not a new class of bug.
+
+**A second real bug, this one caused directly by the no-auto-probe decision above**: continuing the
+field test onto a real BH-880 board, picking BH-880 in the first-boot picker left the compass
+completely uninitialized for that entire session — Settings correctly showed BH-880 pinned, but there
+was no N indicator and Heading-Up stayed unavailable, indistinguishable from an LC76G (no-compass)
+board. Cause: `device_manager::initCompass()` runs during Phase 2, before the display exists and
+therefore before the picker can possibly have shown yet; with `gps_module_configured` still `false` at
+that point, the no-auto-probe gating (correctly, by design) skipped compass entirely for that boot —
+but nothing re-ran `initCompass()` after the picker saved the pin later in the same session. The
+*prior* code (pre-BN-880) never had this gap, because it always attempted the QMC5883L unconditionally
+on every boot regardless of any pin — this was a regression introduced by adding the gating itself.
+Fixed by having the first-boot picker reboot immediately after saving the selection
+(`esp_restart()` in `showGpsModulePickerBlocking()`), the same way Settings > GPS's button and `gps
+module set` already do — the pin is now guaranteed to exist before `initCompass()` ever runs again.
+This means picking a module on first boot now costs one extra automatic reboot; judged an acceptable,
+small, one-time cost for a compass that actually works afterward. Field-verified on the same BH-880
+board: `Compass: OK`, prior hard-iron calibration reloaded from NVS unchanged.

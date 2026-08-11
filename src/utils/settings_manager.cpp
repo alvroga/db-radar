@@ -416,14 +416,73 @@ bool saveHeadingUpMode(bool heading_up) {
 
 bool saveGPSModuleSelection(uint8_t module_type) {
     if (!is_initialized) return false;
+    bool module_changed = g_cached_settings.gps_module_configured &&
+                           g_cached_settings.gps_module_type != module_type;
     NVS_SAVE_OPEN();
     nvs_set_u8(h, KEY_GPS_MODULE_TYPE, module_type);
     nvs_setbool(h, KEY_GPS_MODULE_CFG, true);
+    if (module_changed) {
+        // Compass calibration (hard-iron offsets + H0 baseline) is specific to one
+        // physical chip on one physical board. BH-880 (QMC5883L) and BN-880 (HMC5883L)
+        // don't share a calibration space -- carrying one chip's offsets over to the
+        // other after a module switch would silently corrupt heading output rather than
+        // just being "uncalibrated". Reset on ANY module change, not just a chip-type
+        // change, since this is a rare, deliberate, reboot-requiring action anyway.
+        nvs_set_i16(h, KEY_COMPASS_CAL_X, 0);
+        nvs_set_i16(h, KEY_COMPASS_CAL_Y, 0);
+        nvs_set_i16(h, KEY_COMPASS_CAL_Z, 0);
+        nvs_setbool(h, KEY_COMPASS_CALED, false);
+        nvs_setfloat(h, KEY_COMPASS_CAL_H0, 0.0f);
+        nvs_setfloat(h, KEY_COMPASS_CAL_RESID, 0.0f);
+        nvs_setfloat(h, KEY_COMPASS_CAL_AXR, 1.0f);
+    }
     NVS_SAVE_CLOSE();
     g_cached_settings.gps_module_type = module_type;
     g_cached_settings.gps_module_configured = true;
-    Serial.printf("[SETTINGS] GPS module pinned: %s (reboot to apply)\n",
-                  module_type == 1 ? "LC76G (NMEA/PAIR)" : "BH-880 (UBX)");
+    if (module_changed) {
+        g_cached_settings.compass_cal_x = 0;
+        g_cached_settings.compass_cal_y = 0;
+        g_cached_settings.compass_cal_z = 0;
+        g_cached_settings.compass_calibrated = false;
+        g_cached_settings.compass_cal_h0 = 0.0f;
+        g_cached_settings.compass_cal_residual_pct = 0.0f;
+        g_cached_settings.compass_cal_axis_ratio = 1.0f;
+        Serial.println("[SETTINGS] GPS module changed — compass calibration reset");
+    }
+    // 0=BH-880 (UBX), 1=LC76G (NMEA/PAIR), 2=BN-880 (NMEA) — keep in sync with
+    // gps_bh880::GpsModule / gps_bh880::moduleTypeName(). Not calling that helper
+    // directly: settings_manager stays independent of hardware driver headers.
+    const char* name = (module_type == 1) ? "LC76G (NMEA/PAIR)"
+                      : (module_type == 2) ? "BN-880 (NMEA)"
+                      : "BH-880 (UBX)";
+    Serial.printf("[SETTINGS] GPS module pinned: %s (reboot to apply)\n", name);
+    return true; }
+
+bool resetGPSModuleConfiguration() {
+    if (!is_initialized) return false;
+    NVS_SAVE_OPEN();
+    nvs_setbool(h, KEY_GPS_MODULE_CFG, false);
+    // Same reasoning as saveGPSModuleSelection()'s module_changed branch — a fresh pick
+    // after this reset may select a different compass chip, and this call's own flag
+    // clear would otherwise mask that change from saveGPSModuleSelection()'s own detection
+    // (it compares against gps_module_configured, which we're about to clear).
+    nvs_set_i16(h, KEY_COMPASS_CAL_X, 0);
+    nvs_set_i16(h, KEY_COMPASS_CAL_Y, 0);
+    nvs_set_i16(h, KEY_COMPASS_CAL_Z, 0);
+    nvs_setbool(h, KEY_COMPASS_CALED, false);
+    nvs_setfloat(h, KEY_COMPASS_CAL_H0, 0.0f);
+    nvs_setfloat(h, KEY_COMPASS_CAL_RESID, 0.0f);
+    nvs_setfloat(h, KEY_COMPASS_CAL_AXR, 1.0f);
+    NVS_SAVE_CLOSE();
+    g_cached_settings.gps_module_configured = false;
+    g_cached_settings.compass_cal_x = 0;
+    g_cached_settings.compass_cal_y = 0;
+    g_cached_settings.compass_cal_z = 0;
+    g_cached_settings.compass_calibrated = false;
+    g_cached_settings.compass_cal_h0 = 0.0f;
+    g_cached_settings.compass_cal_residual_pct = 0.0f;
+    g_cached_settings.compass_cal_axis_ratio = 1.0f;
+    Serial.println("[SETTINGS] GPS module configuration reset — picker will show on next boot");
     return true; }
 
 bool saveHUDAutoHide(bool enabled) {

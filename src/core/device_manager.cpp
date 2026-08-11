@@ -300,11 +300,9 @@ bool initGPS() {
     if (gps_settings.gps_module_configured) {
         // Module pinned via the first-boot picker / Settings > GPS — skip protocol
         // detection entirely, single-pass baud scan only for the known protocol.
-        gps_bh880::GpsModule module = (gps_settings.gps_module_type == 1)
-                                           ? gps_bh880::GpsModule::LC76G_NMEA
-                                           : gps_bh880::GpsModule::BH880_UBX;
+        gps_bh880::GpsModule module = gps_bh880::moduleFromType(gps_settings.gps_module_type);
         Serial.printf("[GPS] Module pinned: %s\n",
-                      gps_settings.gps_module_type == 1 ? "LC76G (NMEA/PAIR)" : "BH-880 (UBX)");
+                      gps_bh880::moduleTypeName(gps_settings.gps_module_type));
         gps_bh880::beginWithProtocol(module,
                                      system_config::pins::GPS_RX,
                                      system_config::pins::GPS_TX);
@@ -388,14 +386,52 @@ bool initGPS() {
 }
 
 bool initCompass() {
-    Serial.println("[COMPASS] Initializing QMC5883L on BH-880 module...");
+    const auto& gps_settings = settings_manager::getSettings();
 
-    if (!i2c_manager::ping(i2c_manager::COMPASS_DEVICE)) {
-        Serial.println("[COMPASS] Device not found at 0x0D");
+    // No auto-probing here, ever — see compass_qmc5883l.h's ChipType comment and
+    // docs/adr/0032-pinned-gps-module-not-always-auto-detect.md's BN-880 addendum. On an
+    // unconfigured first boot (module not yet pinned via the picker), compass is simply
+    // unavailable for that one session — forced North-Up applies for that boot only,
+    // same as it already does for any board that genuinely has no compass.
+    if (!gps_settings.gps_module_configured) {
+        Serial.println("[COMPASS] GPS module not yet pinned — compass unavailable until first-boot picker runs");
         return false;
     }
 
-    if (!compass_qmc5883l::begin()) {
+    gps_bh880::GpsModule module = gps_bh880::moduleFromType(gps_settings.gps_module_type);
+
+    compass_qmc5883l::ChipType chip;
+    i2c_manager::DeviceHandle* dev;
+    uint8_t addr;
+    const char* chip_name;
+    switch (module) {
+        case gps_bh880::GpsModule::BH880_UBX:
+            chip = compass_qmc5883l::ChipType::QMC5883L;
+            dev = &i2c_manager::COMPASS_DEVICE;
+            addr = 0x0D;
+            chip_name = "QMC5883L";
+            break;
+        case gps_bh880::GpsModule::BN880_NMEA:
+            chip = compass_qmc5883l::ChipType::HMC5883L;
+            dev = &i2c_manager::COMPASS_DEVICE_HMC;
+            addr = 0x1E;
+            chip_name = "HMC5883L";
+            break;
+        case gps_bh880::GpsModule::LC76G_NMEA:
+        default:
+            Serial.println("[COMPASS] Pinned module has no compass (LC76G) — skipping");
+            return false;
+    }
+
+    Serial.printf("[COMPASS] Initializing %s (pinned module: %s)...\n",
+                  chip_name, gps_bh880::moduleTypeName(gps_settings.gps_module_type));
+
+    if (!i2c_manager::ping(*dev)) {
+        Serial.printf("[COMPASS] Device not found at 0x%02X\n", addr);
+        return false;
+    }
+
+    if (!compass_qmc5883l::begin(chip)) {
         Serial.println("[COMPASS] Initialization failed");
         return false;
     }

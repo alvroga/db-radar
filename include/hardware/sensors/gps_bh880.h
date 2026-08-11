@@ -36,7 +36,19 @@ struct GPSData {
 namespace gps_bh880 {
     // Which physical GPS module to talk to — see settings_manager's gps_module_type/
     // gps_module_configured (pinned via the one-time first-boot picker or Settings > GPS).
-    enum class GpsModule : uint8_t { BH880_UBX = 0, LC76G_NMEA = 1 };
+    // BN880_NMEA reuses the exact same NMEA/PAIR parsing path as LC76G_NMEA (no separate
+    // protocol handler) — the value exists to drive compass chip selection
+    // (device_manager::initCompass()) and UI labeling, not a new GPS parser.
+    enum class GpsModule : uint8_t { BH880_UBX = 0, LC76G_NMEA = 1, BN880_NMEA = 2 };
+
+    // Single source of truth for settings_manager's persisted gps_module_type -> GpsModule
+    // mapping, and its display name. Every call site that used to inline this as a ternary
+    // (device_manager.cpp, main.cpp's picker, diagnostics.cpp) shares these instead — a
+    // duplicated inline mapping is exactly what caused beginWithProtocol() to misclassify
+    // BN880_NMEA as UBX before this existed (field-caught 2026-08-11). Unrecognized values
+    // fall back to BH880_UBX/"BH-880 (UBX)".
+    GpsModule moduleFromType(uint8_t type);
+    const char* moduleTypeName(uint8_t type);
 
     // Start GPS on ESP-IDF UART driver (UART1, RX=GPIO44, TX=GPIO43 by default)
     // If baud=0, auto-detects both baud rate AND protocol (UBX vs NMEA/PAIR) — see

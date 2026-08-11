@@ -29,6 +29,7 @@ DeviceHandle RTC_DEVICE      = {0x51, "RTC",      nullptr};
 DeviceHandle TOUCH_DEVICE    = {0x15, "TOUCH",    nullptr};
 DeviceHandle EXIO_DEVICE     = {0x20, "EXIO",     nullptr};
 DeviceHandle COMPASS_DEVICE  = {0x0D, "COMPASS",  nullptr};
+DeviceHandle COMPASS_DEVICE_HMC = {0x1E, "COMPASS_HMC", nullptr};
 
 // ============================================================================
 // Per-device forensic stats — see DeviceStatSnapshot in the header for why
@@ -52,6 +53,7 @@ static int deviceIndex(DeviceHandle& dev) {
     if (&dev == &TOUCH_DEVICE)    return 3;
     if (&dev == &EXIO_DEVICE)     return 4;
     if (&dev == &COMPASS_DEVICE)  return 5;
+    if (&dev == &COMPASS_DEVICE_HMC) return 6;
     return -1;
 }
 
@@ -74,7 +76,7 @@ static void recordDeviceOp(DeviceHandle& dev, bool success, uint32_t latency_us)
 void getDeviceStats(DeviceStatSnapshot out[NUM_DEVICES]) {
     static DeviceHandle* order[NUM_DEVICES] = {
         &IMU_DEVICE_LOW, &IMU_DEVICE_HIGH, &RTC_DEVICE,
-        &TOUCH_DEVICE, &EXIO_DEVICE, &COMPASS_DEVICE
+        &TOUCH_DEVICE, &EXIO_DEVICE, &COMPASS_DEVICE, &COMPASS_DEVICE_HMC
     };
     uint32_t now = millis();
     for (int i = 0; i < NUM_DEVICES; i++) {
@@ -224,6 +226,7 @@ bool init(const Config& config) {
     registerDevice(TOUCH_DEVICE,    config.frequency);
     registerDevice(EXIO_DEVICE,     config.frequency);
     registerDevice(COMPASS_DEVICE,  config.frequency);
+    registerDevice(COMPASS_DEVICE_HMC, config.frequency);
 
     Serial.printf("[I2C] Initialized: SDA=%d, SCL=%d, freq=%luHz\n",
                   config.sda_pin, config.scl_pin, (unsigned long)config.frequency);
@@ -458,7 +461,7 @@ bool reinit(const Config& config) {
     // Remove all registered device handles before deleting the bus
     DeviceHandle* devices[] = {
         &IMU_DEVICE_LOW, &IMU_DEVICE_HIGH, &RTC_DEVICE,
-        &TOUCH_DEVICE, &EXIO_DEVICE, &COMPASS_DEVICE
+        &TOUCH_DEVICE, &EXIO_DEVICE, &COMPASS_DEVICE, &COMPASS_DEVICE_HMC
     };
     for (auto* dev : devices) {
         if (dev->_handle != nullptr) {

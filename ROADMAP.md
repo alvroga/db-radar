@@ -14,17 +14,23 @@ None currently open. See Resolved below for FT-03, FT-05, FT-09.
 
 ## Planned
 
-### Dual GPS Module Support (BH-880 + LC76G) — built, not yet field-tested
+### Multi GPS Module Support (BH-880 + LC76G + BN-880) — BH-880/LC76G field-verified, BN-880 not yet
 **Severity**: Feature — restores LC76G compatibility (dropped when the project moved to the BH-880)
-without needing a separate build
+without needing a separate build, plus BN-880 support requested via a field report (GitHub issue #1)
 
-**Status**: implemented on the `feature/dual-gps-module` branch, deliberately **not** merged into
-`initial-release` — build-verified clean but not yet tested on real hardware for either module.
-`gps_bh880.cpp` now speaks both UBX (BH-880) and NMEA/PAIR (LC76G), auto-identified on first boot and
-then pinned as a persisted choice (Settings > GPS) rather than re-detected every boot. A board with no
-compass (LC76G-only) is forced to North-Up automatically. See
-[CHANGELOG.md](CHANGELOG.md) and [ADR-0032](docs/adr/0032-pinned-gps-module-not-always-auto-detect.md)
-for full detail. Merge into `initial-release` once verified on both a BH-880 and an LC76G board.
+**Status**: implemented on the `feature/multi-gps-module` branch (renamed from `feature/dual-gps-module`
+2026-08-11), deliberately **not** merged into `initial-release`. `gps_bh880.cpp` speaks UBX (BH-880) and
+NMEA/PAIR (LC76G, BN-880), auto-identified on first boot and then pinned as a persisted choice
+(Settings > GPS, or serial `gps module set ...`) rather than re-detected every boot — compass chip
+selection is never auto-probed, only ever a direct consequence of the pin. A board with no compass
+(LC76G-only) is forced to North-Up automatically; BH-880 and BN-880 both get Heading-Up. LC76G and
+BH-880 paths **field-verified on real hardware 2026-08-11** (also caught and fixed two real bugs: a
+first-boot-picker crash, and the compass staying uninitialized after picking BH-880 on a fresh board's
+first boot — see CHANGELOG.md). BN-880/HMC5883L path is build-verified only — no BN-880 hardware
+available yet. See
+[CHANGELOG.md](CHANGELOG.md), [ADR-0032](docs/adr/0032-pinned-gps-module-not-always-auto-detect.md),
+and [ADR-0033](docs/adr/0033-compass-internal-dispatch-not-rename.md) for full detail. Merge into
+`initial-release` once BH-880 and BN-880 are also field-verified.
 
 ---
 

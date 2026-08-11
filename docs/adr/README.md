@@ -62,7 +62,8 @@ date — sort on that for chronology, not on the filename.
 | [0029](0029-custom-canvas-fixed-waypoint-icon.md) | Custom `lv_canvas` icon for the fixed-waypoint status indicator, not an `LV_SYMBOL_*` glyph or image asset | 2026-08-07 | Accepted |
 | [0030](0030-release-pipeline-build-time-pages-not-committed-binaries.md) | Release pipeline builds once, publishes to both GitHub Releases and GitHub Pages — no binaries committed to git | 2026-08-08 | Accepted |
 | [0031](0031-single-part-manifest-not-multi-part.md) | ESP Web Tools manifest uses one merged-binary part at offset 0, not four separate parts | 2026-08-08 | Accepted |
-| [0032](0032-pinned-gps-module-not-always-auto-detect.md) | Pinned GPS module selection (first-boot picker), not always-auto-detect | 2026-08-10 | Accepted |
+| [0032](0032-pinned-gps-module-not-always-auto-detect.md) | Pinned GPS module selection (first-boot picker), not always-auto-detect — 2026-08-11 addendum adds BN-880 as a third option | 2026-08-10 | Accepted |
+| [0033](0033-compass-internal-dispatch-not-rename.md) | Compass internal chip dispatch (QMC5883L/HMC5883L), not a public namespace rename | 2026-08-11 | Accepted |
 
 ## Status
 

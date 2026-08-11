@@ -143,6 +143,42 @@ disp_drv.flush_cb = my_disp_flush;
 disp_drv.full_refresh = 1;  // Recommended for stability
 ```
 
+### Screen Lifecycle — Never Delete the Active Screen Before Its Replacement Loads
+
+Two confirmed incidents, same underlying rule, two different call sites:
+
+1. **`navigation.cpp`'s `goToSettingsScreen()`, 2026-08-01/02** — three separate failures that all
+   turned out to be one rule violated two ways: (a) deleting `lv_scr_act()` before the replacement
+   screen loaded corrupted LVGL's active-screen bookkeeping and crashed the next `lv_scr_load()`
+   (`Guru Meditation Error: LoadProhibited` inside `lv_obj_get_local_style_prop`); (b) building the
+   full replacement screen *before* deleting the outgoing one meant two full-size screen trees existed
+   in LVGL's 64KB pool (`LV_MEM_SIZE`, `include/ui/lv_conf.h`) at once, which doesn't fail cleanly —
+   it corrupts LVGL's internal free-list in whatever way the next allocation happens to hit. Observed
+   as two different symptoms from the identical cause: a near-null pointer crash inside
+   `lv_label_create` one time, a UI_Task hang (`lv_mem_alloc()` spinning forever, no panic) another.
+2. **`main.cpp`'s `showGpsModulePickerBlocking()`, field-caught 2026-08-11** — the exact same
+   `LoadProhibited`/`lv_obj_get_local_style_prop` crash, from the exact same mistake: the first-boot
+   GPS module picker deleted itself (`lv_obj_del(picker)`) immediately after being the active screen,
+   before `main.cpp` had loaded the loading screen to replace it. Fixed by returning the picker object
+   instead and deleting it only after `lv_scr_load(ui.screen_loading)` runs. See
+   [ADR-0032](adr/0032-pinned-gps-module-not-always-auto-detect.md)'s 2026-08-11 addendum.
+
+**The rule**: never delete the object LVGL currently considers the active screen before
+`lv_scr_load()` of its replacement has already run — and never let two full-size screen trees exist
+in the pool at once either. These two constraints can be in tension (deferring a delete until after
+the replacement loads means both trees are briefly alive together for a large screen). The
+`goToSettingsScreen()` fix that satisfies both: when the outgoing screen is active, load an
+always-valid *lightweight* placeholder first (that project reused the radar screen), delete the old
+tree now that it's no longer active, build the replacement fresh (only one full tree ever alive), then
+load it. A momentary screen swap with nothing in between that yields to `lv_task_handler()` never
+actually reaches the panel, so there's no visible flicker. For a small screen like the GPS picker
+(a handful of labels/buttons, not a multi-tab settings screen), the simpler fix suffices: just load the
+next screen before deleting the outgoing one, accepting a brief moment with both alive — the pool
+pressure that made incident 1 dangerous doesn't apply at this size.
+
+**Generalizes to any future full-screen LVGL rebuild in this project** (waypoint list, field log,
+any new full-screen picker/dialog) — this is not settings-screen-specific or picker-specific.
+
 ## Debugging Tools
 
 ### **Timing Verification**

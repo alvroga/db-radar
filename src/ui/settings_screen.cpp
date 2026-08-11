@@ -999,7 +999,9 @@ void createGPSTab(lv_obj_t* parent) {
     lv_obj_align(module_label, LV_ALIGN_TOP_LEFT, 0, y_offset);
 
     lv_obj_t* module_dropdown = lv_dropdown_create(parent);
-    lv_dropdown_set_options(module_dropdown, "BH-880 (UBX)\nLC76G (NMEA)");
+    // Option order must match gps_bh880::GpsModule / the persisted gps_module_type values
+    // exactly (0=BH-880, 1=LC76G, 2=BN-880) — the dropdown index IS the stored value.
+    lv_dropdown_set_options(module_dropdown, "BH-880 (UBX)\nLC76G (NMEA)\nBN-880 (NMEA)");
     lv_obj_set_width(module_dropdown, 200);
     lv_obj_align(module_dropdown, LV_ALIGN_TOP_LEFT, 130, y_offset);
     lv_dropdown_set_selected(module_dropdown, settings_manager::getSettings().gps_module_type);

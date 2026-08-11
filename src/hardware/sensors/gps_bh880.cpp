@@ -622,21 +622,40 @@ void begin(uint32_t baud, int rxPin, int txPin) {
 }
 
 void beginWithProtocol(GpsModule module, int rxPin, int txPin) {
-  s_protocol = (module == GpsModule::LC76G_NMEA) ? GpsProtocol::NMEA : GpsProtocol::UBX;
+  // BN880_NMEA reuses the LC76G NMEA/PAIR path byte-for-byte — the two module values
+  // differ only in which compass chip device_manager::initCompass() picks, not in GPS
+  // protocol handling.
+  bool isNmea = (module == GpsModule::LC76G_NMEA || module == GpsModule::BN880_NMEA);
+  s_protocol = isNmea ? GpsProtocol::NMEA : GpsProtocol::UBX;
   Serial.printf("[GPS] Module pinned: %s — skipping protocol detection, single-pass baud scan only\n",
                 protocolNameStr(s_protocol));
 
-  uint32_t baud = (module == GpsModule::LC76G_NMEA) ? detectBaudNMEA(rxPin, txPin)
-                                                      : detectBaudUBX(rxPin, txPin);
+  uint32_t baud = isNmea ? detectBaudNMEA(rxPin, txPin) : detectBaudUBX(rxPin, txPin);
   if (baud == 0) {
     Serial.printf("[GPS] No baud rate confirmed %s — falling back to 115200 and trying anyway\n",
                   protocolNameStr(s_protocol));
     baud = 115200;
     // detectBaudUBX()/detectBaudNMEA() only set s_protocol on a confirmed match; a
     // fallback here must not leave it at whatever they left it as (e.g. UNKNOWN).
-    s_protocol = (module == GpsModule::LC76G_NMEA) ? GpsProtocol::NMEA : GpsProtocol::UBX;
+    s_protocol = isNmea ? GpsProtocol::NMEA : GpsProtocol::UBX;
   }
   configureAndEnable(baud, rxPin, txPin);
+}
+
+GpsModule moduleFromType(uint8_t type) {
+  switch (type) {
+    case 1: return GpsModule::LC76G_NMEA;
+    case 2: return GpsModule::BN880_NMEA;
+    default: return GpsModule::BH880_UBX;
+  }
+}
+
+const char* moduleTypeName(uint8_t type) {
+  switch (type) {
+    case 1: return "LC76G (NMEA/PAIR)";
+    case 2: return "BN-880 (NMEA)";
+    default: return "BH-880 (UBX)";
+  }
 }
 
 bool read(GPSData &out) {

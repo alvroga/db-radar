@@ -246,8 +246,9 @@ xtensa-esp32s3-elf-addr2line -e .pio/build/db-radar/firmware.elf 0x400D1A3C
 
 ### If the same PC recurs across multiple crashes
 That's a reproducible software bug, not environmental noise — check recent changes, and review the
-code at that address for array bounds, null pointers, or LVGL object lifetime issues (see CLAUDE.md's
-LVGL Screen Lifecycle notes — this is a common source of exactly this crash class).
+code at that address for array bounds, null pointers, or LVGL object lifetime issues (see
+[`docs/display.md`](display.md)'s "Screen Lifecycle" section — deleting the LVGL active screen before
+its replacement loads is a common source of exactly this crash class, confirmed twice in this project).
 
 ### If the PC differs every time
 More consistent with a hardware/environmental cause (power supply dip, battery voltage sag under

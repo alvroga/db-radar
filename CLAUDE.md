@@ -559,31 +559,49 @@ dead leftovers — see the doc for which ones, don't resurrect logic around them
 
 ---
 
-## GPS Module Support: BH-880 (primary) or LC76G
+## GPS Module Support: BH-880 (primary), LC76G, or BN-880
 
-**Status**: Complete, not yet field-tested | [Full Guide](docs/bh880_module.md) | [ADR-0032](docs/adr/0032-pinned-gps-module-not-always-auto-detect.md)
+**Status**: LC76G + BH-880 field-verified 2026-08-11; BN-880 build-verified, not yet field-tested | [Full Guide](docs/bh880_module.md) | [ADR-0032](docs/adr/0032-pinned-gps-module-not-always-auto-detect.md) | [ADR-0033](docs/adr/0033-compass-internal-dispatch-not-rename.md)
 
-One firmware image supports either module (`gps_bh880.cpp`, both protocols). Module identification is
-**two strict sequential passes**, not one interleaved pass — UBX (`detectBaudUBX()`, byte-identical to
-the original BH-880-only algorithm) always runs first across all 6 candidate baud rates; NMEA
-(`detectBaudNMEA()`) is only attempted if that entire pass finds nothing. **Do not merge these back
-into one interleaved loop** — a BH-880 that also emits default NMEA chatter before `begin()` enables
-NAV-PVT could otherwise complete 2 valid NMEA lines before 3 UBX sync pairs, misdetecting it. See
-ADR-0032 for the full reasoning.
+One firmware image supports all three modules (`gps_bh880.cpp`; BN-880 reuses the LC76G NMEA/PAIR path
+byte-for-byte, no separate parser). GPS protocol identification is **two strict sequential passes**,
+not one interleaved pass — UBX (`detectBaudUBX()`, byte-identical to the original BH-880-only
+algorithm) always runs first across all 6 candidate baud rates; NMEA (`detectBaudNMEA()`) is only
+attempted if that entire pass finds nothing. **Do not merge these back into one interleaved loop** — a
+BH-880 that also emits default NMEA chatter before `begin()` enables NAV-PVT could otherwise complete 2
+valid NMEA lines before 3 UBX sync pairs, misdetecting it. See ADR-0032 for the full reasoning.
 
 The module type is a **persisted choice**, not re-detected every boot (`settings_manager`'s
-`gps_module_type`/`gps_module_configured`) — a one-time picker appears on first boot
+`gps_module_type`/`gps_module_configured`) — a one-time 3-button picker appears on first boot
 (`main.cpp::showGpsModulePickerBlocking()`), and every later boot calls
 `gps_bh880::beginWithProtocol()` (single-pass baud scan only, no protocol guessing). Changing the pin
-later is via Settings > GPS, requires a reboot to apply (`esp_restart()`, same pattern as the WiFi/AP
-screens).
+later is via Settings > GPS or serial (`gps module set bh880|lc76g|bn880`, `gps module reset`),
+requires a reboot to apply (`esp_restart()`, same pattern as the WiFi/AP screens). **The first-boot
+picker itself also reboots immediately after saving** — not just later pin changes — because
+`initCompass()` runs during Phase 2, before the picker can possibly have shown; without this reboot a
+freshly-picked BH-880/BN-880 board finishes its first session with the correct pin in Settings but a
+genuinely uninitialized compass (field-caught 2026-08-11, see ADR-0032's addendum). Do not remove this
+reboot to "streamline" first boot.
+
+**Compass chip selection is never auto-probed, at any point, including the unconfigured first boot** —
+only ever a direct, deterministic consequence of the pinned module (BH-880→QMC5883L `0x0D`,
+BN-880→HMC5883L `0x1E`, LC76G→no compass). See ADR-0032's addendum for why a "try one chip, fall back
+to the other" shortcut was rejected even though it would have been convenient.
 
 **LC76G has no compass** — a board with `!device_manager::getDeviceState().compass_ok` is forced to
 North-Up automatically at `ui_manager::init()` (not persisted to NVS — a saved Heading-Up preference
-from a BH-880 session survives if the compass returns), and the Settings nav-mode dropdown is disabled
-rather than offering a Heading-Up option that would silently do nothing.
+survives if the compass returns), and the Settings nav-mode dropdown is disabled rather than offering a
+Heading-Up option that would silently do nothing. This check is generic (just "did compass init
+succeed"), so BN-880 gets Heading-Up automatically like BH-880 does, with no changes needed there.
 
-**Full guide** (detection design, module pinning detail, PAIR command reference, code references): [`docs/bh880_module.md`](docs/bh880_module.md).
+**Two field-caught bugs, both fixed 2026-08-11**: (1) the first-boot picker crashed (`LoadProhibited`)
+the first time it was tapped on real hardware — `lv_obj_del()`'d itself while still LVGL's active
+screen, before the loading screen replaced it; see "Screen Lifecycle" in
+[`docs/display.md`](docs/display.md), this rule's second confirmed violation. (2) picking BH-880 on a
+fresh board's first boot left the compass uninitialized for that whole session despite Settings showing
+the correct pin — see the reboot note above and ADR-0032's addendum.
+
+**Full guide** (detection design, module pinning detail, PAIR command reference, HMC5883L register map, code references): [`docs/bh880_module.md`](docs/bh880_module.md).
 
 ---
 

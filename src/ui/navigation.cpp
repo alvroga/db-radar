@@ -1320,9 +1320,9 @@ void updateRadarDisplay() {
             }
             // else HEALTHY with a good calibration -- text stays null, label hides.
         } else if (settings.compass_calibrated) {
-            text = "Compass: recalibrate?";  // calibrated before H0 tracking existed -- no baseline
+            text = "Compass: recalibrate?"; color = 0xFFAA00;  // calibrated before H0 tracking existed -- no baseline
         } else {
-            text = "Compass: not calibrated";
+            text = "Compass: not calibrated"; color = 0xFFAA00;  // grey here was unreadable against the dark UI
         }
 
         static const char* s_last_text = "";  // pointer compare -- all values above are literals

@@ -428,6 +428,42 @@ void handleGPSCommand(const char* args) {
             Serial.println("[GPS] Factory reset complete - all settings cleared");
         }
     }
+    else if (strncmp(args, "module", 6) == 0) {
+        args += 6;
+        while (*args == ' ') args++;
+
+        if (strncmp(args, "set", 3) == 0) {
+            args += 3;
+            while (*args == ' ') args++;
+            int type = -1;
+            if (strncmp(args, "bh880", 5) == 0) type = 0;
+            else if (strncmp(args, "lc76g", 5) == 0) type = 1;
+            else if (strncmp(args, "bn880", 5) == 0) type = 2;
+
+            if (type < 0) {
+                Serial.println("Usage: gps module set bh880|lc76g|bn880");
+            } else {
+                settings_manager::saveGPSModuleSelection((uint8_t)type);
+                Serial.println("[GPS] Rebooting to apply in 2 seconds...");
+                delay(2000);
+                esp_restart();
+            }
+        }
+        else if (strncmp(args, "reset", 5) == 0) {
+            settings_manager::resetGPSModuleConfiguration();
+            Serial.println("[GPS] Reboot now to see the first-boot module picker again");
+        }
+        else {
+            const auto& gs = settings_manager::getSettings();
+            Serial.println("==== GPS Module Pin ====");
+            Serial.printf("Configured: %s\n", gs.gps_module_configured ? "yes" : "no");
+            Serial.printf("Module:     %s\n", gps_bh880::moduleTypeName(gs.gps_module_type));
+            Serial.println("Usage:");
+            Serial.println("  gps module              - Show current pin");
+            Serial.println("  gps module set <module> - Pin directly (bh880|lc76g|bn880), reboots to apply");
+            Serial.println("  gps module reset        - Clear the pin so the picker shows again next boot");
+        }
+    }
     else if (strncmp(args, "power", 5) == 0) {
         args += 5;
         while (*args == ' ') args++;
@@ -481,6 +517,9 @@ void handleGPSCommand(const char* args) {
         Serial.println("  gps config baud <rate> - Change baudrate (9600-921600)");
         Serial.println("  gps restart <hot|warm|cold> - Restart GPS module");
         Serial.println("  gps reset              - Factory reset (clears all settings)");
+        Serial.println("  gps module             - Show pinned GPS/compass module");
+        Serial.println("  gps module set <mod>   - Pin bh880|lc76g|bn880 directly, reboots to apply");
+        Serial.println("  gps module reset       - Clear pin, first-boot picker shows again next boot");
     }
 }
 
@@ -731,6 +770,9 @@ void printAvailableCommands() {
     Serial.println("  gps config baud <..> - Change baudrate");
     Serial.println("  gps restart <mode>   - Restart GPS (hot/warm/cold)");
     Serial.println("  gps reset            - Factory reset GPS module");
+    Serial.println("  gps module           - Show pinned GPS/compass module");
+    Serial.println("  gps module set <mod> - Pin bh880|lc76g|bn880 directly, reboots to apply");
+    Serial.println("  gps module reset     - Clear pin, picker shows again next boot");
     Serial.println("");
     Serial.println("GPX Web Server Commands:");
     Serial.println("  gpx status           - Show GPX server status");

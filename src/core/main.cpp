@@ -4,6 +4,7 @@
 #include "core/arduino_compat.h"
 #include <lvgl.h>
 #include "esp_ota_ops.h"
+#include "esp_system.h"
 
 // Modular components
 #include "core/device_manager.h"
@@ -46,10 +47,23 @@ static void setLoadingStatus(const char* message) {
 // is false; once the user picks, device_manager::initGPS() skips protocol auto-detection
 // on every future boot (see gps_bh880::beginWithProtocol()). GPS itself already ran full
 // auto-detect THIS boot (device_manager::initializeAll(), before display was even up), so
-// this doesn't block GPS from working this session — it only pins what future boots do.
+// picking doesn't affect GPS this session — but it reboots anyway (see the esp_restart()
+// call at the end) because device_manager::initCompass() also already ran during Phase 2,
+// BEFORE this picker could possibly have shown, and with no pin yet it skipped compass
+// entirely rather than auto-probing (compass_qmc5883l.h). Nothing re-runs initCompass()
+// later in the same boot, so without the reboot a freshly-picked BH-880/BN-880 board would
+// finish its first session with no working compass despite Settings showing the correct
+// pin — field-caught 2026-08-11.
 // Blocking here on a tap is safe: LVGL is still single-threaded (task_manager::startTasks()
 // hasn't run yet) — same precondition setLoadingStatus() above relies on.
-static void showGpsModulePickerBlocking() {
+// Returns the picker object so the caller can delete it, kept as defense-in-depth even
+// though the reboot below means this normally never returns: the caller must load a
+// different screen first (see the LVGL screen-lifecycle rule: never delete the active
+// screen before its replacement loads). Deleting it here, before screen_loading exists,
+// crashed lv_scr_load()'s next call (LoadProhibited inside lv_scr_load_anim/lv_obj_set_pos,
+// dereferencing the freed picker as the still-recorded previous active screen) —
+// field-caught 2026-08-11 (the same session that found the compass gap above).
+static lv_obj_t* showGpsModulePickerBlocking() {
     Serial.println("[MAIN] First boot — showing GPS module picker");
 
     lv_obj_t* picker = lv_obj_create(NULL);
@@ -62,7 +76,7 @@ static void showGpsModulePickerBlocking() {
     lv_label_set_text(title, "Select GPS Module");
     lv_obj_set_style_text_color(title, lv_color_white(), 0);
     lv_obj_set_style_text_font(title, &iosevka_16, 0);
-    lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 100);
+    lv_obj_align(title, LV_ALIGN_TOP_MID, 0, 80);
 
     char detected[56];
     snprintf(detected, sizeof(detected), "Detected this boot: %s", gps_bh880::protocolName());
@@ -70,15 +84,19 @@ static void showGpsModulePickerBlocking() {
     lv_label_set_text(subtitle, detected);
     lv_obj_set_style_text_color(subtitle, lv_color_hex(0x888888), 0);
     lv_obj_set_style_text_font(subtitle, &iosevka_16, 0);
-    lv_obj_align(subtitle, LV_ALIGN_TOP_MID, 0, 128);
+    lv_obj_align(subtitle, LV_ALIGN_TOP_MID, 0, 108);
 
     static bool s_picked = false;
     static uint8_t s_picked_type = 0;
     s_picked = false;
 
+    // Three stacked buttons — heights/gaps compressed from the original two-button
+    // layout (55px/70px) to 50px/58px so all three plus the hint label still clear
+    // the round display's safe area (verified: at y=325, 300px from top edge, the
+    // circular chord width is still ~330px, comfortably more than the 300px hint).
     lv_obj_t* btn_bh880 = lv_btn_create(picker);
-    lv_obj_set_size(btn_bh880, 220, 55);
-    lv_obj_align(btn_bh880, LV_ALIGN_TOP_MID, 0, 175);
+    lv_obj_set_size(btn_bh880, 220, 50);
+    lv_obj_align(btn_bh880, LV_ALIGN_TOP_MID, 0, 145);
     lv_obj_set_style_bg_color(btn_bh880, lv_color_hex(0x0080FF), 0);
     lv_obj_add_event_cb(btn_bh880, [](lv_event_t*) { s_picked_type = 0; s_picked = true; }, LV_EVENT_CLICKED, nullptr);
     lv_obj_t* lbl_bh880 = lv_label_create(btn_bh880);
@@ -88,9 +106,21 @@ static void showGpsModulePickerBlocking() {
     lv_obj_set_style_text_font(lbl_bh880, &iosevka_16, 0);
     lv_obj_center(lbl_bh880);
 
+    lv_obj_t* btn_bn880 = lv_btn_create(picker);
+    lv_obj_set_size(btn_bn880, 220, 50);
+    lv_obj_align(btn_bn880, LV_ALIGN_TOP_MID, 0, 203);
+    lv_obj_set_style_bg_color(btn_bn880, lv_color_hex(0x0080FF), 0);
+    lv_obj_add_event_cb(btn_bn880, [](lv_event_t*) { s_picked_type = 2; s_picked = true; }, LV_EVENT_CLICKED, nullptr);
+    lv_obj_t* lbl_bn880 = lv_label_create(btn_bn880);
+    lv_label_set_text(lbl_bn880, "BN-880\n(GPS + Compass)");
+    lv_label_set_long_mode(lbl_bn880, LV_LABEL_LONG_WRAP);
+    lv_obj_set_style_text_align(lbl_bn880, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_text_font(lbl_bn880, &iosevka_16, 0);
+    lv_obj_center(lbl_bn880);
+
     lv_obj_t* btn_lc76g = lv_btn_create(picker);
-    lv_obj_set_size(btn_lc76g, 220, 55);
-    lv_obj_align(btn_lc76g, LV_ALIGN_TOP_MID, 0, 245);
+    lv_obj_set_size(btn_lc76g, 220, 50);
+    lv_obj_align(btn_lc76g, LV_ALIGN_TOP_MID, 0, 261);
     lv_obj_set_style_bg_color(btn_lc76g, lv_color_hex(0x0080FF), 0);
     lv_obj_add_event_cb(btn_lc76g, [](lv_event_t*) { s_picked_type = 1; s_picked = true; }, LV_EVENT_CLICKED, nullptr);
     lv_obj_t* lbl_lc76g = lv_label_create(btn_lc76g);
@@ -106,8 +136,8 @@ static void showGpsModulePickerBlocking() {
     lv_obj_set_style_text_align(hint, LV_TEXT_ALIGN_CENTER, 0);
     lv_obj_set_style_text_color(hint, lv_color_hex(0x666666), 0);
     lv_obj_set_style_text_font(hint, &iosevka_16, 0);
-    lv_obj_set_width(hint, 280);
-    lv_obj_align(hint, LV_ALIGN_TOP_MID, 0, 320);
+    lv_obj_set_width(hint, 300);
+    lv_obj_align(hint, LV_ALIGN_TOP_MID, 0, 325);
 
     lv_task_handler();
     while (!s_picked) {
@@ -116,9 +146,23 @@ static void showGpsModulePickerBlocking() {
     }
 
     settings_manager::saveGPSModuleSelection(s_picked_type);
-    Serial.printf("[MAIN] GPS module selected: %s\n", s_picked_type == 1 ? "LC76G" : "BH-880");
+    Serial.printf("[MAIN] GPS module selected: %s\n", gps_bh880::moduleTypeName(s_picked_type));
 
-    lv_obj_del(picker);
+    // Reboot rather than continuing this boot — unlike GPS (which already ran full
+    // auto-detect before the picker even showed, so it works this session regardless of
+    // the pick), device_manager::initCompass() ran during Phase 2, BEFORE this picker was
+    // ever shown, and with gps_module_configured still false at that point it skipped
+    // compass entirely (see compass_qmc5883l.h's no-auto-probe design). Nothing re-runs
+    // initCompass() later in this same boot, so without a reboot here, a BH-880/BN-880
+    // board would finish this first session with a correctly-pinned Settings page but a
+    // genuinely uninitialized compass — field-caught 2026-08-11 (looked exactly like the
+    // LC76G/no-compass profile despite BH-880 being selected). Matches the reboot every
+    // other module-pin-change path already uses (Settings > GPS button, `gps module set`).
+    Serial.println("[MAIN] Rebooting to apply module selection...");
+    delay(200);
+    esp_restart();
+
+    return picker;  // unreachable — esp_restart() does not return
 }
 
 extern "C" void app_main() {
@@ -263,8 +307,9 @@ extern "C" void app_main() {
     // gps_bh880::beginWithProtocol(). GPS already ran full auto-detect this session
     // (device_manager::initializeAll(), before display was up) — this picker doesn't
     // block THIS boot's GPS, it only determines what subsequent boots do.
+    lv_obj_t* gps_picker = nullptr;
     if (!settings_manager::getSettings().gps_module_configured) {
-        showGpsModulePickerBlocking();
+        gps_picker = showGpsModulePickerBlocking();
     }
 
     // Create and display loading screen
@@ -272,6 +317,11 @@ extern "C" void app_main() {
     ui_manager::createLoadingScreen();
     ui_manager::UIState& ui = ui_manager::getUIState();
     lv_scr_load(ui.screen_loading);
+    // Only safe to delete the picker now that it's no longer the active screen — see the
+    // comment on showGpsModulePickerBlocking().
+    if (gps_picker) {
+        lv_obj_del(gps_picker);
+    }
     device_manager::enableLVGLProcessing();
     lv_task_handler();
     Serial.println("[MAIN] Loading screen displayed");

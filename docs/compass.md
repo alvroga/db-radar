@@ -1,6 +1,15 @@
 # Compass — QMC5883L Implementation Guide
 
-**Status**: Complete ✅ | Last updated: 2026-08-06
+**Status**: Complete ✅ | Last updated: 2026-08-11
+
+**This doc covers the QMC5883L (BH-880 module) specifically** — register map, calibration, health
+classification, WMM declination. As of 2026-08-11, an HMC5883L (BN-880 module) is also supported via a
+separate low-level driver (`compass_hmc5883l.cpp`, see [`docs/bh880_module.md`](bh880_module.md)'s
+"Compass: HMC5883L Magnetometer" section for its register map). Everything below this point —
+calibration storage, health classification, the 2-axis heading formula — is chip-agnostic and applies
+identically to both chips once raw X/Y/Z are read; only the register-level `begin()`/raw-read logic
+differs per chip. See [ADR-0033](adr/0033-compass-internal-dispatch-not-rename.md) for the dispatch
+design.
 
 ## Hardware Overview
 

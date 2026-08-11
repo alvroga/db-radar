@@ -26,8 +26,10 @@ struct RadarSettings {
     bool gps_has_saved_position = false;      // True if we have a saved position
 
     // GPS module selection (pinned via the one-time first-boot picker, or Settings > GPS).
-    // 0=BH-880 (UBX), 1=LC76G (NMEA/PAIR) — see gps_bh880::GpsModule. Only meaningful once
-    // gps_module_configured is true; until then, initGPS() still runs full auto-detect.
+    // 0=BH-880 (UBX), 1=LC76G (NMEA/PAIR), 2=BN-880 (NMEA) — see gps_bh880::GpsModule /
+    // gps_bh880::moduleFromType(). Only meaningful once gps_module_configured is true;
+    // until then, initGPS() still runs full auto-detect and initCompass() is skipped
+    // entirely (no auto-probing for compass chip, ever — see compass_qmc5883l.h).
     uint8_t gps_module_type = 0;
     bool gps_module_configured = false;
 
@@ -191,10 +193,23 @@ bool loadGPSState(double& lat, double& lon, uint32_t& fix_time);
 
 /**
  * @brief Pin the GPS module type, skipping auto-detect on future boots.
- * @param module_type 0=BH-880 (UBX), 1=LC76G (NMEA/PAIR) — see gps_bh880::GpsModule
+ * @param module_type 0=BH-880 (UBX), 1=LC76G (NMEA/PAIR), 2=BN-880 (NMEA) — see gps_bh880::GpsModule
  * Also sets gps_module_configured=true. Takes effect on next boot (reboot required).
+ * Resets stored compass calibration if this changes the pinned module (see .cpp).
  */
 bool saveGPSModuleSelection(uint8_t module_type);
+
+/**
+ * @brief Clear gps_module_configured so the first-boot picker shows again on next boot.
+ * Also clears stored compass calibration (a fresh module pick may select a different
+ * compass chip; see saveGPSModuleSelection()'s same reasoning) — resetting here rather
+ * than leaving it to the next saveGPSModuleSelection() call, since that call would see
+ * gps_module_configured already false and skip its own change-detection reset.
+ * gps_module_type itself is left as-is (harmless — ignored until re-configured).
+ * Dev/test command (`gps module reset`) and a fallback when touch is unusable and
+ * Settings > GPS is unreachable. Takes effect on next boot.
+ */
+bool resetGPSModuleConfiguration();
 
 /**
  * @brief Save individual waypoint setting
