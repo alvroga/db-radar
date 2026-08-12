@@ -18,6 +18,9 @@ struct DiagState {
     // Runtime control flags
     volatile bool lvgl_freeze = false;
     volatile uint32_t lvgl_freeze_until_ms = 0;
+    // Touch coordinate logging — off by default, serial-only troubleshooting aid.
+    // Read from the UI Task (lvgl_touch_read_cb); single bool is safe unsynchronized.
+    volatile bool touch_log = false;
 
     // Command buffer
     char cmd_buffer[64];
@@ -41,6 +44,7 @@ void handleConfigCommand(const char* args);
 void handleWiFiToggle(bool enable);
 void handleBLEToggle(bool enable);
 void handleLVGLFreezeToggle(bool enable);
+void handleTouchLogToggle(bool enable);
 
 // Configuration display functions
 void showCurrentConfiguration();

@@ -11,6 +11,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+**Serial-toggled touch coordinate logging for troubleshooting (2026-08-12)**
+
+`diag touch on|off` (off by default on boot) logs both the raw CST820 controller reading and the
+final LVGL point for every press in `lvgl_touch_read_cb()` (`src/core/device_manager.cpp`) —
+`[TOUCH] raw=(x,y) lvgl=(x,y)`, throttled to 10Hz while held down so a sustained press doesn't flood
+the serial console. Gated by `diagnostics::DiagState::touch_log`, a single `volatile bool` read
+unsynchronized from the UI Task per the project's cross-task shared-state rule (CLAUDE.md).
+
 **Dual GPS module support: BH-880 + LC76G in one firmware, pinned module selection (2026-08-10)**
 
 **NOT included in the next release build** — isolated on the `feature/dual-gps-module` branch,
@@ -88,6 +96,24 @@ HMC5883L Magnetometer" sections, [ADR-0032](docs/adr/0032-pinned-gps-module-not-
 addendum, [ADR-0033](docs/adr/0033-compass-internal-dispatch-not-rename.md).
 
 ### Fixed
+
+**Touch unresponsive on first boot, reported on a BN-880 board (2026-08-12)**
+
+Field report: a BN-880 board booted, showed the first-boot GPS module picker, but touch didn't
+register at all — the boot log's device summary showed `Touch: FAIL`. `initTouch()`
+(`src/core/device_manager.cpp`) calls `cst820_begin()`, which is a bare single 10ms
+`i2c_manager::ping()` with **no retry** — unlike every retried `read()`/`write()` call elsewhere on
+the bus. The same log shows the accelerometer probe (`initAccel()`, which runs earlier in
+`initializeAll()`) hitting a burst of real ESP-IDF driver-level NACK errors and one
+`ESP_ERR_INVALID_STATE` read on `IMU_LOW` moments before touch is pinged — a bus wedge shape this
+project has hit before (see `i2c_bus_freeze_recovery.md`/ADR-0021). `i2c_manager::init()` already
+has a recovery path for exactly this shape of failure on `EXIO_DEVICE` (bus-clock-recovery via
+`resetBus()`, then one retried ping) with the documented rationale that a slave left mid-transaction
+by a prior reset won't necessarily clear itself; that recovery was never extended to touch.
+Applied the same pattern to `initTouch()`: on a failed ping, call `i2c_manager::resetBus()`, delay
+10ms, and ping once more before giving up. Build-verified clean (RAM 51.4%/Flash 40.9%); **not yet
+field-verified** — this is the most likely mechanism given the log evidence, not a confirmed root
+cause, since the BN-880 board that hit this hasn't been re-tested with the fix.
 
 **Boot crash on first flash: `assert failed: __esp_system_init_fn_init_flash` (2026-08-10)**
 

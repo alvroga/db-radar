@@ -8,6 +8,15 @@ Capacitive touch via a CST820 (CST8xx-family) controller, I2C address `0x15`, re
 
 `include/hardware/display/cst820.h` / `src/hardware/display/cst820.cpp` — deliberately thin, two functions:
 
+**Boot-time recovery (2026-08-12)**: `device_manager::initTouch()` calls `cst820_begin()`, whose
+`i2c_manager::ping()` is a bare single 10ms probe with no retry — unlike the retried `read()`/`write()`
+path everything else on the bus uses. If that first ping fails, `initTouch()` now runs the same
+clock-recovery-then-retry step `i2c_manager::init()` already does for `EXIO_DEVICE`
+(`i2c_manager::resetBus()`, 10ms delay, one more ping) before reporting `Touch: FAIL`. Added after a
+field report of unresponsive touch on a BN-880 board's first-boot picker screen, where the boot log
+showed the accelerometer probe hitting a NACK burst moments before touch was pinged — see the
+CHANGELOG.md entry for detail. Not yet confirmed against the reporting board.
+
 ```cpp
 bool cst820_begin(uint8_t i2c_addr = 0x15);   // pings i2c_manager::TOUCH_DEVICE
 bool cst820_read(CST820Point &pt, uint8_t i2c_addr = 0x15);
@@ -39,6 +48,13 @@ Raw coordinate range varies by controller firmware — could be ~0..480, ~0..102
 4. Sets `navigation::getNavState().touch_x/y/pressed` for the rest of the app, and calls `standby_manager::notifyUserActivity()` on every real press to reset the inactivity timer.
 
 Rotation is handled upstream by LVGL itself, not by this callback — see the Render Pipeline section of [CLAUDE.md](../CLAUDE.md) for how touch coordinates relate to the current rotation mode.
+
+## Coordinate Logging (troubleshooting)
+
+`diag touch on|off` (serial, off by default on boot) prints every press as
+`[TOUCH] raw=(x,y) lvgl=(x,y)` — the raw controller reading from `cst820_read()` alongside the final
+scaled/clamped point handed to LVGL, throttled to 10Hz so holding a touch doesn't flood the console.
+Gated by `diagnostics::DiagState::touch_log`, checked directly in `lvgl_touch_read_cb()`.
 
 ## Testing
 

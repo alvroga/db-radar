@@ -62,6 +62,7 @@ bool init(const Config& config) {
     // Initialize diagnostic state
     g_diag_state.lvgl_freeze = false;
     g_diag_state.lvgl_freeze_until_ms = 0;
+    g_diag_state.touch_log = false;
     g_diag_state.cmd_length = 0;
 
     Serial.println("[DIAGNOSTICS] Initialized successfully");
@@ -246,6 +247,16 @@ void handleDiagCommand(const char* args) {
             }
         }
         Serial.println("===============================");
+    } else if (strncmp(args, "touch", 5) == 0) {
+        args += 5;
+        while (*args == ' ') args++;
+        bool on = (strncmp(args, "on", 2) == 0);
+        bool off = (strncmp(args, "off", 3) == 0);
+        if (on || off) {
+            handleTouchLogToggle(on);
+        } else {
+            Serial.println("Usage: diag touch on|off");
+        }
     } else if (strncmp(args, "freeze", 6) == 0 || strncmp(args, "lvgl_freeze", 11) == 0) {
         // Skip past the command name
         if (args[0] == 'f') args += 6; else args += 11;
@@ -305,6 +316,11 @@ void handleAPToggle(bool enable) {
 
         Serial.println("[DIAG] ✓ AP disabled");
     }
+}
+
+void handleTouchLogToggle(bool enable) {
+    g_diag_state.touch_log = enable;
+    Serial.printf("[DIAG] Touch coordinate logging %s\n", enable ? "enabled" : "disabled");
 }
 
 void handleLVGLFreezeToggle(bool enable) {
@@ -786,6 +802,7 @@ void printAvailableCommands() {
     Serial.println("  diag ble on|off      - Enable/disable Bluetooth scanning");
     Serial.println("  diag ap on|off       - Enable/disable Access Point mode");
     Serial.println("  diag freeze on|off   - Freeze/unfreeze LVGL display");
+    Serial.println("  diag touch on|off    - Log raw+LVGL touch coordinates (off by default)");
     Serial.println("");
     Serial.println("Task Commands:");
     Serial.println("  task status          - Show FreeRTOS task status and health");

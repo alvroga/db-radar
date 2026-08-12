@@ -789,8 +789,19 @@ bool initLVGL(const Config& config) {
 
 bool initTouch() {
     if (!cst820_begin(0x15)) {
-        Serial.println("[TOUCH] CST820 not found");
-        return false;
+        // cst820_begin() is a bare single 10ms i2c_manager::ping() with no retry,
+        // unlike the retried read()/write() path everything else uses — a slave
+        // that NACK'd moments earlier (e.g. the accel probe storm during initAccel())
+        // can leave the bus wedged for the next un-retried ping. Mirrors the EXIO
+        // recovery already done in i2c_manager::init() for the same reason.
+        Serial.println("[TOUCH] CST820 not found — attempting clock recovery");
+        i2c_manager::resetBus();
+        delay(10);
+        if (!cst820_begin(0x15)) {
+            Serial.println("[TOUCH] CST820 still not found after recovery");
+            return false;
+        }
+        Serial.println("[TOUCH] CST820 recovered after clock pulses");
     }
 
     lv_indev_drv_init(&indev_drv);
@@ -1309,6 +1320,18 @@ static void lvgl_touch_read_cb(lv_indev_drv_t*, lv_indev_data_t* data) {
         navigation::getNavState().touch_x = lx;
         navigation::getNavState().touch_y = ly;
         navigation::getNavState().touch_pressed = true;
+
+        // Serial-toggled troubleshooting aid (`diag touch on|off`), off by default.
+        // Throttled — this callback runs at the UI Task's 10ms rate, and an unthrottled
+        // print while held down would flood the serial console.
+        if (diagnostics::getDiagState().touch_log) {
+            static uint32_t last_log_ms = 0;
+            uint32_t now = millis();
+            if (now - last_log_ms >= 100) {
+                last_log_ms = now;
+                Serial.printf("[TOUCH] raw=(%u,%u) lvgl=(%d,%d)\n", pt.x, pt.y, lx, ly);
+            }
+        }
     } else {
         data->state = LV_INDEV_STATE_RELEASED;
         data->point.x = last_x;

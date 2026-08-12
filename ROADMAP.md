@@ -26,8 +26,10 @@ selection is never auto-probed, only ever a direct consequence of the pin. A boa
 (LC76G-only) is forced to North-Up automatically; BH-880 and BN-880 both get Heading-Up. LC76G and
 BH-880 paths **field-verified on real hardware 2026-08-11** (also caught and fixed two real bugs: a
 first-boot-picker crash, and the compass staying uninitialized after picking BH-880 on a fresh board's
-first boot — see CHANGELOG.md). BN-880/HMC5883L path is build-verified only — no BN-880 hardware
-available yet. See
+first boot — see CHANGELOG.md). BN-880/HMC5883L path is build-verified only, and its first field
+report (2026-08-12) hit unresponsive touch on the first-boot picker screen — a likely I2C bus-wedge
+interaction with the accelerometer probe, mitigated with a boot-time recovery retry (touch-specific,
+not BN-880-specific) but not yet confirmed against the reporting board. See
 [CHANGELOG.md](CHANGELOG.md), [ADR-0032](docs/adr/0032-pinned-gps-module-not-always-auto-detect.md),
 and [ADR-0033](docs/adr/0033-compass-internal-dispatch-not-rename.md) for full detail. Merge into
 `initial-release` once BH-880 and BN-880 are also field-verified.
@@ -112,6 +114,48 @@ draw callback. Two candidates look directly implementable with no architecture c
 **Status**: research only, nothing designed or implemented. Full findings (implementation approach,
 what doesn't port over and why, measurement requirements, open questions):
 [`docs/radar_animation_effects_research.md`](docs/radar_animation_effects_research.md).
+
+---
+
+### GPX Generator Tool: Layout Redesign + Route/Sequence Mode — brainstorm stage, not designed yet
+**Severity**: UX/Feature — the standalone web tool (`tools/waypoint-editor/index.html`, deployed at
+https://alvroga.github.io/gpx-generator/ and linked from `docs/manual.md`'s waypoint-creation section)
+is usable but the layout leaves no room to grow, and it only supports independent pins today.
+
+**Ask 1 — reclaim map real estate for controls**: the current layout is a fixed 300px sidebar plus a
+`flex:1` map that fills the entire remaining viewport (`#map { flex: 1; height: 100vh; }` in
+`tools/waypoint-editor/index.html`). That leaves no room for the additional controls/tools planned for
+this tool. Referenced as a layout example (not a feature list to copy):
+[gpxgenerator.com](https://www.gpxgenerator.com/) — since the area being pinned is usually small (a
+single park, town, or venue), the map doesn't need to dominate the screen the way it does today; a
+smaller, more contained map frees space for a real control panel.
+
+**Ask 2 — sequential route mode ("next waypoint")**: today every waypoint is independent — the editor
+and the on-device radar both treat the waypoint set as unordered points selected by proximity. The ask
+is a mode to define an **ordered route** from one waypoint to the next (draw/connect pins in sequence)
+and, on-device, navigate it step-by-step — "go here, then here" rather than "here are all the nearby
+points." Motivating example: Pokémon GO-style spoofing/walk GPX files, which encode a walking path as
+dozens to hundreds of sequential unnamed `<wpt>` elements in visit order rather than a
+labeled-cache-style waypoint set — importing one of these and stepping through it in order is a
+different shape of data than what the editor or the firmware currently model.
+
+**Open questions to resolve before design**:
+- Is "show the next waypoint in sequence" a **web-tool-only authoring convenience** (export an ordered
+  GPX, still consumed as today's unordered points) or a **real on-device nav mode** (new firmware state
+  tracking "current index in route," advancing on arrival)? These have very different cost — the
+  second touches `gpx_loader`/`gpx_index`/waypoint selection, not just the web tool.
+- GPX has no standard way to express point *order* as route intent — `<rte>`/`<rtept>` exists in the
+  spec for exactly this, vs. the plain sequential `<wpt>` list the Pokémon GO-style files actually use.
+  Decide which the tool authors/exports and which (if not both) the firmware needs to parse.
+- How "arrival" and "advance to next" interact with the existing fixed-waypoint sonar and
+  `FIXED_WAYPOINT_MAX_DISTANCE_M` auto-release — a route implies auto-advance on arrival, which the
+  current fixed-waypoint model doesn't do at all today.
+- Layout redesign scope: how much of `gpxgenerator.com`'s panel-first layout to adopt vs. keep this
+  tool's own dark/monospace styling and existing feature set (search, import/export, per-waypoint
+  hint/desc fields) intact.
+
+**Status**: nothing designed or implemented — this entry exists to capture the ask before design work
+starts.
 
 ---
 
