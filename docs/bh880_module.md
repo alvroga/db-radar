@@ -1,6 +1,6 @@
 # GPS Modules: Beitian BH-880 (primary), LC76G, BN-880, and BE-881
 
-**Status**: GPS ✅ Working | Compass ✅ Working (WMM declination applied) | Four-module support ✅ (BE-881 added 2026-08-14, field-verified) | LC76G + BH-880 + BE-881 field-verified, BN-880 build-verified only
+**Status**: GPS ✅ Working | Compass ✅ Working (WMM declination applied) | Four modules supported in firmware, **three qualified** for the first-boot picker (BH-880, LC76G, BE-881 — all field-verified); BN-880 build-verified only, kept in the firmware, reachable via Settings/serial, not on the picker as of 2026-08-14
 
 ## Module Overview
 
@@ -214,19 +214,21 @@ entirely (LC76G) — see
 "try one chip, fall back to the other" shortcut was rejected even for the first-boot case.
 
 **First boot**: before `gps_module_configured` is ever true, a one-time full-screen picker appears
-(`main.cpp`, right after `ui_manager::init()`, before the loading-screen sequence) with three buttons
-(BH-880 / BN-880 / LC76G), showing what the GPS auto-detect scan found this boot as a hint but always
-requiring an explicit tap. **BE-881 has no picker button yet** — a board arriving unconfigured must be
-pinned via serial (`gps module set be881`) once past first boot; adding a fourth picker button was
-deliberately deferred until BE-881 hardware verification landed. GPS itself isn't gated by this picker
-— it already came up via the two-pass auto-detect earlier in boot (before display was even ready).
-**Picking a module reboots immediately** (`esp_restart()` inside `showGpsModulePickerBlocking()`) —
-not just a preference save. This is required for the compass, not GPS: `initCompass()` runs during
-Phase 2, before this picker can possibly have shown, so on an unconfigured first boot it always skips
-compass entirely (no auto-probe); without the reboot, a freshly-picked BH-880/BN-880 board would
-finish its first session with the correct pin saved but a genuinely uninitialized compass (field-caught
-2026-08-11 — see ADR-0032's addendum). The same reasoning applies to `gps module set` on serial, which
-is why that path reboots too.
+(`main.cpp`, right after `ui_manager::init()`, before the loading-screen sequence) with three buttons —
+**BH-880 / BE-881 / LC76G as of 2026-08-14**, showing what the GPS auto-detect scan found this boot as
+a hint but always requiring an explicit tap. This set is a deliberately curated subset: it's the three
+modules with real field verification, not the full list of modules the firmware supports. **BN-880 was
+swapped out of the picker for BE-881 the same day BE-881 got field-verified** — BN-880's code path
+(`GpsModule::BN880_NMEA`, `compass_hmc5883l.cpp`) was not removed, it's just no longer offered here
+until it gets equivalent field verification; it remains reachable via Settings > GPS or
+`gps module set bn880`. GPS itself isn't gated by this picker — it already came up via the two-pass
+auto-detect earlier in boot (before display was even ready). **Picking a module reboots immediately**
+(`esp_restart()` inside `showGpsModulePickerBlocking()`) — not just a preference save. This is required
+for the compass, not GPS: `initCompass()` runs during Phase 2, before this picker can possibly have
+shown, so on an unconfigured first boot it always skips compass entirely (no auto-probe); without the
+reboot, a freshly-picked BH-880/BE-881 board would finish its first session with the correct pin saved
+but a genuinely uninitialized compass (field-caught 2026-08-11 — see ADR-0032's addendum). The same
+reasoning applies to `gps module set` on serial, which is why that path reboots too.
 
 **Changing the pin later**: Settings > GPS has a module dropdown (options in enum order: BH-880,
 LC76G, BN-880, BE-881) + "Save + Reboot to Apply" button (same `esp_restart()` pattern as the WiFi/AP
@@ -268,7 +270,7 @@ a BH-880 board does — only LC76G forces North-Up.
 | `src/hardware/i2c/i2c_manager.cpp` / `.h` | `COMPASS_DEVICE_HMC` (0x1E) + `COMPASS_DEVICE_QMCP` (0x2C) device handles, `NUM_DEVICES` raised to 8 |
 | `src/core/device_manager.cpp` | `initGPS()`/`initCompass()` branch on `gps_module_configured` + pinned type, no auto-probing |
 | `src/utils/settings_manager.cpp` / `.h` | `gps_module_type`/`gps_module_configured`, `saveGPSModuleSelection()`, `resetGPSModuleConfiguration()`, compass-cal reset on module change |
-| `src/core/main.cpp` | First-boot picker (`showGpsModulePickerBlocking()`), 3 buttons — BE-881 not yet included, see above |
+| `src/core/main.cpp` | First-boot picker (`showGpsModulePickerBlocking()`), 3 buttons: BH-880/BE-881/LC76G (BN-880 removed from the picker 2026-08-14, code kept — see above) |
 | `src/ui/ui_manager.cpp` | Forces North-Up when `!compass_ok` (unchanged — already module-agnostic) |
 | `src/ui/settings_screen.cpp` | GPS Module dropdown (3 options) + reboot button; nav-mode dropdown disabled when no compass |
 | `src/utils/diagnostics.cpp` | `gps module [set\|reset]` serial commands |

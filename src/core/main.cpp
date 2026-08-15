@@ -51,9 +51,15 @@ static void setLoadingStatus(const char* message) {
 // call at the end) because device_manager::initCompass() also already ran during Phase 2,
 // BEFORE this picker could possibly have shown, and with no pin yet it skipped compass
 // entirely rather than auto-probing (compass_qmc5883l.h). Nothing re-runs initCompass()
-// later in the same boot, so without the reboot a freshly-picked BH-880/BN-880 board would
+// later in the same boot, so without the reboot a freshly-picked BH-880/BE-881 board would
 // finish its first session with no working compass despite Settings showing the correct
 // pin — field-caught 2026-08-11.
+//
+// Picker offers only the three field-verified modules (BH-880, BE-881, LC76G) as of
+// 2026-08-14. BN-880/HMC5883L support still exists in the firmware (GpsModule::BN880_NMEA,
+// compass_hmc5883l.cpp) and remains reachable via Settings > GPS or `gps module set bn880`
+// — it just isn't offered here until it gets the same field verification the other three
+// have. Don't delete the BN-880 code path when it drops off this screen.
 // Blocking here on a tap is safe: LVGL is still single-threaded (task_manager::startTasks()
 // hasn't run yet) — same precondition setLoadingStatus() above relies on.
 // Returns the picker object so the caller can delete it, kept as defense-in-depth even
@@ -106,17 +112,17 @@ static lv_obj_t* showGpsModulePickerBlocking() {
     lv_obj_set_style_text_font(lbl_bh880, &iosevka_16, 0);
     lv_obj_center(lbl_bh880);
 
-    lv_obj_t* btn_bn880 = lv_btn_create(picker);
-    lv_obj_set_size(btn_bn880, 220, 50);
-    lv_obj_align(btn_bn880, LV_ALIGN_TOP_MID, 0, 203);
-    lv_obj_set_style_bg_color(btn_bn880, lv_color_hex(0x0080FF), 0);
-    lv_obj_add_event_cb(btn_bn880, [](lv_event_t*) { s_picked_type = 2; s_picked = true; }, LV_EVENT_CLICKED, nullptr);
-    lv_obj_t* lbl_bn880 = lv_label_create(btn_bn880);
-    lv_label_set_text(lbl_bn880, "BN-880\n(GPS + Compass)");
-    lv_label_set_long_mode(lbl_bn880, LV_LABEL_LONG_WRAP);
-    lv_obj_set_style_text_align(lbl_bn880, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_set_style_text_font(lbl_bn880, &iosevka_16, 0);
-    lv_obj_center(lbl_bn880);
+    lv_obj_t* btn_be881 = lv_btn_create(picker);
+    lv_obj_set_size(btn_be881, 220, 50);
+    lv_obj_align(btn_be881, LV_ALIGN_TOP_MID, 0, 203);
+    lv_obj_set_style_bg_color(btn_be881, lv_color_hex(0x0080FF), 0);
+    lv_obj_add_event_cb(btn_be881, [](lv_event_t*) { s_picked_type = 3; s_picked = true; }, LV_EVENT_CLICKED, nullptr);
+    lv_obj_t* lbl_be881 = lv_label_create(btn_be881);
+    lv_label_set_text(lbl_be881, "BE-881\n(GPS + Compass)");
+    lv_label_set_long_mode(lbl_be881, LV_LABEL_LONG_WRAP);
+    lv_obj_set_style_text_align(lbl_be881, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_text_font(lbl_be881, &iosevka_16, 0);
+    lv_obj_center(lbl_be881);
 
     lv_obj_t* btn_lc76g = lv_btn_create(picker);
     lv_obj_set_size(btn_lc76g, 220, 50);
@@ -153,7 +159,7 @@ static lv_obj_t* showGpsModulePickerBlocking() {
     // the pick), device_manager::initCompass() ran during Phase 2, BEFORE this picker was
     // ever shown, and with gps_module_configured still false at that point it skipped
     // compass entirely (see compass_qmc5883l.h's no-auto-probe design). Nothing re-runs
-    // initCompass() later in this same boot, so without a reboot here, a BH-880/BN-880
+    // initCompass() later in this same boot, so without a reboot here, a BH-880/BE-881
     // board would finish this first session with a correctly-pinned Settings page but a
     // genuinely uninitialized compass — field-caught 2026-08-11 (looked exactly like the
     // LC76G/no-compass profile despite BH-880 being selected). Matches the reboot every

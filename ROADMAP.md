@@ -14,31 +14,6 @@ None currently open. See Resolved below for FT-03, FT-05, FT-09.
 
 ## Planned
 
-### Multi GPS Module Support (BH-880 + LC76G + BN-880 + BE-881) — BH-880/LC76G/BE-881 field-verified, BN-880 not yet
-**Severity**: Feature — restores LC76G compatibility (dropped when the project moved to the BH-880)
-without needing a separate build, plus BN-880 and BE-881 support requested/prompted by field reports
-(BN-880: GitHub issue #1; BE-881: user-connected board, 2026-08-14)
-
-**Status**: implemented on the `feature/multi-gps-module` branch (renamed from `feature/dual-gps-module`
-2026-08-11), deliberately **not** merged into `initial-release`. `gps_bh880.cpp` speaks UBX (BH-880,
-BE-881) and NMEA/PAIR (LC76G, BN-880), auto-identified on first boot and then pinned as a persisted
-choice (Settings > GPS, or serial `gps module set ...`) rather than re-detected every boot — compass
-chip selection is never auto-probed, only ever a direct consequence of the pin. A board with no compass
-(LC76G-only) is forced to North-Up automatically; BH-880, BN-880, and BE-881 all get Heading-Up. LC76G
-and BH-880 paths **field-verified on real hardware 2026-08-11** (also caught and fixed two real bugs: a
-first-boot-picker crash, and the compass staying uninitialized after picking BH-880 on a fresh board's
-first boot — see CHANGELOG.md). BE-881/QMC5883P path **field-verified 2026-08-14** (no first-boot
-picker button yet — pinned via serial only, see docs/bh880_module.md). BN-880/HMC5883L path is
-build-verified only, and its first field report (2026-08-12) hit unresponsive touch on the first-boot
-picker screen — a likely I2C bus-wedge interaction with the accelerometer probe, mitigated with a
-boot-time recovery retry (touch-specific, not BN-880-specific) but not yet confirmed against the
-reporting board. See [CHANGELOG.md](CHANGELOG.md),
-[ADR-0032](docs/adr/0032-pinned-gps-module-not-always-auto-detect.md), and
-[ADR-0033](docs/adr/0033-compass-internal-dispatch-not-rename.md) for full detail. Merge into
-`initial-release` once BN-880 is also field-verified.
-
----
-
 ### Quests *(design substantially resolved, feature not yet built)*
 **Severity**: Feature — design largely settled, implementation not started
 
@@ -214,6 +189,35 @@ arrives and turn it into a field-verified procedure.
 ---
 
 ## Resolved
+
+### Multi GPS Module Support (BH-880 + LC76G + BN-880 + BE-881) — Resolved, merged to initial-release (2026-08-14)
+**Was**: LC76G support (dropped when the project moved to BH-880) needed restoring without a separate
+build, plus support for two more field-reported lookalike modules — BN-880 (GitHub issue #1) and
+BE-881 (a user-connected board initially misidentified against the BH-880 profile, 2026-08-14).
+
+**Resolution**: `gps_bh880.cpp` speaks UBX (BH-880, BE-881) and NMEA/PAIR (LC76G, BN-880),
+auto-identified on first boot and then pinned as a persisted choice (Settings > GPS, or serial
+`gps module set ...`) rather than re-detected every boot — compass chip selection is never
+auto-probed, only ever a direct consequence of the pin (BH-880→QMC5883L, BN-880→HMC5883L,
+BE-881→QMC5883P, LC76G→no compass, forced North-Up). LC76G, BH-880, and BE-881 are **field-verified**
+(2026-08-11, 2026-08-11, 2026-08-14 respectively) and are the three modules offered on the first-boot
+picker. **BN-880 support remains in the firmware** (Settings/serial-reachable, `gps module set bn880`)
+but was swapped out of the first-boot picker for BE-881 the same day, since it's still only
+build-verified — its first field report (2026-08-12) hit unresponsive touch on the picker screen, an
+I2C bus-wedge interaction with the accelerometer probe that's been mitigated but not yet confirmed
+against the reporting board. Two real bugs were also field-caught and fixed along the way: a
+first-boot-picker crash, and the compass staying uninitialized after picking a module on a fresh
+board's first boot (both 2026-08-11).
+
+See [CHANGELOG.md](CHANGELOG.md), [docs/bh880_module.md](docs/bh880_module.md),
+[ADR-0032](docs/adr/0032-pinned-gps-module-not-always-auto-detect.md), and
+[ADR-0033](docs/adr/0033-compass-internal-dispatch-not-rename.md) for full detail.
+
+**Key files**: `src/hardware/sensors/gps_bh880.cpp`, `src/hardware/sensors/compass_qmc5883l.cpp`
+(+ `compass_hmc5883l.cpp`, `compass_qmc5883p.cpp`), `src/core/main.cpp` (first-boot picker),
+`src/core/device_manager.cpp`, `src/utils/settings_manager.cpp`
+
+---
 
 ### FT-09: Waypoint On-Screen Test Used a Square Box on a Round Display — Resolved (2026-08-06)
 **Was**: reported by the user via two annotated screenshots showing a waypoint sitting inside the

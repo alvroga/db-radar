@@ -126,6 +126,19 @@ Flash 40.9%, no meaningful size delta).
 
 **Full detail**: [`docs/bh880_module.md`](docs/bh880_module.md).
 
+**First-boot picker: BE-881 replaces BN-880 as the third qualified module (2026-08-14)**
+
+With BE-881 field-verified the same day (see entry above), the first-boot picker's three buttons
+(`main.cpp::showGpsModulePickerBlocking()`) changed from BH-880/BN-880/LC76G to BH-880/BE-881/LC76G —
+the picker now offers exactly the set of modules with real field verification. **BN-880 support is
+not removed** — `GpsModule::BN880_NMEA`, `compass_hmc5883l.cpp`, the Settings dropdown, and
+`gps module set bn880` are all unchanged and still fully functional; it's reachable by those paths,
+just no longer promoted on the picker until it gets the same field verification the other three have.
+Settings > GPS's dropdown still lists all four modules — only the first-boot picker's curated subset
+changed.
+
+**Full detail**: [`docs/bh880_module.md`](docs/bh880_module.md)'s "First boot" section.
+
 ### Fixed
 
 **Touch unresponsive on first boot, reported on a BN-880 board (2026-08-12)**

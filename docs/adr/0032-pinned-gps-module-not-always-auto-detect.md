@@ -131,3 +131,44 @@ module set` already do — the pin is now guaranteed to exist before `initCompas
 This means picking a module on first boot now costs one extra automatic reboot; judged an acceptable,
 small, one-time cost for a compass that actually works afterward. Field-verified on the same BH-880
 board: `Compass: OK`, prior hard-iron calibration reloaded from NVS unchanged.
+
+## Addendum 2026-08-14: BE-881 as a fourth pinned option, and swapping it in for BN-880 on the picker
+
+**Context**: a user connected a board sold as "BE-880"/"BE-881", picked the closest existing profile
+(BH-880), and got a working GPS (BE-881 genuinely is BH-880-UBX-compatible) but a compass that failed
+to initialize at `0x0D`. Root cause: BE-881's magnetometer is a **QMC5883P** at `0x2C` — a third
+distinct compass chip, despite the naming collision with QMC5883L, confirmed against QST's official
+datasheet and a live bus-scan hit.
+
+**Decision (module addition)**: added `GpsModule::BE881_UBX` as a fourth pinned value, reusing the
+BH-880 UBX protocol path exactly (no new GPS parser — same "reuse the existing protocol path"
+reasoning the BN-880 addendum above used for NMEA). The one genuinely new piece is a low-level
+`compass_qmc5883p` driver, dispatched to internally from `compass_qmc5883l.cpp` exactly like HMC5883L
+was — see ADR-0033 for why that dispatch pattern exists rather than a per-chip rename. Compass chip
+selection for BE-881 follows the same no-auto-probe rule established above: a direct, deterministic
+consequence of the pin, no fallback.
+
+**Decision (picker curation)**: the first-boot picker's three buttons changed from
+BH-880/BN-880/LC76G to BH-880/BE-881/LC76G — BN-880 was swapped out, not added alongside as a fourth
+button. Two real alternatives were on the table:
+
+1. **Add a fourth button**, keeping all field-eligible-or-not modules on the picker equally.
+2. **Swap BN-880 out for BE-881** (the choice made), keeping the picker at three buttons and treating
+   it as a curated "field-verified" set rather than an exhaustive module list.
+
+Rejected (1) for two reasons: first, the picker's three-button layout is already tuned tight against
+the round display's safe area (see the layout comment in `main.cpp` — heights/gaps were compressed
+once already, from 55px/70px to 50px/58px, to fit three buttons plus the hint label inside the visible
+circular chord; a fourth button reopens that same round-vs-square margin problem class this project
+has hit before, e.g. FT-09). Second, and more fundamentally: BN-880 is still only build-verified, with
+an open, unconfirmed field report of unresponsive touch on this exact screen (2026-08-12) — putting an
+unverified module on a picker meant to represent "known-good options for a fresh board" undersells the
+risk to a new user with no other basis for choosing. BE-881, by contrast, is field-verified as of this
+addendum's date. **BN-880 support is not removed anywhere** — `GpsModule::BN880_NMEA`,
+`compass_hmc5883l.cpp`, the Settings > GPS dropdown, and `gps module set bn880` are all unchanged and
+fully functional; only its presence on the first-boot picker changed. It can return to the picker once
+it gets equivalent field verification — this is a curation call, not a deprecation.
+
+**Field-verified 2026-08-14**: live serial capture confirmed `Compass: OK` at boot, a clean `0x2C`
+bus-scan hit with zero I2C failures, and `compass read` (which goes through the real driver dispatch,
+not a register poke) returning sane, changing heading data. GPS unaffected (valid fix, 5 satellites).
