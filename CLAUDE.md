@@ -559,12 +559,13 @@ dead leftovers — see the doc for which ones, don't resurrect logic around them
 
 ---
 
-## GPS Module Support: BH-880 (primary), LC76G, or BN-880
+## GPS Module Support: BH-880 (primary), LC76G, BN-880, or BE-881
 
-**Status**: LC76G + BH-880 field-verified 2026-08-11; BN-880 build-verified, not yet field-tested | [Full Guide](docs/bh880_module.md) | [ADR-0032](docs/adr/0032-pinned-gps-module-not-always-auto-detect.md) | [ADR-0033](docs/adr/0033-compass-internal-dispatch-not-rename.md)
+**Status**: LC76G + BH-880 + BE-881 field-verified (2026-08-11, 2026-08-11, 2026-08-14); BN-880 build-verified, not yet field-tested | [Full Guide](docs/bh880_module.md) | [ADR-0032](docs/adr/0032-pinned-gps-module-not-always-auto-detect.md) | [ADR-0033](docs/adr/0033-compass-internal-dispatch-not-rename.md)
 
-One firmware image supports all three modules (`gps_bh880.cpp`; BN-880 reuses the LC76G NMEA/PAIR path
-byte-for-byte, no separate parser). GPS protocol identification is **two strict sequential passes**,
+One firmware image supports all four modules (`gps_bh880.cpp`; BN-880 reuses the LC76G NMEA/PAIR path
+byte-for-byte, BE-881 reuses the BH-880 UBX path byte-for-byte — neither needs a separate GPS parser).
+GPS protocol identification is **two strict sequential passes**,
 not one interleaved pass — UBX (`detectBaudUBX()`, byte-identical to the original BH-880-only
 algorithm) always runs first across all 6 candidate baud rates; NMEA (`detectBaudNMEA()`) is only
 attempted if that entire pass finds nothing. **Do not merge these back into one interleaved loop** — a
@@ -575,7 +576,7 @@ The module type is a **persisted choice**, not re-detected every boot (`settings
 `gps_module_type`/`gps_module_configured`) — a one-time 3-button picker appears on first boot
 (`main.cpp::showGpsModulePickerBlocking()`), and every later boot calls
 `gps_bh880::beginWithProtocol()` (single-pass baud scan only, no protocol guessing). Changing the pin
-later is via Settings > GPS or serial (`gps module set bh880|lc76g|bn880`, `gps module reset`),
+later is via Settings > GPS or serial (`gps module set bh880|lc76g|bn880|be881`, `gps module reset`),
 requires a reboot to apply (`esp_restart()`, same pattern as the WiFi/AP screens). **The first-boot
 picker itself also reboots immediately after saving** — not just later pin changes — because
 `initCompass()` runs during Phase 2, before the picker can possibly have shown; without this reboot a
@@ -585,14 +586,19 @@ reboot to "streamline" first boot.
 
 **Compass chip selection is never auto-probed, at any point, including the unconfigured first boot** —
 only ever a direct, deterministic consequence of the pinned module (BH-880→QMC5883L `0x0D`,
-BN-880→HMC5883L `0x1E`, LC76G→no compass). See ADR-0032's addendum for why a "try one chip, fall back
-to the other" shortcut was rejected even though it would have been convenient.
+BN-880→HMC5883L `0x1E`, BE-881→QMC5883P `0x2C`, LC76G→no compass). See ADR-0032's addendum for why a
+"try one chip, fall back to the other" shortcut was rejected even though it would have been convenient.
 
 **LC76G has no compass** — a board with `!device_manager::getDeviceState().compass_ok` is forced to
 North-Up automatically at `ui_manager::init()` (not persisted to NVS — a saved Heading-Up preference
 survives if the compass returns), and the Settings nav-mode dropdown is disabled rather than offering a
 Heading-Up option that would silently do nothing. This check is generic (just "did compass init
-succeed"), so BN-880 gets Heading-Up automatically like BH-880 does, with no changes needed there.
+succeed"), so BN-880 and BE-881 both get Heading-Up automatically like BH-880 does, with no changes
+needed there.
+
+**BE-881 has no first-boot picker button** (added 2026-08-14, serial-only: `gps module set be881`) —
+the picker is still the original 3 buttons (BH-880/BN-880/LC76G); adding a 4th was deferred until this
+module had field verification. Don't assume every pinned module type is reachable from that screen.
 
 **Two field-caught bugs, both fixed 2026-08-11**: (1) the first-boot picker crashed (`LoadProhibited`)
 the first time it was tapped on real hardware — `lv_obj_del()`'d itself while still LVGL's active

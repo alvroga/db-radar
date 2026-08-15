@@ -449,11 +449,12 @@ bool saveGPSModuleSelection(uint8_t module_type) {
         g_cached_settings.compass_cal_axis_ratio = 1.0f;
         Serial.println("[SETTINGS] GPS module changed — compass calibration reset");
     }
-    // 0=BH-880 (UBX), 1=LC76G (NMEA/PAIR), 2=BN-880 (NMEA) — keep in sync with
-    // gps_bh880::GpsModule / gps_bh880::moduleTypeName(). Not calling that helper
+    // 0=BH-880 (UBX), 1=LC76G (NMEA/PAIR), 2=BN-880 (NMEA), 3=BE-881 (UBX) — keep in sync
+    // with gps_bh880::GpsModule / gps_bh880::moduleTypeName(). Not calling that helper
     // directly: settings_manager stays independent of hardware driver headers.
     const char* name = (module_type == 1) ? "LC76G (NMEA/PAIR)"
                       : (module_type == 2) ? "BN-880 (NMEA)"
+                      : (module_type == 3) ? "BE-881 (UBX)"
                       : "BH-880 (UBX)";
     Serial.printf("[SETTINGS] GPS module pinned: %s (reboot to apply)\n", name);
     return true; }

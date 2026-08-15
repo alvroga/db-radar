@@ -9,6 +9,7 @@
 // heading formula below are chip-agnostic and unaffected by which chip is active.
 #include "compass_qmc5883l.h"
 #include "compass_hmc5883l.h"
+#include "compass_qmc5883p.h"
 #include "i2c_manager.h"
 #include <math.h>
 
@@ -55,6 +56,10 @@ bool begin(ChipType chip) {
 
     if (chip == ChipType::HMC5883L) {
         initialized = compass_hmc5883l::begin();
+        return initialized;
+    }
+    if (chip == ChipType::QMC5883P) {
+        initialized = compass_qmc5883p::begin();
         return initialized;
     }
 
@@ -104,6 +109,14 @@ bool reset() {
         Serial.println(ok ? "[COMPASS] Re-init successful" : "[COMPASS] Re-init failed — device may need power cycle");
         return ok;
     }
+    if (active_chip == ChipType::QMC5883P) {
+        // The QMC5883P's own soft-reset (CONTROL2 bit7) lives entirely in
+        // compass_qmc5883p.cpp -- its register map differs enough from the QMC5883L's
+        // that duplicating the sequence here would just be another place to get it wrong.
+        initialized = false;
+        bool ok = compass_qmc5883p::reset();
+        return ok;
+    }
 
     Serial.println("[COMPASS] Sending soft reset (CONTROL2 bit7)...");
     initialized = false;
@@ -124,6 +137,9 @@ bool isReady() {
     if (active_chip == ChipType::HMC5883L) {
         return compass_hmc5883l::isReady();
     }
+    if (active_chip == ChipType::QMC5883P) {
+        return compass_qmc5883p::isReady();
+    }
     uint8_t status = 0;
     if (!i2c_manager::readByte(i2c_manager::COMPASS_DEVICE, REG_STATUS, status)) {
         return false;
@@ -136,6 +152,10 @@ bool read(CompassData& out) {
 
     if (active_chip == ChipType::HMC5883L) {
         if (!compass_hmc5883l::readRaw(out.x_raw, out.y_raw, out.z_raw, out.overflow)) {
+            return false;
+        }
+    } else if (active_chip == ChipType::QMC5883P) {
+        if (!compass_qmc5883p::readRaw(out.x_raw, out.y_raw, out.z_raw, out.overflow)) {
             return false;
         }
     } else {

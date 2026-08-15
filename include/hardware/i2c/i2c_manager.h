@@ -49,7 +49,15 @@ bool resetBus();
 // Full re-initialization: tears down all device handles and bus, then re-inits
 // (which runs real bit-bang clock recovery on the freed pins before recreating
 // the bus). Use after standby wake or when the I2C controller FSM is stuck.
-bool reinit(const Config& config = Config{});
+//
+// The no-arg overload reuses the config from the last init()/reinit() call
+// (100kHz project-wide, not Config{}'s 400kHz default) — every call site wants
+// "recover the bus I already have," never a silent speed change. A prior
+// version defaulted the Config& overload itself to Config{}, which meant
+// every recovery path (standby wake, the I2C health watchdog, and touch
+// recovery) silently reinitialized at 400kHz instead of 100kHz.
+bool reinit();
+bool reinit(const Config& config);
 
 struct Stats {
     uint32_t total_ops = 0;
@@ -68,7 +76,7 @@ const Stats& getStats();
 // this exists because a wedge that starts on ONE device (e.g. a marginal compass connection)
 // looks identical to Stats:: until it's bad enough to fail everything — by then the ramp
 // that would have identified the culprit is gone.
-static constexpr int NUM_DEVICES = 7;
+static constexpr int NUM_DEVICES = 8;
 struct DeviceStatSnapshot {
     const char* name = "";
     uint8_t addr = 0;
@@ -78,7 +86,8 @@ struct DeviceStatSnapshot {
     uint32_t max_latency_us = 0;   // worst single transaction since boot
     uint32_t ms_since_last_fail = 0xFFFFFFFF;  // 0xFFFFFFFF = never failed
 };
-// Fills out[0..NUM_DEVICES-1] in IMU_LOW, IMU_HIGH, RTC, TOUCH, EXIO, COMPASS, COMPASS_HMC order.
+// Fills out[0..NUM_DEVICES-1] in IMU_LOW, IMU_HIGH, RTC, TOUCH, EXIO, COMPASS, COMPASS_HMC,
+// COMPASS_QMCP order.
 void getDeviceStats(DeviceStatSnapshot out[NUM_DEVICES]);
 
 // Common device handles (defined in i2c_manager.cpp, registered at init)
@@ -92,6 +101,7 @@ extern DeviceHandle COMPASS_DEVICE_HMC; // 0x1E (HMC5883L on BN-880) — registe
                                          // like every other device handle here regardless of
                                          // which module is actually pinned; only the pinned
                                          // chip's driver ever talks to it (see compass_qmc5883l.cpp).
+extern DeviceHandle COMPASS_DEVICE_QMCP; // 0x2C (QMC5883P on BE-881) — same unconditional-registration note as COMPASS_DEVICE_HMC above.
 
 // TCA9554 IO Expander (was exio.cpp, now consolidated here)
 namespace exio {

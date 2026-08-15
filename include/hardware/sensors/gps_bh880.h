@@ -37,9 +37,12 @@ namespace gps_bh880 {
     // Which physical GPS module to talk to — see settings_manager's gps_module_type/
     // gps_module_configured (pinned via the one-time first-boot picker or Settings > GPS).
     // BN880_NMEA reuses the exact same NMEA/PAIR parsing path as LC76G_NMEA (no separate
-    // protocol handler) — the value exists to drive compass chip selection
-    // (device_manager::initCompass()) and UI labeling, not a new GPS parser.
-    enum class GpsModule : uint8_t { BH880_UBX = 0, LC76G_NMEA = 1, BN880_NMEA = 2 };
+    // protocol handler); BE881_UBX likewise reuses the exact same UBX path as BH880_UBX
+    // (Beitian's BE-881 speaks the same B1301N-family UBX protocol as the BH-880 — only
+    // its compass chip differs, QMC5883P instead of QMC5883L). Both "reuse" values exist
+    // purely to drive compass chip selection (device_manager::initCompass()) and UI
+    // labeling, not a new GPS parser.
+    enum class GpsModule : uint8_t { BH880_UBX = 0, LC76G_NMEA = 1, BN880_NMEA = 2, BE881_UBX = 3 };
 
     // Single source of truth for settings_manager's persisted gps_module_type -> GpsModule
     // mapping, and its display name. Every call site that used to inline this as a ternary

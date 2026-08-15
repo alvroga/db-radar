@@ -30,6 +30,7 @@ DeviceHandle TOUCH_DEVICE    = {0x15, "TOUCH",    nullptr};
 DeviceHandle EXIO_DEVICE     = {0x20, "EXIO",     nullptr};
 DeviceHandle COMPASS_DEVICE  = {0x0D, "COMPASS",  nullptr};
 DeviceHandle COMPASS_DEVICE_HMC = {0x1E, "COMPASS_HMC", nullptr};
+DeviceHandle COMPASS_DEVICE_QMCP = {0x2C, "COMPASS_QMCP", nullptr};
 
 // ============================================================================
 // Per-device forensic stats — see DeviceStatSnapshot in the header for why
@@ -54,6 +55,7 @@ static int deviceIndex(DeviceHandle& dev) {
     if (&dev == &EXIO_DEVICE)     return 4;
     if (&dev == &COMPASS_DEVICE)  return 5;
     if (&dev == &COMPASS_DEVICE_HMC) return 6;
+    if (&dev == &COMPASS_DEVICE_QMCP) return 7;
     return -1;
 }
 
@@ -76,7 +78,7 @@ static void recordDeviceOp(DeviceHandle& dev, bool success, uint32_t latency_us)
 void getDeviceStats(DeviceStatSnapshot out[NUM_DEVICES]) {
     static DeviceHandle* order[NUM_DEVICES] = {
         &IMU_DEVICE_LOW, &IMU_DEVICE_HIGH, &RTC_DEVICE,
-        &TOUCH_DEVICE, &EXIO_DEVICE, &COMPASS_DEVICE, &COMPASS_DEVICE_HMC
+        &TOUCH_DEVICE, &EXIO_DEVICE, &COMPASS_DEVICE, &COMPASS_DEVICE_HMC, &COMPASS_DEVICE_QMCP
     };
     uint32_t now = millis();
     for (int i = 0; i < NUM_DEVICES; i++) {
@@ -227,6 +229,7 @@ bool init(const Config& config) {
     registerDevice(EXIO_DEVICE,     config.frequency);
     registerDevice(COMPASS_DEVICE,  config.frequency);
     registerDevice(COMPASS_DEVICE_HMC, config.frequency);
+    registerDevice(COMPASS_DEVICE_QMCP, config.frequency);
 
     Serial.printf("[I2C] Initialized: SDA=%d, SCL=%d, freq=%luHz\n",
                   config.sda_pin, config.scl_pin, (unsigned long)config.frequency);
@@ -436,6 +439,10 @@ bool resetBus() {
     return false;
 }
 
+bool reinit() {
+    return reinit(g_config);
+}
+
 bool reinit(const Config& config) {
     Serial.println("[I2C] Full re-initialization...");
     system_logger::warn("I2C", "Full re-initialization triggered");
@@ -461,7 +468,7 @@ bool reinit(const Config& config) {
     // Remove all registered device handles before deleting the bus
     DeviceHandle* devices[] = {
         &IMU_DEVICE_LOW, &IMU_DEVICE_HIGH, &RTC_DEVICE,
-        &TOUCH_DEVICE, &EXIO_DEVICE, &COMPASS_DEVICE, &COMPASS_DEVICE_HMC
+        &TOUCH_DEVICE, &EXIO_DEVICE, &COMPASS_DEVICE, &COMPASS_DEVICE_HMC, &COMPASS_DEVICE_QMCP
     };
     for (auto* dev : devices) {
         if (dev->_handle != nullptr) {
@@ -502,6 +509,7 @@ void scanBus() {
         {0x15, "CST820 (Touch)"},
         {0x1E, "HMC5883L (Compass)"},
         {0x20, "TCA9554 (IO Expander)"},
+        {0x2C, "QMC5883P (Compass)"},
         {0x51, "PCF85063 (RTC)"},
         {0x6A, "QMI8658 (IMU low)"},
         {0x6B, "QMI8658 (IMU high)"},

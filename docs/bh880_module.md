@@ -1,6 +1,6 @@
-# GPS Modules: Beitian BH-880 (primary), LC76G, and BN-880
+# GPS Modules: Beitian BH-880 (primary), LC76G, BN-880, and BE-881
 
-**Status**: GPS ✅ Working | Compass ✅ Working (WMM declination applied) | Three-module support ✅ (BN-880 added 2026-08-11, build-verified — not yet field-tested) | LC76G + BH-880 field-verified 2026-08-11
+**Status**: GPS ✅ Working | Compass ✅ Working (WMM declination applied) | Four-module support ✅ (BE-881 added 2026-08-14, field-verified) | LC76G + BH-880 + BE-881 field-verified, BN-880 build-verified only
 
 ## Module Overview
 
@@ -20,6 +20,13 @@ needed — the existing two-pass `detectBaud()` finds it via the NMEA pass unmod
 carries an **HMC5883L** magnetometer (I2C `0x1E`) instead of the BH-880's QMC5883L (`0x0D`) — so unlike
 the LC76G, a BN-880 board *does* get heading-up navigation, just via a different compass chip and
 driver. See "Compass: HMC5883L Magnetometer (BN-880)" below.
+
+**BE-881 support was added 2026-08-14** after a user connected a board sold as "BE-880"/"BE-881" and
+initially picked the BH-880 profile as the closest match — GPS worked (same B1301N-family UBX
+protocol as BH-880, reuses that init path unchanged) but the compass failed at `0x0D`. BE-881 carries
+a **QMC5883P** magnetometer (I2C `0x2C`) — a third, genuinely different chip despite the QMC5883L
+naming similarity (different chip-ID/status/control register layout, confirmed against QST's official
+datasheet). See "Compass: QMC5883P Magnetometer (BE-881)" below.
 
 | Feature | Value |
 |---------|-------|
@@ -158,13 +165,14 @@ was.
 
 ---
 
-## Multi-Module Support: BH-880 + LC76G + BN-880
+## Multi-Module Support: BH-880 + LC76G + BN-880 + BE-881
 
-One firmware image supports all three modules. GPS protocol is auto-identified from the byte stream at
+One firmware image supports all four modules. GPS protocol is auto-identified from the byte stream at
 first boot and then pinned as a persisted choice — not re-detected on every boot. BN-880 reuses the
-LC76G NMEA/PAIR path exactly; the only per-module difference GPS detection itself needs to know about
-is UBX (BH-880) vs. NMEA (LC76G, BN-880). Full design rationale, alternatives considered, why detection
-had to be two strict sequential passes rather than one interleaved pass, and the BN-880 addendum:
+LC76G NMEA/PAIR path exactly; BE-881 reuses the BH-880 UBX path exactly. The only per-module difference
+GPS detection itself needs to know about is UBX (BH-880, BE-881) vs. NMEA (LC76G, BN-880). Full design
+rationale, alternatives considered, why detection had to be two strict sequential passes rather than one
+interleaved pass, and the BN-880 addendum:
 [ADR-0032](adr/0032-pinned-gps-module-not-always-auto-detect.md).
 
 ### How module identification works
@@ -186,7 +194,7 @@ also happens to emit default NMEA chatter alongside UBX immune to ever being mis
 ### Module pinning (Settings > GPS, or serial)
 
 Detection above only ever runs on a board that hasn't been configured yet. `settings_manager` persists
-`gps_module_type` (0=BH-880, 1=LC76G, 2=BN-880) and `gps_module_configured` (NVS, survives both the
+`gps_module_type` (0=BH-880, 1=LC76G, 2=BN-880, 3=BE-881) and `gps_module_configured` (NVS, survives both the
 OTA-only and full-flash web-flasher images — see [`docs/firmware_installation.md`](firmware_installation.md)
 for why NVS's `0x9000-0xd000` region is never touched by either). Once pinned, `device_manager::initGPS()`
 calls `gps_bh880::beginWithProtocol()` instead of `begin()` — skips protocol detection entirely and
@@ -200,30 +208,35 @@ rather than each inlining its own switch/ternary, after a duplicated inline mapp
 **Compass chip selection is never auto-probed — only ever a direct consequence of the pinned module,
 with no fallback.** `device_manager::initCompass()` doesn't attempt any chip at all until
 `gps_module_configured` is true (compass is simply unavailable on the very first, unconfigured boot);
-once pinned, it goes straight to QMC5883L (BH-880), HMC5883L (BN-880), or skips entirely (LC76G) — see
+once pinned, it goes straight to QMC5883L (BH-880), HMC5883L (BN-880), QMC5883P (BE-881), or skips
+entirely (LC76G) — see
 [ADR-0032](adr/0032-pinned-gps-module-not-always-auto-detect.md)'s 2026-08-11 addendum for why a
 "try one chip, fall back to the other" shortcut was rejected even for the first-boot case.
 
 **First boot**: before `gps_module_configured` is ever true, a one-time full-screen picker appears
 (`main.cpp`, right after `ui_manager::init()`, before the loading-screen sequence) with three buttons
 (BH-880 / BN-880 / LC76G), showing what the GPS auto-detect scan found this boot as a hint but always
-requiring an explicit tap. GPS itself isn't gated by this picker — it already came up via the two-pass
-auto-detect earlier in boot (before display was even ready). **Picking a module reboots immediately**
-(`esp_restart()` inside `showGpsModulePickerBlocking()`) — not just a preference save. This is required
-for the compass, not GPS: `initCompass()` runs during Phase 2, before this picker can possibly have
-shown, so on an unconfigured first boot it always skips compass entirely (no auto-probe); without the
-reboot, a freshly-picked BH-880/BN-880 board would finish its first session with the correct pin saved
-but a genuinely uninitialized compass (field-caught 2026-08-11 — see ADR-0032's addendum).
+requiring an explicit tap. **BE-881 has no picker button yet** — a board arriving unconfigured must be
+pinned via serial (`gps module set be881`) once past first boot; adding a fourth picker button was
+deliberately deferred until BE-881 hardware verification landed. GPS itself isn't gated by this picker
+— it already came up via the two-pass auto-detect earlier in boot (before display was even ready).
+**Picking a module reboots immediately** (`esp_restart()` inside `showGpsModulePickerBlocking()`) —
+not just a preference save. This is required for the compass, not GPS: `initCompass()` runs during
+Phase 2, before this picker can possibly have shown, so on an unconfigured first boot it always skips
+compass entirely (no auto-probe); without the reboot, a freshly-picked BH-880/BN-880 board would
+finish its first session with the correct pin saved but a genuinely uninitialized compass (field-caught
+2026-08-11 — see ADR-0032's addendum). The same reasoning applies to `gps module set` on serial, which
+is why that path reboots too.
 
 **Changing the pin later**: Settings > GPS has a module dropdown (options in enum order: BH-880,
-LC76G, BN-880) + "Save + Reboot to Apply" button (same `esp_restart()` pattern as the WiFi/AP screens).
-The tab's old Hot/Warm/Cold Start and Factory Reset touch buttons were removed in an earlier change —
-the web flasher gives full reflash control now, so those are redundant UI weight; the underlying
-commands are unaffected and still reachable via `gps restart hot|warm|cold` and `gps reset` on serial.
-**Also reachable entirely from serial** (`src/utils/diagnostics.cpp`, added alongside the BN-880 work
-as a touch-independent fallback — the board that reported the BN-880 compass issue also had a dead
-touch controller): `gps module` (show current pin), `gps module set bh880|lc76g|bn880` (pin + reboot),
-`gps module reset` (clear the pin so the picker shows again next boot).
+LC76G, BN-880, BE-881) + "Save + Reboot to Apply" button (same `esp_restart()` pattern as the WiFi/AP
+screens). The tab's old Hot/Warm/Cold Start and Factory Reset touch buttons were removed in an earlier
+change — the web flasher gives full reflash control now, so those are redundant UI weight; the
+underlying commands are unaffected and still reachable via `gps restart hot|warm|cold` and `gps reset`
+on serial. **Also reachable entirely from serial** (`src/utils/diagnostics.cpp`, added alongside the
+BN-880 work as a touch-independent fallback — the board that reported the BN-880 compass issue also
+had a dead touch controller): `gps module` (show current pin), `gps module set bh880|lc76g|bn880|be881`
+(pin + reboot), `gps module reset` (clear the pin so the picker shows again next boot).
 
 Switching the pinned module resets stored compass calibration (`settings_manager::saveGPSModuleSelection()`
 / `resetGPSModuleConfiguration()`) — hard-iron offsets and the H0 baseline are specific to one physical
@@ -239,22 +252,23 @@ whether compass init actually succeeded, so it needs no changes as compass-beari
 added. If `compass_ok` is false at `ui_manager::init()`, `heading_up_mode` is forced off in RAM (not
 written to NVS — a saved Heading-Up preference from a BH-880/BN-880 session is preserved and reapplied
 if the compass is ever present again), and the Settings nav-mode dropdown is locked to North-Up
-(`LV_STATE_DISABLED`) instead of offering a Heading-Up option that would silently do nothing. A BN-880
-board has a real compass (HMC5883L) and gets Heading-Up like a BH-880 board does — only LC76G forces
-North-Up.
+(`LV_STATE_DISABLED`) instead of offering a Heading-Up option that would silently do nothing. BN-880
+and BE-881 boards both have a real compass (HMC5883L / QMC5883P respectively) and get Heading-Up like
+a BH-880 board does — only LC76G forces North-Up.
 
 ### Key files added/changed for multi-module support
 
 | File | Role |
 |------|------|
 | `src/hardware/sensors/gps_bh880.cpp` | NMEA/PAIR parser ported in alongside UBX; two-pass `detectBaud()`; `beginWithProtocol()`; `moduleFromType()`/`moduleTypeName()` |
-| `include/hardware/sensors/gps_bh880.h` | `GpsModule` enum (BH880_UBX/LC76G_NMEA/BN880_NMEA), `beginWithProtocol()`, `isNmeaProtocol()`/`protocolName()` |
+| `include/hardware/sensors/gps_bh880.h` | `GpsModule` enum (BH880_UBX/LC76G_NMEA/BN880_NMEA/BE881_UBX), `beginWithProtocol()`, `isNmeaProtocol()`/`protocolName()` |
 | `src/hardware/sensors/compass_hmc5883l.cpp` / `.h` | Low-level HMC5883L register driver (BN-880's compass chip) |
-| `src/hardware/sensors/compass_qmc5883l.cpp` / `.h` | Public compass entry point for the whole codebase; dispatches internally to QMC5883L or HMC5883L via `ChipType` |
-| `src/hardware/i2c/i2c_manager.cpp` / `.h` | `COMPASS_DEVICE_HMC` (0x1E) device handle, `NUM_DEVICES` raised to 7 |
+| `src/hardware/sensors/compass_qmc5883p.cpp` / `.h` | Low-level QMC5883P register driver (BE-881's compass chip) |
+| `src/hardware/sensors/compass_qmc5883l.cpp` / `.h` | Public compass entry point for the whole codebase; dispatches internally to QMC5883L, HMC5883L, or QMC5883P via `ChipType` |
+| `src/hardware/i2c/i2c_manager.cpp` / `.h` | `COMPASS_DEVICE_HMC` (0x1E) + `COMPASS_DEVICE_QMCP` (0x2C) device handles, `NUM_DEVICES` raised to 8 |
 | `src/core/device_manager.cpp` | `initGPS()`/`initCompass()` branch on `gps_module_configured` + pinned type, no auto-probing |
 | `src/utils/settings_manager.cpp` / `.h` | `gps_module_type`/`gps_module_configured`, `saveGPSModuleSelection()`, `resetGPSModuleConfiguration()`, compass-cal reset on module change |
-| `src/core/main.cpp` | First-boot picker (`showGpsModulePickerBlocking()`), 3 buttons |
+| `src/core/main.cpp` | First-boot picker (`showGpsModulePickerBlocking()`), 3 buttons — BE-881 not yet included, see above |
 | `src/ui/ui_manager.cpp` | Forces North-Up when `!compass_ok` (unchanged — already module-agnostic) |
 | `src/ui/settings_screen.cpp` | GPS Module dropdown (3 options) + reboot button; nav-mode dropdown disabled when no compass |
 | `src/utils/diagnostics.cpp` | `gps module [set\|reset]` serial commands |
@@ -438,6 +452,76 @@ QMC5883L apply unchanged once `compass_hmc5883l::readRaw()` has populated x/y/z/
 
 ---
 
+## Compass: QMC5883P Magnetometer (BE-881)
+
+The BE-881 module carries a QMC5883P rather than the BH-880's QMC5883L — despite the near-identical
+name, a genuinely different chip: different chip-ID register, different status register, different
+control-register layout, and a different I2C address. Added 2026-08-14 after a field report (board
+sold as "BE-880"/"BE-881", GPS worked fine via the BH-880 UBX path but the compass failed at `0x0D`).
+Identified positively via the official QST QMC5883P datasheet plus a live double-ACK-confirmed bus
+scan hit at `0x2C`. Low-level driver is `compass_qmc5883p.cpp`/`.h`, dispatched to internally from
+`compass_qmc5883l.cpp` — same pattern as the HMC5883L above, same reasoning for keeping the public
+entry point's name (see "Internal dispatch, not a public rename" in the ADR list).
+
+### Hardware Details
+
+| Feature | Value |
+|---------|-------|
+| **Chip** | QMC5883P |
+| **I2C Address** | 0x2C |
+| **I2C Bus** | Shared (SDA=15, SCL=7, 100kHz) |
+| **Identification Register** | 0x00, expected `0x80` |
+| **Output** | 16-bit signed X, Y, Z (magnetic field), little-endian, native X,Y,Z burst order |
+| **Field Range** | ±8 Gauss (configured; chip also supports ±2G/±12G/±30G) |
+| **ODR** | 200 Hz continuous, OSR1=8 |
+| **Overflow** | STATUS register (0x09) bit 1 (OVFL); bit 0 is DRDY |
+| **Undocumented sign register** | 0x29 — required by the datasheet's own setup examples but absent from its main register table; written `0x06` at init |
+
+### Register Map
+
+| Register | Address | Purpose |
+|----------|---------|---------|
+| CHIP_ID | 0x00 | Fixed `0x80` |
+| DATA | 0x01-0x06 | X_LSB, X_MSB, Y_LSB, Y_MSB, Z_LSB, Z_MSB |
+| STATUS | 0x09 | Bit 0 = DRDY, bit 1 = OVFL |
+| CONTROL1 | 0x0A | OSR2 / OSR1 / ODR / MODE |
+| CONTROL2 | 0x0B | SOFT_RST / SELF_TEST / RNG / SET-RESET-MODE |
+| SIGN | 0x29 | Axis-sign register (undocumented in the register table; datasheet setup examples require it) |
+
+### Initialization Sequence
+
+1. Read CHIP_ID (0x00), verify `0x80`.
+2. Write `0x06` to SIGN (0x29) — required by the datasheet's own setup examples.
+3. Write `0x08` to CONTROL2 (0x0B) — 8G range.
+4. Write `0x0F` to CONTROL1 (0x0A) — continuous mode, 200Hz ODR, OSR1=8.
+
+### Calibration, health classification, and heading
+
+All chip-agnostic — the same hard-iron calibration, EMA health classification, and 2-axis
+`atan2f(cy, cx)` heading formula used for the QMC5883L/HMC5883L apply unchanged once
+`compass_qmc5883p::readRaw()` has populated x/y/z/overflow. See [`docs/compass.md`](compass.md) for the
+full pipeline — nothing there is QMC5883P-specific.
+
+**Known cosmetic issue**: `compass read`'s serial output converts the raw horizontal magnitude to µT
+using a `120 LSB/µT` constant that was derived for the QMC5883L's 2G range. At the QMC5883P's 8G range
+the printed µT figure is mis-scaled (reads low); heading itself is unaffected since it's an angle
+(`atan2f`), not a magnitude, and is scale-independent. Not fixed as of 2026-08-14 — cosmetic only.
+
+### Key Code Files
+
+| File | Purpose |
+|------|---------|
+| `include/hardware/sensors/compass_qmc5883p.h` / `src/hardware/sensors/compass_qmc5883p.cpp` | Low-level register driver |
+| `include/hardware/i2c/i2c_manager.h` | `COMPASS_DEVICE_QMCP` handle (0x2C) |
+| `include/hardware/sensors/compass_qmc5883l.h` | `ChipType` enum, dispatch entry point |
+
+**Note**: the older `compass status`/`compass init` serial commands (`src/utils/diagnostics.cpp`) poke
+QMC5883L registers at `0x0D` directly and pre-date the multi-chip dispatch — they always report "NOT
+FOUND" on a BE-881 board. Use `compass read` for verification; it goes through the real driver dispatch
+and reflects whichever chip is actually pinned.
+
+---
+
 ## I2C Bus Devices (Complete)
 
 All devices on the shared I2C bus (SDA=15, SCL=7 @ 100kHz):
@@ -448,14 +532,15 @@ All devices on the shared I2C bus (SDA=15, SCL=7 @ 100kHz):
 | 0x15 | CST820 (Touch) | Waveshare board |
 | 0x1E | HMC5883L (Compass) | BN-880 module |
 | 0x20 | TCA9554 (IO Expander) | Waveshare board |
+| 0x2C | QMC5883P (Compass) | BE-881 module |
 | 0x51 | PCF85063 (RTC) | Waveshare board |
 | 0x6A | QMI8658 (IMU, low address) | Waveshare board |
 | 0x6B | QMI8658 (IMU, high address) | Waveshare board |
 
-Both compass device handles (`COMPASS_DEVICE` and `COMPASS_DEVICE_HMC`) are registered on the bus
-unconditionally at boot, like every other device here — only the pinned module's driver ever actually
-talks to its chip (see "Module pinning" above); registering the other's handle is harmless since
-`i2c_master_bus_add_device()` just reserves an address slot, it doesn't probe.
+All three compass device handles (`COMPASS_DEVICE`, `COMPASS_DEVICE_HMC`, `COMPASS_DEVICE_QMCP`) are
+registered on the bus unconditionally at boot, like every other device here — only the pinned module's
+driver ever actually talks to its chip (see "Module pinning" above); registering the others' handles is
+harmless since `i2c_master_bus_add_device()` just reserves an address slot, it doesn't probe.
 
 A scan will sometimes also show `0x7E` — that's not a real device, it's a probe artifact
 at a reserved I2C address that survives even a double-ACK confirmation guard. See

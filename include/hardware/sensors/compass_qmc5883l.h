@@ -30,18 +30,19 @@ namespace compass_qmc5883l {
 
     // Which physical compass chip is actually present on this board. Decided once by
     // device_manager::initCompass() from the pinned GPS module choice (BH-880 ->
-    // QMC5883L, BN-880 -> HMC5883L, LC76G -> compass skipped entirely) -- never
-    // runtime-probed. See docs/adr/0032-pinned-gps-module-not-always-auto-detect.md's
-    // BN-880 addendum for why: the module lineup won't stay fixed at two compass-bearing
-    // types forever, so only an explicit, physical choice can disambiguate reliably.
+    // QMC5883L, BN-880 -> HMC5883L, BE-881 -> QMC5883P, LC76G -> compass skipped
+    // entirely) -- never runtime-probed. See
+    // docs/adr/0032-pinned-gps-module-not-always-auto-detect.md's BN-880 addendum for
+    // why: the module lineup won't stay fixed at two compass-bearing types forever, so
+    // only an explicit, physical choice can disambiguate reliably.
     //
     // This namespace is the single public compass entry point for the whole codebase
     // (task_manager.cpp, settings_screen.cpp, navigation.cpp, diagnostics.cpp,
-    // tilt_bench.cpp) even though it now orchestrates two chips internally -- see the
+    // tilt_bench.cpp) even though it now orchestrates three chips internally -- see the
     // top-of-file comment in the .cpp for why it wasn't renamed. Calibration storage,
     // health classification, and the heading formula below are chip-agnostic and stay
     // exactly as they were; only begin()/read() know which chip they're actually talking to.
-    enum class ChipType : uint8_t { QMC5883L = 0, HMC5883L = 1 };
+    enum class ChipType : uint8_t { QMC5883L = 0, HMC5883L = 1, QMC5883P = 2 };
 
     bool begin(ChipType chip = ChipType::QMC5883L);  // Init the given chip; see compass_hmc5883l.h for the HMC5883L register differences
     bool reset();                    // Soft-reset chip then re-run begin() for whichever ChipType was last passed to begin() (recovers from I2C bus collisions)

@@ -14,25 +14,28 @@ None currently open. See Resolved below for FT-03, FT-05, FT-09.
 
 ## Planned
 
-### Multi GPS Module Support (BH-880 + LC76G + BN-880) — BH-880/LC76G field-verified, BN-880 not yet
+### Multi GPS Module Support (BH-880 + LC76G + BN-880 + BE-881) — BH-880/LC76G/BE-881 field-verified, BN-880 not yet
 **Severity**: Feature — restores LC76G compatibility (dropped when the project moved to the BH-880)
-without needing a separate build, plus BN-880 support requested via a field report (GitHub issue #1)
+without needing a separate build, plus BN-880 and BE-881 support requested/prompted by field reports
+(BN-880: GitHub issue #1; BE-881: user-connected board, 2026-08-14)
 
 **Status**: implemented on the `feature/multi-gps-module` branch (renamed from `feature/dual-gps-module`
-2026-08-11), deliberately **not** merged into `initial-release`. `gps_bh880.cpp` speaks UBX (BH-880) and
-NMEA/PAIR (LC76G, BN-880), auto-identified on first boot and then pinned as a persisted choice
-(Settings > GPS, or serial `gps module set ...`) rather than re-detected every boot — compass chip
-selection is never auto-probed, only ever a direct consequence of the pin. A board with no compass
-(LC76G-only) is forced to North-Up automatically; BH-880 and BN-880 both get Heading-Up. LC76G and
-BH-880 paths **field-verified on real hardware 2026-08-11** (also caught and fixed two real bugs: a
+2026-08-11), deliberately **not** merged into `initial-release`. `gps_bh880.cpp` speaks UBX (BH-880,
+BE-881) and NMEA/PAIR (LC76G, BN-880), auto-identified on first boot and then pinned as a persisted
+choice (Settings > GPS, or serial `gps module set ...`) rather than re-detected every boot — compass
+chip selection is never auto-probed, only ever a direct consequence of the pin. A board with no compass
+(LC76G-only) is forced to North-Up automatically; BH-880, BN-880, and BE-881 all get Heading-Up. LC76G
+and BH-880 paths **field-verified on real hardware 2026-08-11** (also caught and fixed two real bugs: a
 first-boot-picker crash, and the compass staying uninitialized after picking BH-880 on a fresh board's
-first boot — see CHANGELOG.md). BN-880/HMC5883L path is build-verified only, and its first field
-report (2026-08-12) hit unresponsive touch on the first-boot picker screen — a likely I2C bus-wedge
-interaction with the accelerometer probe, mitigated with a boot-time recovery retry (touch-specific,
-not BN-880-specific) but not yet confirmed against the reporting board. See
-[CHANGELOG.md](CHANGELOG.md), [ADR-0032](docs/adr/0032-pinned-gps-module-not-always-auto-detect.md),
-and [ADR-0033](docs/adr/0033-compass-internal-dispatch-not-rename.md) for full detail. Merge into
-`initial-release` once BH-880 and BN-880 are also field-verified.
+first boot — see CHANGELOG.md). BE-881/QMC5883P path **field-verified 2026-08-14** (no first-boot
+picker button yet — pinned via serial only, see docs/bh880_module.md). BN-880/HMC5883L path is
+build-verified only, and its first field report (2026-08-12) hit unresponsive touch on the first-boot
+picker screen — a likely I2C bus-wedge interaction with the accelerometer probe, mitigated with a
+boot-time recovery retry (touch-specific, not BN-880-specific) but not yet confirmed against the
+reporting board. See [CHANGELOG.md](CHANGELOG.md),
+[ADR-0032](docs/adr/0032-pinned-gps-module-not-always-auto-detect.md), and
+[ADR-0033](docs/adr/0033-compass-internal-dispatch-not-rename.md) for full detail. Merge into
+`initial-release` once BN-880 is also field-verified.
 
 ---
 

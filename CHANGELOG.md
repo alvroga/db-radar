@@ -95,6 +95,37 @@ build-verified only — no BN-880 hardware available yet to confirm the register
 HMC5883L Magnetometer" sections, [ADR-0032](docs/adr/0032-pinned-gps-module-not-always-auto-detect.md)'s
 addendum, [ADR-0033](docs/adr/0033-compass-internal-dispatch-not-rename.md).
 
+**BE-881 as a fourth pinned GPS/compass module (2026-08-14)**
+
+**Still isolated on `feature/multi-gps-module`**, not merged into `initial-release`. A user connected
+a board sold as "BE-880"/"BE-881" and picked the BH-880 profile as the closest match; the boot log
+showed a clean UBX GPS handshake but the compass failing at `0x0D`. BE-881's GPS side genuinely is
+BH-880-compatible (same B1301N-family UBX protocol, reuses `GpsModule::BH880_UBX`'s exact init path —
+no new GPS parser needed), but its magnetometer is a **QMC5883P at `0x2C`**, not the BH-880's QMC5883L
+at `0x0D` — a third distinct chip despite the naming collision with QMC5883L, confirmed against the
+official QST QMC5883P datasheet (different chip-ID register, status register, and control-register
+layout) and against a live double-ACK-confirmed bus-scan hit at exactly `0x2C`.
+
+New `GpsModule::BE881_UBX` (pinned value `3`) and a new `compass_qmc5883p.cpp`/`.h` driver (continuous
+mode, 200Hz, 8G, OSR1=8), dispatched from `compass_qmc5883l.cpp` via a third `ChipType::QMC5883P`
+value — same internal-dispatch pattern BN-880/HMC5883L established, per
+[ADR-0033](docs/adr/0033-compass-internal-dispatch-not-rename.md). `i2c_manager` gained an eighth
+registered device handle (`COMPASS_DEVICE_QMCP`, `NUM_DEVICES` 7→8), including the `reinit()` teardown
+array — easy to miss, since a device left out of that array survives as a stale handle across a bus
+recovery cycle. Settings dropdown, `gps module set be881`, and NVS persistence all extended to match.
+
+Note: the older `compass status`/`compass init` serial commands are hardcoded to poke QMC5883L
+registers at `0x0D` directly (pre-dating the multi-chip dispatch pattern) and will always report "NOT
+FOUND" on a BE-881 board — this is expected, not a regression. `compass read` is the command to use
+for verification; it goes through the real driver dispatch.
+
+**Field-verified 2026-08-14**: live serial capture confirms `Compass: OK` in the boot summary, a clean
+`0x2C - QMC5883P (Compass)` bus-scan hit with zero I2C failures, and `compass read` returning sane,
+changing heading data. GPS side unaffected (valid fix, 5 satellites). Build-verified clean (RAM 51.4%,
+Flash 40.9%, no meaningful size delta).
+
+**Full detail**: [`docs/bh880_module.md`](docs/bh880_module.md).
+
 ### Fixed
 
 **Touch unresponsive on first boot, reported on a BN-880 board (2026-08-12)**

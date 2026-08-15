@@ -646,6 +646,7 @@ GpsModule moduleFromType(uint8_t type) {
   switch (type) {
     case 1: return GpsModule::LC76G_NMEA;
     case 2: return GpsModule::BN880_NMEA;
+    case 3: return GpsModule::BE881_UBX;
     default: return GpsModule::BH880_UBX;
   }
 }
@@ -654,6 +655,7 @@ const char* moduleTypeName(uint8_t type) {
   switch (type) {
     case 1: return "LC76G (NMEA/PAIR)";
     case 2: return "BN-880 (NMEA)";
+    case 3: return "BE-881 (UBX)";
     default: return "BH-880 (UBX)";
   }
 }

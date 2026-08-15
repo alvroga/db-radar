@@ -455,9 +455,10 @@ void handleGPSCommand(const char* args) {
             if (strncmp(args, "bh880", 5) == 0) type = 0;
             else if (strncmp(args, "lc76g", 5) == 0) type = 1;
             else if (strncmp(args, "bn880", 5) == 0) type = 2;
+            else if (strncmp(args, "be881", 5) == 0) type = 3;
 
             if (type < 0) {
-                Serial.println("Usage: gps module set bh880|lc76g|bn880");
+                Serial.println("Usage: gps module set bh880|lc76g|bn880|be881");
             } else {
                 settings_manager::saveGPSModuleSelection((uint8_t)type);
                 Serial.println("[GPS] Rebooting to apply in 2 seconds...");
@@ -476,7 +477,7 @@ void handleGPSCommand(const char* args) {
             Serial.printf("Module:     %s\n", gps_bh880::moduleTypeName(gs.gps_module_type));
             Serial.println("Usage:");
             Serial.println("  gps module              - Show current pin");
-            Serial.println("  gps module set <module> - Pin directly (bh880|lc76g|bn880), reboots to apply");
+            Serial.println("  gps module set <module> - Pin directly (bh880|lc76g|bn880|be881), reboots to apply");
             Serial.println("  gps module reset        - Clear the pin so the picker shows again next boot");
         }
     }
@@ -534,7 +535,7 @@ void handleGPSCommand(const char* args) {
         Serial.println("  gps restart <hot|warm|cold> - Restart GPS module");
         Serial.println("  gps reset              - Factory reset (clears all settings)");
         Serial.println("  gps module             - Show pinned GPS/compass module");
-        Serial.println("  gps module set <mod>   - Pin bh880|lc76g|bn880 directly, reboots to apply");
+        Serial.println("  gps module set <mod>   - Pin bh880|lc76g|bn880|be881 directly, reboots to apply");
         Serial.println("  gps module reset       - Clear pin, first-boot picker shows again next boot");
     }
 }
@@ -787,7 +788,7 @@ void printAvailableCommands() {
     Serial.println("  gps restart <mode>   - Restart GPS (hot/warm/cold)");
     Serial.println("  gps reset            - Factory reset GPS module");
     Serial.println("  gps module           - Show pinned GPS/compass module");
-    Serial.println("  gps module set <mod> - Pin bh880|lc76g|bn880 directly, reboots to apply");
+    Serial.println("  gps module set <mod> - Pin bh880|lc76g|bn880|be881 directly, reboots to apply");
     Serial.println("  gps module reset     - Clear pin, picker shows again next boot");
     Serial.println("");
     Serial.println("GPX Web Server Commands:");

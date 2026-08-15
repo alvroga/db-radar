@@ -174,6 +174,12 @@ extern "C" void app_main() {
     // BOOT PHASE 1: Serial initialized
     Serial.printf("[T+%08lu] BOOT: Phase 1 - Serial initialized\n", millis());
 
+    // Printed unconditionally (not gated behind the `version` serial command) so
+    // every field-captured boot log self-identifies which firmware produced it —
+    // otherwise the only way to tell is cross-referencing the ESP-IDF bootloader's
+    // own "compile time" line against git commit timestamps by hand.
+    Serial.printf("[BOOT] Running DRAC OS %s\n", FW_VERSION);
+
     Serial.println("==== GPS Radar - FreeRTOS Task Architecture ====");
     Serial.printf("[BOOT] CPU: %lu MHz  (expected 240 — a 160 here means "
                   "CONFIG_ESP_DEFAULT_CPU_FREQ_MHZ_240 did not reach sdkconfig)\n",

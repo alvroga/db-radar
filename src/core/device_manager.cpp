@@ -417,6 +417,12 @@ bool initCompass() {
             addr = 0x1E;
             chip_name = "HMC5883L";
             break;
+        case gps_bh880::GpsModule::BE881_UBX:
+            chip = compass_qmc5883l::ChipType::QMC5883P;
+            dev = &i2c_manager::COMPASS_DEVICE_QMCP;
+            addr = 0x2C;
+            chip_name = "QMC5883P";
+            break;
         case gps_bh880::GpsModule::LC76G_NMEA:
         default:
             Serial.println("[COMPASS] Pinned module has no compass (LC76G) — skipping");
@@ -792,16 +798,47 @@ bool initTouch() {
         // cst820_begin() is a bare single 10ms i2c_manager::ping() with no retry,
         // unlike the retried read()/write() path everything else uses — a slave
         // that NACK'd moments earlier (e.g. the accel probe storm during initAccel())
-        // can leave the bus wedged for the next un-retried ping. Mirrors the EXIO
-        // recovery already done in i2c_manager::init() for the same reason.
-        Serial.println("[TOUCH] CST820 not found — attempting clock recovery");
-        i2c_manager::resetBus();
+        // can leave the bus wedged for the next un-retried ping.
+        //
+        // Must be reinit(), not resetBus() — resetBus() is a documented no-op for
+        // clock recovery on ESP32-S3 (i2c_master_bus_reset()'s wait loop polls an
+        // IDF LL stub that unconditionally returns false, so it returns ESP_OK
+        // without ever driving a pulse; see docs/i2c.md's Bus Recovery section and
+        // the comment above resetBus() in i2c_manager.cpp). reinit() tears down and
+        // rebuilds the bus, running real bit-bang clock recovery on the freed pins
+        // first — the same path standby-wake and the I2C health watchdog already
+        // use successfully.
+        Serial.println("[TOUCH] CST820 not found — attempting full I2C reinit");
+        i2c_manager::reinit();
         delay(10);
         if (!cst820_begin(0x15)) {
-            Serial.println("[TOUCH] CST820 still not found after recovery");
-            return false;
+            // Bus-level recovery didn't help. This is a *device* reset, not a bus
+            // one — TP_RST (EXIO pin 1, active-low) power-cycles the CST820 chip
+            // itself, the same sequence standby_manager.cpp already uses
+            // successfully after wake. A chip stuck in a bad internal state (as
+            // opposed to a wedged bus, which reinit() above already handles) will
+            // not respond to any amount of bus recovery — only its own reset line
+            // clears it.
+            Serial.println("[TOUCH] Still not found after bus reinit — trying CST820 hardware reset (TP_RST)");
+            uint8_t exio_out = 0xFF;  // Safe default: all pins high (inactive)
+            if (!i2c_manager::exio::readOutput(exio_out)) {
+                Serial.println("[TOUCH] EXIO read failed — using default 0xFF for TP_RST");
+            }
+            i2c_manager::exio::rawWrite(i2c_manager::exio::REG_OUTPUT,
+                                         exio_out & ~(1u << (uint8_t)i2c_manager::exio::TP_RST));
+            delay(15);
+            i2c_manager::exio::rawWrite(i2c_manager::exio::REG_OUTPUT,
+                                         exio_out | (1u << (uint8_t)i2c_manager::exio::TP_RST));
+            delay(100);  // CST820 needs ~100ms to boot after reset
+
+            if (!cst820_begin(0x15)) {
+                Serial.println("[TOUCH] CST820 still not found after hardware reset");
+                return false;
+            }
+            Serial.println("[TOUCH] CST820 recovered after hardware reset");
+        } else {
+            Serial.println("[TOUCH] CST820 recovered after reinit");
         }
-        Serial.println("[TOUCH] CST820 recovered after clock pulses");
     }
 
     lv_indev_drv_init(&indev_drv);
