@@ -49,6 +49,18 @@ namespace compass_qmc5883l {
     bool read(CompassData& out);     // Read XYZ, compute heading, check status
     bool isReady();                  // Check data-ready bit in STATUS register
 
+    // Which chip begin() was last told to talk to. For callers outside this dispatch
+    // (diagnostics.cpp's 'compass status'/'compass init') that need to act differently
+    // per chip instead of going through read()/begin()'s own internal dispatch.
+    ChipType activeChip();
+
+    // LSB per microtesla for whichever chip is currently active — QMC5883L stays the
+    // historical 120 (2G range, unverified against a from-scratch datasheet re-check but
+    // unchanged from before this function existed); HMC5883L/QMC5883P values come from
+    // their own headers' LSB_PER_UT constants. h_mag itself is unaffected by chip choice
+    // (heading is scale-independent) — this only matters for printed uT/H0 figures.
+    float lsbPerUt();
+
     // Calibration (store hard-iron offsets)
     void setCalibration(int16_t x_offset, int16_t y_offset, int16_t z_offset);
     void getCalibration(int16_t& x_offset, int16_t& y_offset, int16_t& z_offset);

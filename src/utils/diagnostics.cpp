@@ -21,6 +21,8 @@
 #include "hardware/sensors/battery.h"
 #include "hardware/connectivity/beacon_proximity.h"
 #include "hardware/sensors/compass_qmc5883l.h"
+#include "hardware/sensors/compass_hmc5883l.h"
+#include "hardware/sensors/compass_qmc5883p.h"
 #include "hardware/sensors/accel_qmi8658.h"
 #include "navigation/tilt_compensation.h"
 #include <algorithm>
@@ -1985,15 +1987,29 @@ void handleCompassCommand(const char* args) {
     // Skip whitespace
     while (*args == ' ') args++;
 
-    // QMC5883L register addresses
+    // QMC5883L register addresses (status branch below + the raw-read command further
+    // down still use these directly; init now dispatches through compass_qmc5883l::begin()
+    // instead of hand-rolling register writes, so REG_CONTROL2/REG_SETRESET are gone)
     constexpr uint8_t REG_DATA     = 0x00;  // X_LSB, X_MSB, Y_LSB, Y_MSB, Z_LSB, Z_MSB
     constexpr uint8_t REG_STATUS   = 0x06;
     constexpr uint8_t REG_CONTROL1 = 0x09;
-    constexpr uint8_t REG_CONTROL2 = 0x0A;
-    constexpr uint8_t REG_SETRESET = 0x0B;
     constexpr uint8_t REG_CHIP_ID  = 0x0D;
 
     if (strncmp(args, "status", 6) == 0 || strlen(args) == 0) {
+        // Chip-aware as of 2026-08-14 -- this used to be hardcoded to QMC5883L/0x0D and
+        // always reported "NOT FOUND" on BN-880/BE-881 boards even when everything was
+        // fine. HMC5883L/QMC5883P dispatch to their own drivers' debugPrintStatus() so
+        // this file doesn't need to know their register maps; QMC5883L (the original,
+        // default chip) keeps its existing inline implementation below unchanged.
+        if (compass_qmc5883l::activeChip() == compass_qmc5883l::ChipType::HMC5883L) {
+            compass_hmc5883l::debugPrintStatus();
+            return;
+        }
+        if (compass_qmc5883l::activeChip() == compass_qmc5883l::ChipType::QMC5883P) {
+            compass_qmc5883p::debugPrintStatus();
+            return;
+        }
+
         Serial.println("==== Compass Status (QMC5883L) ====");
 
         // Check if device is on the bus
@@ -2043,38 +2059,13 @@ void handleCompassCommand(const char* args) {
         Serial.println("====================================");
     }
     else if (strncmp(args, "init", 4) == 0) {
-        Serial.println("[COMPASS] Initializing QMC5883L...");
-
-        // Step 1: Write SET/RESET period
-        if (!i2c_manager::writeByte(i2c_manager::COMPASS_DEVICE, REG_SETRESET, 0x01)) {
-            Serial.println("[COMPASS] Failed to write SET/RESET register");
-            return;
-        }
-
-        // Step 2: Configure - Continuous mode, 200Hz ODR, 2G range, 512 OSR
-        // 0x0D = 00 00 11 01 = OSR512 | RNG2G | ODR200Hz | Continuous
-        uint8_t config = 0x01   // Continuous mode
-                       | 0x0C;  // 200Hz ODR
-        // OSR 512 = 0x00 (bits 7-6), RNG 2G = 0x00 (bits 5-4) - both zero, no OR needed
-
-        if (!i2c_manager::writeByte(i2c_manager::COMPASS_DEVICE, REG_CONTROL1, config)) {
-            Serial.println("[COMPASS] Failed to write CONTROL1 register");
-            return;
-        }
-
-        // Step 3: Enable pointer rollover
-        if (!i2c_manager::writeByte(i2c_manager::COMPASS_DEVICE, REG_CONTROL2, 0x40)) {
-            Serial.println("[COMPASS] Failed to write CONTROL2 register");
-            return;
-        }
-
-        delay(10);  // Let first measurement complete
-
-        // Verify by reading chip ID
-        uint8_t chip_id = 0;
-        i2c_manager::readByte(i2c_manager::COMPASS_DEVICE, REG_CHIP_ID, chip_id);
-        Serial.printf("[COMPASS] Initialized! Chip ID: 0x%02X, Config: 0x%02X\n", chip_id, config);
-        Serial.println("[COMPASS] Mode: Continuous, 200Hz, 2G range, 512x oversampling");
+        // Chip-aware as of 2026-08-14 -- this used to hand-roll QMC5883L-only register
+        // writes, duplicating (and drifting from) what compass_qmc5883l::begin() already
+        // does correctly for all three chips. Just call the real dispatch entry point
+        // for whichever chip is pinned; each driver prints its own init message.
+        Serial.println("[COMPASS] Re-initializing (manual command)...");
+        bool ok = compass_qmc5883l::begin(compass_qmc5883l::activeChip());
+        Serial.println(ok ? "[COMPASS] Init OK" : "[COMPASS] Init FAILED");
     }
     else if (strncmp(args, "read", 4) == 0) {
         // Goes through the driver rather than reading registers directly, so what
@@ -2094,7 +2085,7 @@ void handleCompassCommand(const char* args) {
         Serial.printf("Offsets   X %6d  Y %6d  Z %6d\n", ox, oy, oz);
         Serial.printf("Corrected X %6d  Y %6d  Z %6d\n", cd.cx, cd.cy, cd.cz);
         // 120 LSB/uT at the 2 G range. Horizontal field in LA is ~24.5 uT (~2940 LSB).
-        Serial.printf("H (horiz) %.0f LSB  = %.1f uT\n", cd.h_mag, cd.h_mag / 120.0f);
+        Serial.printf("H (horiz) %.0f LSB  = %.1f uT\n", cd.h_mag, cd.h_mag / compass_qmc5883l::lsbPerUt());
         Serial.printf("Heading   %.1f deg (magnetic, calibration applied)\n", cd.heading);
         Serial.printf("Overflow  %s\n", cd.overflow ? "YES - strong local source" : "no");
         Serial.println("=========================");
@@ -2148,7 +2139,7 @@ void handleCompassCommand(const char* args) {
         // Level 1 health metrics (WP-4, docs/compass_calibration_foundation.md §5) -- captured from
         // the calibration sweep itself, distinct from the offset-magnitude heuristic above.
         if (settings.compass_cal_h0 > 0.0f) {
-            Serial.printf("H0 (baseline):    %.1f LSB (%.1f uT)\n", settings.compass_cal_h0, settings.compass_cal_h0 / 120.0f);
+            Serial.printf("H0 (baseline):    %.1f LSB (%.1f uT)\n", settings.compass_cal_h0, settings.compass_cal_h0 / compass_qmc5883l::lsbPerUt());
             Serial.printf("Circle-fit resid: %.1f%% (healthy band: 2-4%%)\n", settings.compass_cal_residual_pct);
             Serial.printf("Axis ratio:       %.3f (healthy band: ~1.06-1.07)\n", settings.compass_cal_axis_ratio);
 

@@ -11,7 +11,13 @@
 // module is BE-881. Do not call this namespace directly from outside that file.
 namespace compass_qmc5883p {
 
-    bool begin();     // Verify chip ID (0x00 == 0x80), enter continuous mode 200Hz / 8G
+    // LSB per microtesla at the +/-2G range begin() configures (datasheet Table 2:
+    // 15000 LSB/Gauss at +/-2G, 1 Gauss = 100uT -> 150 LSB/uT). Used by
+    // compass_qmc5883l::lsbPerUt() for the 'compass read'/'compass cal' uT display —
+    // must be updated together with begin()'s range if that ever changes.
+    constexpr float LSB_PER_UT = 150.0f;
+
+    bool begin();     // Verify chip ID (0x00 == 0x80), enter continuous mode 200Hz / 2G
     bool reset();      // Soft reset (CONTROL2 bit7) then re-run begin()
     bool isReady();    // DRDY bit in the status register (0x09, bit0)
 
@@ -19,5 +25,10 @@ namespace compass_qmc5883p {
     // X,Y,Z — no reordering needed, unlike the HMC5883L). overflow is the hardware OVFL
     // bit (status register 0x09, bit1).
     bool readRaw(int16_t& x, int16_t& y, int16_t& z, bool& overflow);
+
+    // Prints chip presence/ID/mode/range/status for the 'compass status' serial command.
+    // Self-contained (doesn't expose this file's register map) — diagnostics.cpp just
+    // dispatches to this based on compass_qmc5883l::activeChip().
+    void debugPrintStatus();
 
 }

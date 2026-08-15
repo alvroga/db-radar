@@ -50,6 +50,18 @@ namespace {
 
 namespace compass_qmc5883l {
 
+ChipType activeChip() {
+    return active_chip;
+}
+
+float lsbPerUt() {
+    switch (active_chip) {
+        case ChipType::HMC5883L: return compass_hmc5883l::LSB_PER_UT;
+        case ChipType::QMC5883P: return compass_qmc5883p::LSB_PER_UT;
+        default:                 return 120.0f;  // QMC5883L, historical constant
+    }
+}
+
 bool begin(ChipType chip) {
     active_chip = chip;
     initialized = false;

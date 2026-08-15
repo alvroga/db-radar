@@ -10,6 +10,11 @@
 // module is BN-880. Do not call this namespace directly from outside that file.
 namespace compass_hmc5883l {
 
+    // LSB per microtesla at the +/-1.3Ga gain begin() configures (datasheet: 1090
+    // LSB/Gauss, 1 Gauss = 100uT -> 10.9 LSB/uT). Used by compass_qmc5883l::lsbPerUt()
+    // for the 'compass read'/'compass cal' uT display.
+    constexpr float LSB_PER_UT = 10.9f;
+
     bool begin();     // Verify chip ID (0x48/0x34/0x33), configure continuous mode, +/-1.3 Ga
     bool isReady();    // Data-ready bit in the status register
 
@@ -18,5 +23,10 @@ namespace compass_hmc5883l {
     // sentinel (-4096 per datasheet), not a hardware-reported single-bit flag like the
     // QMC5883L's STATUS_OVL.
     bool readRaw(int16_t& x, int16_t& y, int16_t& z, bool& overflow);
+
+    // Prints chip presence/ID/config/status for the 'compass status' serial command.
+    // Self-contained (doesn't expose this file's register map) — diagnostics.cpp just
+    // dispatches to this based on compass_qmc5883l::activeChip().
+    void debugPrintStatus();
 
 }

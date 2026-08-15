@@ -141,6 +141,35 @@ changed.
 
 ### Fixed
 
+**Compass polish pass: QMC5883P field range, chip-aware diagnostics, µT conversion (2026-08-14)**
+
+Found during a review of the just-shipped BE-881 work, before hardware field-testing had confirmed
+heading correctness. Three fixes, all build-verified clean (RAM 51.4%, Flash 41.0%, +1.5KB from the
+new per-chip status functions):
+
+1. **QMC5883P field range narrowed ±8G → ±2G** (`compass_qmc5883p.cpp`, CONTROL2 `0x08` → `0x0C`).
+   ±8G was only ever chosen because it's the datasheet's own setup example — at that range Earth's
+   local horizontal field (~24.5µT) uses just ~3% of the ADC's full scale. The datasheet's own
+   sensitivity table confirms the win isn't marginal: 3750 LSB/G at 8G vs 15000 LSB/G at 2G, a real 4×
+   resolution gain (150 LSB/µT vs 37.5 LSB/µT).
+2. **`compass status`/`compass init` are now chip-aware.** Both pre-dated the BN-880/BE-881 multi-chip
+   dispatch and were hardcoded to QMC5883L's register map at `0x0D` — always reporting "NOT FOUND" on
+   a BN-880 or BE-881 board even when everything was fine, and `init` hand-rolling QMC5883L-only
+   register writes instead of using the real per-chip init path. `status` now dispatches to each
+   driver's own `debugPrintStatus()` (new: `compass_hmc5883l.cpp`, `compass_qmc5883p.cpp`) based on a
+   new `compass_qmc5883l::activeChip()` accessor; `init` just calls
+   `compass_qmc5883l::begin(activeChip())` instead of duplicating register logic that already existed
+   correctly elsewhere.
+3. **Fixed a latent µT-conversion bug that shipped with BN-880, not just BE-881.** `compass read`'s
+   printed µT figure (and `compass cal`'s H0 baseline display) used a single hardcoded `120 LSB/µT`
+   constant derived for the QMC5883L's 2G range — silently wrong for HMC5883L (real: 10.9 LSB/µT at
+   its ±1.3Ga gain) since BN-880 shipped, and would have been wrong for QMC5883P too. Both drivers now
+   expose their own `LSB_PER_UT` constant; a new `compass_qmc5883l::lsbPerUt()` dispatches to the
+   correct one. Heading itself was never affected (angle-only, scale-independent) — only the printed
+   number was wrong.
+
+**Full detail**: [`docs/bh880_module.md`](docs/bh880_module.md)'s QMC5883P and HMC5883L sections.
+
 **Touch unresponsive on first boot, reported on a BN-880 board (2026-08-12)**
 
 Field report: a BN-880 board booted, showed the first-boot GPS module picker, but touch didn't

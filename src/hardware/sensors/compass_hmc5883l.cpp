@@ -73,6 +73,56 @@ bool isReady() {
     return (status & STATUS_RDY) != 0;
 }
 
+// For the 'compass status' serial command (diagnostics.cpp), dispatched there via
+// compass_qmc5883l::activeChip() -- see the identical comment in compass_qmc5883p.cpp's
+// debugPrintStatus() for why this lives here instead of diagnostics.cpp. Register bytes
+// are shown raw (not bit-decoded like the QMC5883P/QMC5883L versions) since this file
+// doesn't carry a verified bit-field table for CONFIG_A/CONFIG_B beyond the two values
+// begin() itself writes -- decoding them here would risk asserting something unverified.
+void debugPrintStatus() {
+    Serial.println("==== Compass Status (HMC5883L) ====");
+
+    bool present = i2c_manager::ping(i2c_manager::COMPASS_DEVICE_HMC);
+    Serial.printf("Device (0x1E):   %s\n", present ? "DETECTED" : "NOT FOUND");
+    if (!present) {
+        Serial.println("Check BN-880 I2C wiring (SDA=15, SCL=7)");
+        Serial.println("====================================");
+        return;
+    }
+
+    uint8_t id_a = 0, id_b = 0, id_c = 0;
+    bool id_ok = i2c_manager::readByte(i2c_manager::COMPASS_DEVICE_HMC, REG_ID_A, id_a) &&
+                 i2c_manager::readByte(i2c_manager::COMPASS_DEVICE_HMC, REG_ID_B, id_b) &&
+                 i2c_manager::readByte(i2c_manager::COMPASS_DEVICE_HMC, REG_ID_C, id_c);
+    if (id_ok) {
+        bool match = (id_a == EXPECTED_ID_A && id_b == EXPECTED_ID_B && id_c == EXPECTED_ID_C);
+        Serial.printf("Chip ID:         0x%02X 0x%02X 0x%02X %s\n", id_a, id_b, id_c,
+                      match ? "('H43' confirmed)" : "(unexpected!)");
+    } else {
+        Serial.println("Chip ID:         READ FAILED");
+    }
+
+    uint8_t cfg_a = 0, cfg_b = 0, mode = 0;
+    if (i2c_manager::readByte(i2c_manager::COMPASS_DEVICE_HMC, REG_CONFIG_A, cfg_a)) {
+        Serial.printf("Config A:        0x%02X (expect 0x70: 8-sample avg, 15Hz)\n", cfg_a);
+    }
+    if (i2c_manager::readByte(i2c_manager::COMPASS_DEVICE_HMC, REG_CONFIG_B, cfg_b)) {
+        Serial.printf("Config B:        0x%02X (expect 0x20: +/-1.3Ga gain)\n", cfg_b);
+    }
+    if (i2c_manager::readByte(i2c_manager::COMPASS_DEVICE_HMC, REG_MODE, mode)) {
+        Serial.printf("Mode:            0x%02X (expect 0x00: continuous)\n", mode);
+    }
+
+    uint8_t status = 0;
+    if (i2c_manager::readByte(i2c_manager::COMPASS_DEVICE_HMC, REG_STATUS, status)) {
+        Serial.printf("Data Ready:      %s\n", (status & STATUS_RDY) ? "YES" : "NO");
+    }
+    Serial.println("(No hardware overflow bit on this chip -- readRaw() infers it from the");
+    Serial.println(" -4096 ADC-saturation sentinel on any axis, see 'compass read'.)");
+
+    Serial.println("====================================");
+}
+
 bool readRaw(int16_t& x, int16_t& y, int16_t& z, bool& overflow) {
     if (!initialized) return false;
 

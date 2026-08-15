@@ -444,11 +444,18 @@ All chip-agnostic — the same hard-iron calibration, EMA health classification
 QMC5883L apply unchanged once `compass_hmc5883l::readRaw()` has populated x/y/z/overflow. See
 [`docs/compass.md`](compass.md) for the full pipeline — nothing there is HMC5883L-specific.
 
+**Fixed 2026-08-14**: `compass read`'s printed µT figure was also wrong on this chip — same latent
+bug as QMC5883P (see that section below), a hardcoded QMC5883L-derived constant that shipped with
+BN-880 and went unnoticed until BE-881 work surfaced it. Now uses this driver's own `LSB_PER_UT`
+(10.9, derived from the datasheet's 1090 LSB/Gauss at the configured ±1.3Ga gain) via
+`compass_qmc5883l::lsbPerUt()`. `compass status`/`compass init` are also now chip-aware instead of
+always reporting the QMC5883L at `0x0D` — see the QMC5883P section below for the shared fix detail.
+
 ### Key Code Files
 
 | File | Purpose |
 |------|---------|
-| `include/hardware/sensors/compass_hmc5883l.h` / `src/hardware/sensors/compass_hmc5883l.cpp` | Low-level register driver |
+| `include/hardware/sensors/compass_hmc5883l.h` / `src/hardware/sensors/compass_hmc5883l.cpp` | Low-level register driver, `LSB_PER_UT`, `debugPrintStatus()` |
 | `include/hardware/i2c/i2c_manager.h` | `COMPASS_DEVICE_HMC` handle (0x1E) |
 | `include/hardware/sensors/compass_qmc5883l.h` | `ChipType` enum, dispatch entry point |
 
@@ -474,7 +481,8 @@ entry point's name (see "Internal dispatch, not a public rename" in the ADR list
 | **I2C Bus** | Shared (SDA=15, SCL=7, 100kHz) |
 | **Identification Register** | 0x00, expected `0x80` |
 | **Output** | 16-bit signed X, Y, Z (magnetic field), little-endian, native X,Y,Z burst order |
-| **Field Range** | ±8 Gauss (configured; chip also supports ±2G/±12G/±30G) |
+| **Field Range** | ±2 Gauss (configured 2026-08-14, was ±8G at ship; chip also supports ±8G/±12G/±30G) |
+| **Sensitivity** | 15000 LSB/Gauss at ±2G = 150 LSB/µT (datasheet Table 2; was 3750 LSB/G = 37.5 LSB/µT at the original ±8G) |
 | **ODR** | 200 Hz continuous, OSR1=8 |
 | **Overflow** | STATUS register (0x09) bit 1 (OVFL); bit 0 is DRDY |
 | **Undocumented sign register** | 0x29 — required by the datasheet's own setup examples but absent from its main register table; written `0x06` at init |
@@ -494,7 +502,11 @@ entry point's name (see "Internal dispatch, not a public rename" in the ADR list
 
 1. Read CHIP_ID (0x00), verify `0x80`.
 2. Write `0x06` to SIGN (0x29) — required by the datasheet's own setup examples.
-3. Write `0x08` to CONTROL2 (0x0B) — 8G range.
+3. Write `0x0C` to CONTROL2 (0x0B) — RNG<3:2>=11 (Table 18: 00=30G, 01=12G, 10=8G, 11=2G),
+   SET/RESET_MODE<1:0>=00 (Set and reset on). ±2G was chosen over the datasheet's own ±8G
+   example for resolution: Earth's local horizontal field (~24.5µT) uses only ~3% of an
+   8G-range ADC vs ~12% at 2G, and the datasheet's sensitivity table backs this directly
+   (3750 LSB/G at 8G vs 15000 LSB/G at 2G — a real 4× gain, not marginal).
 4. Write `0x0F` to CONTROL1 (0x0A) — continuous mode, 200Hz ODR, OSR1=8.
 
 ### Calibration, health classification, and heading
@@ -504,23 +516,29 @@ All chip-agnostic — the same hard-iron calibration, EMA health classification,
 `compass_qmc5883p::readRaw()` has populated x/y/z/overflow. See [`docs/compass.md`](compass.md) for the
 full pipeline — nothing there is QMC5883P-specific.
 
-**Known cosmetic issue**: `compass read`'s serial output converts the raw horizontal magnitude to µT
-using a `120 LSB/µT` constant that was derived for the QMC5883L's 2G range. At the QMC5883P's 8G range
-the printed µT figure is mis-scaled (reads low); heading itself is unaffected since it's an angle
-(`atan2f`), not a magnitude, and is scale-independent. Not fixed as of 2026-08-14 — cosmetic only.
+**Fixed 2026-08-14** (was a known cosmetic issue): `compass read`'s serial output used to convert the
+raw horizontal magnitude to µT with a single hardcoded `120 LSB/µT` constant derived for the
+QMC5883L's 2G range, mis-scaling the printed figure for both this chip and the HMC5883L. Both drivers
+now expose their own `LSB_PER_UT` constant (150 for QMC5883P at the current 2G range, 10.9 for
+HMC5883L), and `compass_qmc5883l::lsbPerUt()` dispatches to the correct one based on
+`compass_qmc5883l::activeChip()`. Heading itself was never affected — it's an angle (`atan2f`), not a
+magnitude, and is scale-independent regardless of which constant was used.
 
 ### Key Code Files
 
 | File | Purpose |
 |------|---------|
-| `include/hardware/sensors/compass_qmc5883p.h` / `src/hardware/sensors/compass_qmc5883p.cpp` | Low-level register driver |
+| `include/hardware/sensors/compass_qmc5883p.h` / `src/hardware/sensors/compass_qmc5883p.cpp` | Low-level register driver, `LSB_PER_UT`, `debugPrintStatus()` |
 | `include/hardware/i2c/i2c_manager.h` | `COMPASS_DEVICE_QMCP` handle (0x2C) |
-| `include/hardware/sensors/compass_qmc5883l.h` | `ChipType` enum, dispatch entry point |
+| `include/hardware/sensors/compass_qmc5883l.h` | `ChipType` enum, dispatch entry point, `activeChip()`/`lsbPerUt()` |
 
-**Note**: the older `compass status`/`compass init` serial commands (`src/utils/diagnostics.cpp`) poke
-QMC5883L registers at `0x0D` directly and pre-date the multi-chip dispatch — they always report "NOT
-FOUND" on a BE-881 board. Use `compass read` for verification; it goes through the real driver dispatch
-and reflects whichever chip is actually pinned.
+**Fixed 2026-08-14** (was a known issue): the older `compass status`/`compass init` serial commands
+(`src/utils/diagnostics.cpp`) used to poke QMC5883L registers at `0x0D` directly, pre-dating the
+multi-chip dispatch — they always reported "NOT FOUND" on a BN-880 or BE-881 board even when the
+board was fine. Both commands are now chip-aware: `status` dispatches to each driver's own
+`debugPrintStatus()` (QMC5883L keeps its original inline implementation as the default), and `init`
+just calls `compass_qmc5883l::begin(compass_qmc5883l::activeChip())` instead of hand-rolling
+QMC5883L-only register writes.
 
 ---
 
