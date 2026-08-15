@@ -110,20 +110,26 @@ found while restructuring: the search bar/hint were positioned absolute relative
 (`left: calc(300px + 14px)`), not the map — now wrapped in a `#map-panel` container and positioned
 relative to that instead, so they stay correctly placed regardless of sidebar width.
 
-**Shipped 2026-08-15 — tile provider**: swapped CARTO Voyager for **Esri World Street Map** (no API key)
-after feedback that Voyager read as flat/low-contrast. Real Google Maps tiles were ruled out outright —
-hotlinking their raw tile URLs bypasses the JS API and violates ToS. Investigated whether any option here
-is meaningfully more "open source": it isn't — Esri, CARTO, and MapTiler are all commercial SaaS with a
-free tier, none open. The one genuinely community-run, non-commercial option is plain **OpenStreetMap
-standard tiles** (`tile.openstreetmap.org`) — no key, but their usage policy explicitly discourages
-embedding at any real scale (light/testing use only), acceptable-risk for a single-user personal tool but
-worth deciding deliberately.
-
-**Resolved 2026-08-15: staying on Esri**, tuned closer to Google's palette with a
-`.leaflet-tile-pane { filter: saturate(1.3) brightness(1.03) contrast(0.97) hue-rotate(-3deg); }` CSS
-filter rather than switching provider — Esri's own cartography is cooler/grayer than Google's natively,
-this narrows the gap without a keyed dependency. Not a pixel match; re-tune the filter values visually
-if it still reads off once actually viewed in a browser (unverified this session — see caveat below).
+**Resolved 2026-08-15 — tile provider: plain OpenStreetMap "Standard" tiles**
+(`tile.openstreetmap.org`, no API key). Went through two intermediate stops first, worth recording
+since the reasoning at each step is real: (1) CARTO Voyager → swapped for Esri World Street Map after
+feedback that Voyager read as flat/low-contrast, with a CSS filter to warm Esri's cooler cartography
+toward Google's palette; (2) investigated **OSM Bright** specifically (referenced by the user from
+[openmaptiles/osm-bright-gl-style](https://github.com/openmaptiles/osm-bright-gl-style)) — turned out to
+be a *vector* style with no data behind it, requiring a library swap (Leaflet → MapLibre GL JS) plus
+either a MapTiler API key or self-hosting global vector tile data (Protomaps, real infra, an account
+decision only the user could make) — real scope, not a tile-URL change. Before committing to that,
+the user confirmed via a reference screenshot of openstreetmap.org itself that **plain OSM Standard
+raster tiles were the actual target look all along**, which sidesteps the entire vector-tile detour:
+same genuinely-community-run, non-commercial data source (not Esri/CARTO/MapTiler, all commercial SaaS
+with a free tier), zero new dependencies, no library swap. Esri's CSS filter was removed (unneeded —
+OSM Standard already is the look, not something to approximate). Per OSM's tile usage policy
+(`operations.osmfoundation.org/policies/tiles/`): fine for normal interactive use with proper
+attribution and no bulk/scripted fetching, which matches this tool's actual traffic — revisit (self-host
+or a paid provider) only if this tool ever saw real public-scale traffic, which it doesn't today.
+**OSM Bright's vector-tile path is not dead, just deferred** — worth revisiting if a future need
+specifically wants vector-style benefits (client-side re-styling, rotation-stable labels) that a raster
+tile can't offer.
 
 **Shipped 2026-08-15 — color reskin**: the pastel Dragon-Ball-inspired palette (warm gi-orange + dragon-
 ball gold as primary accents, sky-blue for links/secondary actions, muted coral-red for destructive

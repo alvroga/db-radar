@@ -67,6 +67,16 @@ firmware), so the flasher stays exactly as release-only as ADR-0030 specifies. T
 `index.html` is now a redirect to the new URL, kept in place (not deleted/archived) until
 `docs/manual.md` and any other references are updated to link the new URL directly.
 
+**Third follow-up, same day — tile provider is now plain OpenStreetMap "Standard" tiles**
+(`tile.openstreetmap.org`), not Esri. User referenced [OSM Bright](https://github.com/openmaptiles/osm-bright-gl-style)
+as a target look, which turned out to be a vector style with no data behind it — would have needed a
+Leaflet → MapLibre GL JS swap plus either a MapTiler key or self-hosted vector tile infrastructure
+(Protomaps), real scope for an account decision. Before committing to that, a reference screenshot of
+openstreetmap.org confirmed plain OSM Standard raster tiles were the actual target look all along —
+same non-commercial data source, zero new dependencies, no library swap. Esri's CSS warmth filter was
+removed as unneeded. OSM Bright's vector path isn't dead, just deferred — see
+[ROADMAP.md](ROADMAP.md)'s "GPX Generator Tool" entry for the full trail.
+
 **Serial-toggled touch coordinate logging for troubleshooting (2026-08-12)**
 
 `diag touch on|off` (off by default on boot) logs both the raw CST820 controller reading and the

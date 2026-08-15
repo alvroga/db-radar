@@ -238,13 +238,6 @@
             cursor: crosshair;
         }
 
-        /* Esri's World Street Map is cooler/grayer than Google's default palette out of the
-           box — this nudges it warmer and more saturated to close the gap without needing a
-           different (keyed) tile provider. Best-effort tuning, not a pixel match — revisit
-           visually if it still reads off. */
-        .leaflet-tile-pane {
-            filter: saturate(1.3) brightness(1.03) contrast(0.97) hue-rotate(-3deg);
-        }
 
         #map-hint {
             position: absolute;
@@ -543,13 +536,15 @@ const FALLBACK_CENTER = [35.7383, 139.6519];
 const map = L.map('map', { zoomControl: false }).setView(FALLBACK_CENTER, 15);
 L.control.zoom({ position: 'bottomright' }).addTo(map);
 
-// Esri World Street Map — no API key required, chosen over MapTiler/CARTO/Stadia
-// because none of those are actually more "open" than Esri (all commercial SaaS
-// with a free tier; only plain OSM standard tiles are genuinely community-run).
-// The .leaflet-tile-pane filter below (saturate/warm) closes some of the gap to
-// Google's default palette — Esri's own cartography is cooler/grayer natively.
-L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}', {
-    attribution: 'Tiles &copy; Esri &mdash; Esri, HERE, Garmin, USGS, Intermap, INCREMENT P, NRCan, Esri Japan, METI, Esri China (Hong Kong), Esri Korea, Esri (Thailand), NGCC, &copy; OpenStreetMap contributors, and the GIS User Community',
+// Plain OpenStreetMap "Standard" tiles — confirmed 2026-08-15 as the actual target
+// look (not Esri, not a Google approximation). No API key, genuinely community-run
+// (not a commercial SaaS free tier like Esri/CARTO/MapTiler). Per OSM's tile usage
+// policy (operations.osmfoundation.org/policies/tiles/): fine for normal
+// interactive use with proper attribution and no bulk/scripted fetching — exactly
+// this tool's traffic profile. Revisit only if this tool ever sees real public
+// scale, per that same policy.
+L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors',
     maxZoom: 19
 }).addTo(map);
 
