@@ -95,45 +95,64 @@ what doesn't port over and why, measurement requirements, open questions):
 
 ---
 
-### GPX Generator Tool: Layout Redesign + Route/Sequence Mode — brainstorm stage, not designed yet
+### GPX Generator Tool: Layout + Tile Provider — shipped; Color Reskin + Route/Sequence Mode — pending
 **Severity**: UX/Feature — the standalone web tool (`tools/waypoint-editor/index.html`, deployed at
-https://alvroga.github.io/gpx-generator/ and linked from `docs/manual.md`'s waypoint-creation section)
-is usable but the layout leaves no room to grow, and it only supports independent pins today.
+https://alvroga.github.io/gpx-generator/ and linked from `docs/manual.md`'s waypoint-creation section).
 
-**Ask 1 — reclaim map real estate for controls**: the current layout is a fixed 300px sidebar plus a
-`flex:1` map that fills the entire remaining viewport (`#map { flex: 1; height: 100vh; }` in
-`tools/waypoint-editor/index.html`). That leaves no room for the additional controls/tools planned for
-this tool. Referenced as a layout example (not a feature list to copy):
-[gpxgenerator.com](https://www.gpxgenerator.com/) — since the area being pinned is usually small (a
-single park, town, or venue), the map doesn't need to dominate the screen the way it does today; a
-smaller, more contained map frees space for a real control panel.
+**Shipped 2026-08-15 — layout**: the map used to fill the full viewport edge-to-edge (`#map { flex: 1;
+height: 100vh; }`), leaving no framing and no room for future controls. Both the sidebar and the map now
+render as bounded, rounded-corner panels inside a padded, max-width app shell — referenced as a layout
+example (not copied outright): [gpxgenerator.com](https://www.gpxgenerator.com/). Fixed a latent bug
+found while restructuring: the search bar/hint were positioned absolute relative to the *viewport*
+(`left: calc(300px + 14px)`), not the map — now wrapped in a `#map-panel` container and positioned
+relative to that instead, so they stay correctly placed regardless of sidebar width.
 
-**Ask 2 — sequential route mode ("next waypoint")**: today every waypoint is independent — the editor
-and the on-device radar both treat the waypoint set as unordered points selected by proximity. The ask
-is a mode to define an **ordered route** from one waypoint to the next (draw/connect pins in sequence)
-and, on-device, navigate it step-by-step — "go here, then here" rather than "here are all the nearby
-points." Motivating example: Pokémon GO-style spoofing/walk GPX files, which encode a walking path as
-dozens to hundreds of sequential unnamed `<wpt>` elements in visit order rather than a
-labeled-cache-style waypoint set — importing one of these and stepping through it in order is a
-different shape of data than what the editor or the firmware currently model.
+**Shipped 2026-08-15 — tile provider**: swapped CARTO Voyager for **Esri World Street Map** (no API key)
+after feedback that Voyager read as flat/low-contrast. Real Google Maps tiles were ruled out outright —
+hotlinking their raw tile URLs bypasses the JS API and violates ToS. Investigated whether any option here
+is meaningfully more "open source": it isn't — Esri, CARTO, and MapTiler are all commercial SaaS with a
+free tier, none open. The one genuinely community-run, non-commercial option is plain **OpenStreetMap
+standard tiles** (`tile.openstreetmap.org`) — no key, but their usage policy explicitly discourages
+embedding at any real scale (light/testing use only), acceptable-risk for a single-user personal tool but
+worth deciding deliberately.
 
-**Open questions to resolve before design**:
-- Is "show the next waypoint in sequence" a **web-tool-only authoring convenience** (export an ordered
-  GPX, still consumed as today's unordered points) or a **real on-device nav mode** (new firmware state
-  tracking "current index in route," advancing on arrival)? These have very different cost — the
-  second touches `gpx_loader`/`gpx_index`/waypoint selection, not just the web tool.
-- GPX has no standard way to express point *order* as route intent — `<rte>`/`<rtept>` exists in the
-  spec for exactly this, vs. the plain sequential `<wpt>` list the Pokémon GO-style files actually use.
-  Decide which the tool authors/exports and which (if not both) the firmware needs to parse.
-- How "arrival" and "advance to next" interact with the existing fixed-waypoint sonar and
-  `FIXED_WAYPOINT_MAX_DISTANCE_M` auto-release — a route implies auto-advance on arrival, which the
-  current fixed-waypoint model doesn't do at all today.
-- Layout redesign scope: how much of `gpxgenerator.com`'s panel-first layout to adopt vs. keep this
-  tool's own dark/monospace styling and existing feature set (search, import/export, per-waypoint
-  hint/desc fields) intact.
+**Resolved 2026-08-15: staying on Esri**, tuned closer to Google's palette with a
+`.leaflet-tile-pane { filter: saturate(1.3) brightness(1.03) contrast(0.97) hue-rotate(-3deg); }` CSS
+filter rather than switching provider — Esri's own cartography is cooler/grayer than Google's natively,
+this narrows the gap without a keyed dependency. Not a pixel match; re-tune the filter values visually
+if it still reads off once actually viewed in a browser (unverified this session — see caveat below).
 
-**Status**: nothing designed or implemented — this entry exists to capture the ask before design work
-starts.
+**Approved in direction, not yet applied — color reskin**: a pastel Dragon-Ball-inspired palette (warm
+gi-orange + dragon-ball gold as primary accents, sky-blue for links/routes, muted coral-red for
+destructive actions, cream/parchment panels on a pale sky-blue ground) was mocked up and confirmed as the
+direction. Deliberately not applied to the real file yet — the mockup also staged route/quest badge chip
+components that don't exist as real features yet (see Ask 2 below), and those shouldn't ship as inert
+visual scaffolding before the features behind them exist.
+
+**Ask 2 — route mode is designed as part of the quests system, not a standalone ask.** Full design (GPX
+representation, on-device fixed-route filtering + line-to-next-point, relationship to quests, open
+questions — including 2026-08-15 answers: no auto-release for a fixed route, routes have no completion
+concept at all — that's quest-only, off-screen next-point falls back to the existing arrow indicator
+pending a real design, mid-walk reordering still genuinely unresolved) lives in
+[`docs/quests_plan.md`](docs/quests_plan.md)'s "§9 Route Mode" section — routes and quests are
+independent, composable flags on a GPX file. This entry stays the layout/theme tracker; route *design*
+detail belongs in quests_plan.md, not duplicated here.
+
+**Extended 2026-08-15 — palette direction now spans three tools, not just this one.** The approved
+Dragon-Ball palette + bounded-panel layout language is the target for this generator, the on-device GPX
+manager (`src/gpx/gpx_server.cpp`'s `UPLOAD_HTML`, currently a separate dark-terminal "DRAC OS GPX
+Upload" look), and the browser web flasher (`web/flasher/index.html`, currently a third dark-terminal
+variant, "DRAC OS — Web Flasher"). Full detail: `docs/quests_plan.md`'s "Design philosophy" section.
+Recorded as a firm direction, not yet implemented on the manager or flasher — both are higher-stakes
+pages (one embedded in the firmware image, one gating device flashing) than the standalone generator.
+
+**Status**: layout + tile provider (Esri, CSS-filter-tuned) live in code for the generator. Color reskin
+direction approved for all three tools; implementation only pending for the generator itself (waiting on
+route/quest UI to exist before skinning route/badge chips); the manager and flasher haven't been touched
+at all yet.
+
+**Status**: still brainstorm stage — layout/theme direction narrowed above, route mode design moved to
+`docs/quests_plan.md` §9. Nothing implemented yet.
 
 ---
 

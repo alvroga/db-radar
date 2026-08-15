@@ -1,0 +1,73 @@
+name: Deploy web tools (GPX generator)
+
+# Publishes tools/waypoint-editor/ to GitHub Pages at
+# https://alvroga.github.io/db-radar/gpx-generator/ on every push to main that
+# touches it — independent of the firmware release cycle (release.yml), so the
+# generator updates immediately on push with no version tag required.
+#
+# GitHub Pages deploys replace the ENTIRE site on every run, and release.yml's
+# flasher deploy is deliberately tied to tagged releases only (ADR-0030 — "you
+# don't want the public browser flasher installing untagged work-in-progress
+# firmware"). So this workflow must never publish a site/ that's missing the
+# flasher: it re-stages whatever is CURRENTLY LIVE at the flasher's own URL,
+# unchanged, rather than rebuilding firmware or guessing a version. That keeps
+# the flasher exactly as release-only as ADR-0030 intends, while letting the
+# generator deploy freely on its own schedule.
+#
+# One-time repo setup already done for release.yml applies here too (Settings
+# -> Pages -> Build and deployment -> Source = "GitHub Actions").
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'tools/waypoint-editor/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pages-tools
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Assemble GitHub Pages site
+        run: |
+          set -e
+
+          mkdir -p site/gpx-generator site/flasher
+
+          # New: the GPX generator, published immediately on every push here.
+          cp tools/waypoint-editor/index.html site/gpx-generator/
+
+          # Re-stage the flasher's CURRENTLY LIVE content unchanged (no firmware
+          # rebuild, no version guessing) so this deploy doesn't wipe it out —
+          # deploy-pages replaces the whole site every run. -f makes a missing
+          # page fail the job loudly instead of silently shipping an incomplete
+          # site.
+          curl -fsSL https://alvroga.github.io/db-radar/flasher/index.html -o site/flasher/index.html
+          curl -fsSL https://alvroga.github.io/db-radar/flasher/manifest.json -o site/flasher/manifest.json
+          curl -fsSL https://alvroga.github.io/db-radar/flasher/db-radar-esp32s3-full.bin -o site/flasher/db-radar-esp32s3-full.bin
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

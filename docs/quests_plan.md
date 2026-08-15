@@ -438,6 +438,111 @@ properties of the user's cumulative history, not of any one file.
 
 ---
 
+## 9. Route Mode — ordered waypoint navigation (brainstorm, 2026-08-15)
+
+### Context
+
+Raised by the user 2026-08-15 during a redesign conversation about `tools/waypoint-editor/index.html`
+(layout + map-tile-theme changes — see the correction to "Future ideas" below, this tool is the
+identified home for the unscoped "web waypoint/quest creator" that section already called for). Not
+yet verified against code beyond what's cited here; no ADR yet; nothing designed or implemented.
+
+Distinct from §0-§8 in one important way: this project's Context section (top of this doc) explicitly
+resolved "no ordering requirement" for quests — a quest is a *set*, found in any order. Route mode is a
+new capability layered on top, not a revision of that resolution: **route is an independent flag,
+orthogonal to quest, not a replacement for the unordered model.** A GPX file can be:
+- **Quest only** (today's design): tracked found/total, no order, no guided navigation.
+- **Route only**: ordered navigation (walk to point 1, then 2, then 3...), no found/total tracking or
+  completion badge.
+- **Route + Quest**: ordered navigation *and* tracked completion/badge on reaching the last point.
+- **Neither**: today's plain independent waypoints, unchanged.
+
+### Motivating shape (user's framing)
+
+1. **Web tool**: draw/connect waypoints in visit order (A → B → C) when authoring a GPX.
+2. **On-device**: fixing onto a route should (a) declutter the display to *only that route's
+   waypoints* — the whole group stays visible, not just the single next target, generalizing what
+   "fixed" already does for one waypoint today up to a file — and (b) draw a line from the user's
+   current position to the *next* unvisited point in the route.
+
+### GPX representation — recommend a file-level flag, not `<rte>`/`<rtept>`
+
+ROADMAP.md's "GPX Generator Tool" entry already raised this exact fork: GPX's native `<rte>`/`<rtept>`
+route element vs. a plain sequential `<wpt>` list (the shape Pokémon GO-style walk files already use).
+Recommendation, reasoning from what's already true of the code:
+
+- `gpx_loader.cpp`'s fast index scan (`buildFileIndex()`) already captures `file_offset` per waypoint
+  (§1, confirmed against code) — **file order is already recoverable for free** by sorting a route
+  file's entries by `file_offset` ascending. No per-waypoint sequence tag is needed just to express
+  order.
+- The only thing actually missing is *intent* — "this file's `<wpt>` order means something" vs. "this
+  is an unordered set that merely happens to have some order in the file." That's one boolean, not a
+  new per-point field.
+- **Recommendation: reuse the exact `<extensions>` mechanism §1 already established for
+  `<quest:group>`/`<quest:badge>`** — add a file-level `<quest:route/>` marker (empty tag, presence =
+  true) in the same block, `IndexFile` gains one new `bool is_route`, parsed in the same single
+  fast-scan pass. No new tag name for the scanner to match — `<wpt` stays the only per-point tag it
+  ever looks for, preserving the property confirmed during this brainstorm that `gpx_loader.cpp` never
+  references `<rte>`/`<trk>`/`<rtept>`/`<trkpt>` anywhere.
+- Answers the web-tool side too: the tool already builds `waypoints[]` as an array and writes it out
+  via `buildGPX()`/`exportAll()` in array order — "route order" is just "array order." A route-editing
+  UI (drag-to-reorder, or click-to-connect-in-sequence) needs no separate ordering field in the tool's
+  own data model either.
+- **Alternative considered and not recommended by default**: native `<rte>`/`<rtept>`. Would require
+  `gpx_loader.cpp`'s fast scanner to also match a second top-level tag and track `<rte>` open/close to
+  associate `<rtept>` children with their parent's name/order — real parser complexity for something
+  `file_offset` already gives for free. Worth revisiting only if interop with externally-authored
+  `<rte>` files becomes a real ask — not raised yet.
+
+### On-device behavior — extends the existing fixed-waypoint mechanism, doesn't replace it
+
+Confirmed against code: `docs/waypoint_filtering.md`'s "Touch Interaction and Distance Display" section
+states `drawWaypoints()` already enforces "when a waypoint is fixed, render only that target — all
+other on-screen dots and off-screen triangles disappear" (single `fixed_waypoint_index int`,
+`ui_manager.h:166`). This is the mechanism to generalize, not rebuild:
+
+- **List filtering**: generalize "render only the fixed target" from *one waypoint index* to *one
+  file_id's full membership* when the fixed target is a route — filter predicate becomes "waypoint
+  belongs to `fixed_route_file_id`" instead of "waypoint index == `fixed_waypoint_index`." The
+  `g_slot_source[slot] → entry → file_id` indirection §2 already uses for quest-membership lookups is
+  the same lookup this needs.
+- **Line-to-next**: technically cheap — `radarDrawEventCb` (`navigation.cpp`) already calls
+  `lv_draw_line()` for the grid lines (lines 315-361), same draw context. A route-mode line is one more
+  `lv_draw_line()` call per frame: from the user's screen position (center in heading-up; the position
+  dot's coords in north-up) to the next un-found route waypoint's already-computed screen (x,y).
+  `drawWaypoints()` already computes on-screen coordinates for every visible point, and off-screen
+  points already get a clamped edge position for their triangle indicator (sector clustering, see
+  `docs/waypoint_filtering.md`) — the line could reuse that same clamped point as its endpoint when the
+  next point is off-screen, rather than inventing new geometry.
+- **"Next" determination**: sort the route file's entries by `file_offset` ascending, target = first
+  entry with `!found`. Recompute after every found-transition, using the same hook point §3 already
+  established ("after the existing found write-through, check quest completion") — a route file gets an
+  equivalent check ("if this file is a route, recompute current target").
+- **Auto-advance**: falls out of the above for free — once the current target's `found` flips true, the
+  next un-found entry becomes the new target automatically on the next recompute. No separate "advance"
+  state machine needed.
+
+### Open questions — need your call, not resolvable by re-reading code
+
+1. **Auto-release interaction**: `FIXED_WAYPOINT_MAX_DISTANCE_M` (100km) auto-releases a *stale*
+   single-waypoint fix. For a route, does the same numeric check apply to just the *current target*
+   (recomputing release-eligibility every time the target advances), or should a deliberately-fixed
+   route never auto-release (a multi-point route being an intentional plan, not the accidental stale
+   fix the safety net exists to catch)?
+2. **Completion behavior for a route that isn't a quest**: reaching the last point of a route-only
+   (non-quest) file — silent unfix back to normal view, or some lighter feedback (chirp/toast) distinct
+   from §5's quest-completion pop-up?
+3. **Off-screen next-point at high zoom**: if the next route point is well outside the current zoom
+   radius, force a temporary zoom-out to keep it visible, or is pointing the line at the clamped
+   off-screen edge (as sketched above) enough?
+4. **Reordering an already-fixed route mid-walk**: almost certainly out of scope for v1 (routes are
+   authored before a walk, not edited live) — stated explicitly so it isn't silently assumed later.
+5. Not yet verified against code the way §0-§6 were (same caveat §7/§8 carry): this section is a
+   plausible shape reasoned from confirmed facts (`file_offset` capture, `lv_draw_line` usage, the
+   existing fixed-waypoint filter), not something an explore pass has independently checked line-by-line.
+
+---
+
 ## Design philosophy: web = preparation, radar = the vessel
 
 Raised 2026-08-06, framing note for all quest-related web work (§6, §7, and the future-ideas
@@ -450,6 +555,31 @@ ideas, below) need to share a visual identity** — same look and feel — so mo
 what I have" and "create something new" reads as one continuous tool, not two unrelated pages.
 This has no code implication yet; flagging it now so the creator (when scoped) is designed to
 match §6's existing page rather than drifting into its own style.
+
+**Extended 2026-08-15 — the shared identity is now a specific direction, and it covers a third
+tool.** The GPX generator (`tools/waypoint-editor/index.html`, aka the creator referenced above —
+see the "Future ideas" correction earlier in this doc) got a pastel Dragon-Ball-inspired palette
+mockup approved (warm gi-orange + dragon-ball gold accents, sky-blue for links/routes, muted
+coral-red for destructive actions, cream/parchment panels, bounded rounded-corner "window" panels
+instead of edge-to-edge fills) — see `CHANGELOG.md`'s 2026-08-15 entry and `ROADMAP.md`'s "GPX
+Generator Tool" entry for the mockup/implementation detail. **Decision: this palette and layout
+language is the target for all three of the project's web-facing tools**, not just the generator:
+
+1. **`tools/waypoint-editor/index.html`** (GPX generator/creator) — layout + tile provider shipped
+   2026-08-15; color reskin approved, not yet applied (waiting on route/quest UI to exist before
+   skinning route/badge chips — see ROADMAP.md).
+2. **`src/gpx/gpx_server.cpp`'s `UPLOAD_HTML`** (on-device GPX manager, §6 above) — currently a
+   different, older dark-terminal look (`#1a1a1a`/`#2a2a2a` panels, bright `#00ff00` green, "DRAC OS
+   GPX Upload" branding) — not yet touched.
+3. **`web/flasher/index.html`** (browser web flasher, `docs/firmware_installation.md`) — also
+   currently a dark-terminal look (`#0a0f0a`/`#10160f`, `#39d353` green, "DRAC OS — Web Flasher"
+   branding), a third and slightly different variant of the same green-on-black family — not yet
+   touched.
+
+Not yet implemented on either #2 or #3 — recorded here as a firm direction, not a request to change
+them without a further go-ahead, since both are load-bearing utility pages (one embedded in the
+firmware image, one gating how users flash the device) where a botched reskin has higher stakes than
+the standalone generator tool.
 
 ---
 
@@ -486,13 +616,24 @@ before implementation.
 creator, not a bolt-on to §6's upload form.** §6 only covers *tagging an existing GPX file* as a
 quest at upload time. Authoring a new quest from scratch (new waypoints — name/lat/lon/description
 per waypoint — plus the `<quest:group>` and `<quest:badge>` tags) belongs in a general-purpose web
-GPX/waypoint creator, which doesn't exist yet in any form and needs improving/building as its own
-effort — quests are one option within it, not a separate tool. Still needs its own scoping pass
-once that creator's baseline (non-quest) design is settled: how are waypoints entered (manual
-lat/lon fields? tap-a-map?), does it reuse `upload_handler`'s `<extensions>` injection or need a
-new "create" endpoint, how many waypoints is reasonable to author through a form on an
-ESP32-hosted page. See "Design philosophy" above for why this creator and §6's existing manager
-need to look like one tool.
+GPX/waypoint creator — quests are one option within it, not a separate tool.
+
+**Correction, 2026-08-15: that creator already exists.** The line above ("doesn't exist yet in any
+form") was wrong — `tools/waypoint-editor/index.html` (Leaflet-based, deployed standalone at
+https://alvroga.github.io/gpx-generator/, tracked separately in ROADMAP.md's "GPX Generator Tool"
+entry) is a working tap-a-map waypoint creator with name/display-name/desc/hint fields, GPX
+import/export, and its own dark/monospace visual identity — it just isn't quest- or route-aware
+yet, and its layout has no room for the controls that would need. A 2026-08-15 redesign pass is in
+progress on that file covering: reclaiming map space for a wider single-column control panel, a
+non-dark map tile theme (a Google-Maps-style light basemap, to be picked — MapTiler Streets or Esri
+World Street Map were the live candidates), Route Mode authoring (§9 above), and room for a badge
+picker/preview (§7). This resolves the "how are waypoints entered" question above — tap-a-map,
+already built — and means this creator and §6's existing device-hosted manager are two separate
+pages (one standalone/GitHub-Pages, one on-device), not the same file; "look like one tool" (Design
+philosophy, above) still applies to shared visual identity, not shared code. Still open: whether
+this tool reuses `upload_handler`'s `<extensions>` injection pattern or builds the
+`<quest:group>`/`<quest:badge>`/`<quest:route>` tags directly client-side the way it already builds
+`<wpt>` (latter is more likely, since it's a static page with no server-side upload step of its own).
 
 **Manager needs more visibility, not just upload/tag — confirmed direction, still fuzzy on
 specifics.** The current `/list` + `UPLOAD_HTML` surface (§6) is upload-and-badge only. Confirmed:

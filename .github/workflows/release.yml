@@ -119,10 +119,18 @@ jobs:
 
       - name: Prepare GitHub Pages site
         run: |
-          mkdir -p site/flasher
+          mkdir -p site/flasher site/gpx-generator
           cp web/flasher/index.html web/flasher/manifest.json site/flasher/
           cp db-radar-esp32s3-full.bin site/flasher/
           sed -i "s/__FWVER__/${{ steps.fwver.outputs.version }}/g" site/flasher/index.html site/flasher/manifest.json
+
+          # deploy-pages replaces the whole site every run, and this job's site/
+          # otherwise wouldn't include the GPX generator at all — re-include it
+          # so a tagged firmware release doesn't wipe it out (see pages-tools.yml
+          # for the mirror-image problem on the flasher side). Unlike the
+          # flasher, the generator needs no version substitution, so this is a
+          # direct copy from the checkout already in this job, not a curl.
+          cp tools/waypoint-editor/index.html site/gpx-generator/index.html
 
       - uses: actions/upload-pages-artifact@v3
         with:

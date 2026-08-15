@@ -11,20 +11,31 @@
 
         body {
             font-family: 'Courier New', monospace;
-            background: #0d0d1a;
+            background: #06060f;
             color: #e0e0e0;
             height: 100vh;
-            display: flex;
             overflow: hidden;
+        }
+
+        /* ── App shell: sidebar + map as two bounded "windows", not edge-to-edge ── */
+        #app {
+            display: flex;
+            height: 100vh;
+            max-width: 1600px;
+            margin: 0 auto;
+            padding: 18px;
+            gap: 18px;
+            box-sizing: border-box;
         }
 
         /* ── Sidebar ── */
         #sidebar {
-            width: 300px;
-            min-width: 300px;
-            height: 100vh;
+            width: 320px;
+            min-width: 320px;
+            height: 100%;
             background: #111124;
-            border-right: 1px solid #2a2a4a;
+            border: 1px solid #2a2a4a;
+            border-radius: 10px;
             display: flex;
             flex-direction: column;
             overflow: hidden;
@@ -148,11 +159,11 @@
             margin-top: 8px;
         }
 
-        /* ── Search bar ── */
+        /* ── Search bar (positioned relative to #map-panel, not the viewport) ── */
         #search-bar {
             position: absolute;
             top: 14px;
-            left: calc(300px + 14px);
+            left: 14px;
             width: 340px;
             z-index: 500;
             display: flex;
@@ -189,11 +200,29 @@
 
         #search-btn:hover { background: #00ff88; }
 
-        /* ── Map ── */
-        #map {
+        /* ── Map (bounded "window" panel, not full-bleed) ── */
+        #map-panel {
+            position: relative;
             flex: 1;
-            height: 100vh;
+            height: 100%;
+            border: 1px solid #2a2a4a;
+            border-radius: 10px;
+            overflow: hidden;
+            box-shadow: 0 4px 24px rgba(0,0,0,0.35);
+        }
+
+        #map {
+            width: 100%;
+            height: 100%;
             cursor: crosshair;
+        }
+
+        /* Esri's World Street Map is cooler/grayer than Google's default palette out of the
+           box — this nudges it warmer and more saturated to close the gap without needing a
+           different (keyed) tile provider. Best-effort tuning, not a pixel match — revisit
+           visually if it still reads off. */
+        .leaflet-tile-pane {
+            filter: saturate(1.3) brightness(1.03) contrast(0.97) hue-rotate(-3deg);
         }
 
         #map-hint {
@@ -382,39 +411,43 @@
 </head>
 <body>
 
-<!-- Sidebar -->
-<div id="sidebar">
-    <div id="sidebar-header">
-        <h1>GPX Generator</h1>
-        <p>Personal waypoint builder</p>
+<div id="app">
+    <!-- Sidebar -->
+    <div id="sidebar">
+        <div id="sidebar-header">
+            <h1>GPX Generator</h1>
+            <p>Personal waypoint builder</p>
+        </div>
+
+        <div id="sidebar-actions">
+            <label class="btn btn-secondary" style="flex:1; cursor:pointer;">
+                ↑ Import GPX
+                <input type="file" id="import-input" accept=".gpx" style="display:none" />
+            </label>
+            <button class="btn btn-secondary" onclick="clearAll()" title="Clear all waypoints">✕ Clear</button>
+        </div>
+
+        <div id="waypoint-list">
+            <div class="empty">Click anywhere on the map<br>to place a waypoint</div>
+        </div>
+
+        <div id="sidebar-footer">
+            <button class="btn btn-primary btn-full" onclick="exportAll()">↓ Export All GPX</button>
+            <div id="wp-count">0 / 50 waypoints</div>
+        </div>
     </div>
 
-    <div id="sidebar-actions">
-        <label class="btn btn-secondary" style="flex:1; cursor:pointer;">
-            ↑ Import GPX
-            <input type="file" id="import-input" accept=".gpx" style="display:none" />
-        </label>
-        <button class="btn btn-secondary" onclick="clearAll()" title="Clear all waypoints">✕ Clear</button>
+    <!-- Map -->
+    <div id="map-panel">
+        <div id="map"></div>
+        <div id="map-hint">Click on the map to place a waypoint</div>
+
+        <!-- Search bar -->
+        <div id="search-bar">
+            <input id="search-input" type="text" placeholder="Search address or paste coordinates…" autocomplete="off" />
+            <button id="search-btn" onclick="searchLocation()">Go</button>
+        </div>
     </div>
-
-    <div id="waypoint-list">
-        <div class="empty">Click anywhere on the map<br>to place a waypoint</div>
-    </div>
-
-    <div id="sidebar-footer">
-        <button class="btn btn-primary btn-full" onclick="exportAll()">↓ Export All GPX</button>
-        <div id="wp-count">0 / 50 waypoints</div>
-    </div>
-</div>
-
-<!-- Map -->
-<div id="map"></div>
-<div id="map-hint">Click on the map to place a waypoint</div>
-
-<!-- Search bar -->
-<div id="search-bar">
-    <input id="search-input" type="text" placeholder="Search address or paste coordinates…" autocomplete="off" />
-    <button id="search-btn" onclick="searchLocation()">Go</button>
 </div>
 
 <!-- Modal -->
@@ -489,8 +522,13 @@ const FALLBACK_CENTER = [35.7383, 139.6519];
 const map = L.map('map', { zoomControl: false }).setView(FALLBACK_CENTER, 15);
 L.control.zoom({ position: 'bottomright' }).addTo(map);
 
-L.tileLayer('https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png', {
-    attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors &copy; <a href="https://carto.com/">CARTO</a>',
+// Esri World Street Map — no API key required, chosen over MapTiler/CARTO/Stadia
+// because none of those are actually more "open" than Esri (all commercial SaaS
+// with a free tier; only plain OSM standard tiles are genuinely community-run).
+// The .leaflet-tile-pane filter below (saturate/warm) closes some of the gap to
+// Google's default palette — Esri's own cartography is cooler/grayer natively.
+L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}', {
+    attribution: 'Tiles &copy; Esri &mdash; Esri, HERE, Garmin, USGS, Intermap, INCREMENT P, NRCan, Esri Japan, METI, Esri China (Hong Kong), Esri Korea, Esri (Thailand), NGCC, &copy; OpenStreetMap contributors, and the GIS User Community',
     maxZoom: 19
 }).addTo(map);
 

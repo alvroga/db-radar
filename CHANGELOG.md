@@ -11,6 +11,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+**GPX Generator tool: bounded map layout + tile provider swap (2026-08-15)**
+
+`tools/waypoint-editor/index.html` (the standalone waypoint editor at
+https://alvroga.github.io/gpx-generator/) had its map filling the full viewport edge-to-edge
+(`#map { flex: 1; height: 100vh; }`), leaving no framing and no room to grow. Both the sidebar and map
+now render as bounded, rounded-corner panels inside a padded, max-width app shell, referencing
+[gpxgenerator.com](https://www.gpxgenerator.com/)'s layout without copying it outright. Fixed a latent
+bug found while restructuring: the search bar/hint were positioned absolute relative to the viewport
+(`left: calc(300px + 14px)`), not the map — now wrapped in a `#map-panel` container and positioned
+relative to that instead.
+
+Tile provider swapped from CARTO Voyager to **Esri World Street Map** (no API key) after feedback that
+Voyager read as flat/low-contrast. Real Google Maps tiles were ruled out — hotlinking Google's raw tile
+URLs bypasses their JS API and violates ToS. On investigation, none of the realistic alternatives
+(Esri, CARTO, MapTiler) are meaningfully more "open source" than Google here — all are commercial SaaS
+with a free tier; the only genuinely community-run, non-commercial option is plain OpenStreetMap
+standard tiles (`tile.openstreetmap.org`, no key, but their usage policy discourages embedding at real
+scale). Provider choice left open — see [ROADMAP.md](ROADMAP.md)'s "GPX Generator Tool" entry.
+
+A pastel Dragon-Ball-inspired color reskin (warm orange/gold accents, sky-blue for links/routes, muted
+coral-red for destructive actions) was mocked up and approved in direction, but deliberately not
+applied yet — the mockup staged route-mode and quest-badge UI chips that don't exist as real features
+yet (see [`docs/quests_plan.md`](docs/quests_plan.md) §9), and inert visual scaffolding for
+not-yet-built features was judged worse than waiting.
+
+**Follow-up, same day**: kept Esri (no realistic alternative here is more "open source" than another —
+see above), instead adding a `.leaflet-tile-pane` CSS filter (`saturate(1.3) brightness(1.03)
+contrast(0.97) hue-rotate(-3deg)`) to nudge its natively cooler/grayer cartography toward Google's
+warmer, more saturated default palette. Best-effort tuning, not a pixel match — unverified in an actual
+browser this session (no browser tooling available), worth a visual check.
+
+Also decided, not yet acted on: the approved palette + bounded-panel layout language is the target for
+all three of the project's web-facing tools, not just this one — also `src/gpx/gpx_server.cpp`'s
+`UPLOAD_HTML` (on-device GPX manager, currently a separate dark-terminal "DRAC OS GPX Upload" look) and
+`web/flasher/index.html` (browser web flasher, "DRAC OS — Web Flasher", a third dark-terminal variant).
+Neither touched yet — both are higher-stakes than the standalone generator (one ships inside the
+firmware image, one gates how users flash the device). Full detail:
+[`docs/quests_plan.md`](docs/quests_plan.md)'s "Design philosophy" section,
+[ROADMAP.md](ROADMAP.md)'s "GPX Generator Tool" entry.
+
 **Serial-toggled touch coordinate logging for troubleshooting (2026-08-12)**
 
 `diag touch on|off` (off by default on boot) logs both the raw CST820 controller reading and the
