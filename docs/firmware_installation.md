@@ -91,42 +91,46 @@ flasher page both call this out explicitly to reduce the chance of someone uploa
 image's header isn't a valid app-image header), but this has not been tested on real hardware as of
 this writing — confirm before asserting it's safe in user-facing docs.
 
-## Versioning: FW_VERSION vs. the git tag — a known, accepted mismatch risk
+## Versioning: FW_VERSION vs. the git tag
 
 `scripts/gen_version.py` (see [ADR-0025](adr/0025-version-scheme-monthly-build-counter.md)) generates
-`FW_VERSION` from a monthly build counter that increments on *every* build, local or CI, with no
-shared state file — it recovers the counter by re-parsing whatever `fw_version_gen.h` happens to be
-committed at build time. The git tag that triggers a release therefore has **no enforced relationship**
-to the `FW_VERSION` actually embedded in that release's binary. A release tagged `v26.08.05` could
-easily embed `FW_VERSION "v26.08.51"` if 50 local builds happened first that month.
+`FW_VERSION` from a monthly build counter that increments on *every local* build, with no shared
+state file — it recovers the counter by re-parsing whatever `fw_version_gen.h` happens to be
+committed. Left alone, that counter would drift ahead of whatever tag number a release uses, since
+ordinary dev-loop builds (`pio run`, uploads for bench testing) bump it too.
 
-This is not fixed by this pipeline — `gen_version.py` and the tagging convention are unchanged. The
-mitigation is visibility, not correctness: the GitHub Release body and the web flasher page both print
-the real embedded `FW_VERSION` read from the build, so the two numbers are always visible side by
-side rather than silently assumed equal.
+The release workflow closes that gap for anything that actually ships: it sets
+`FW_VERSION_OVERRIDE` to the exact tag being built, and the `Verify embedded FW_VERSION matches the
+release tag` step **fails the build** if the compiled header doesn't match. So for every tagged
+release, the tag and the embedded `FW_VERSION` are identical by construction — not just "usually
+close." The drift only exists between releases, in local dev builds that were never tagged (see
+"When to cut a release" below for why that's expected and fine).
 
-## One-time manual setup
+## When to cut a release
 
-GitHub Pages must be set to **Settings → Pages → Build and deployment → Source = "GitHub Actions"**
-before the first deploy will succeed. This cannot be automated from CI or from the environment that
-authored this pipeline — no working GitHub API access was available to check or set it at the time.
+Tag **when `main` sits at a coherent, working checkpoint** — not on every commit, and not on a
+calendar cadence. Concretely:
 
-**Also required and not yet done: the repo must be public.** GitHub Pages isn't available for
-private repos on the free plan, and Release assets aren't downloadable by anonymous users on a
-private repo either — both install paths above are inert until `alvroga/db-radar` is made public.
-This is a deliberate hold, not an oversight (see the Scope decision at the top) — don't push a real
-release tag until that decision is made.
+- **Do tag** once a feature or fix that shipped to `main` is either field-verified, or build-clean and
+  low-risk enough that field-verification can happen against the released build itself (this project
+  has done both). A batch of several such commits landing together (e.g. a new hardware module +
+  a couple of bug fixes) is a fine single release — no need for one tag per commit.
+- **Don't tag** mid-feature, against WIP still on a branch, or against something you know is broken/
+  untested on real hardware. `main` itself should already reflect that bar (see CHANGELOG.md's
+  `[Unreleased]` section, which calls out anything merged but not yet field-tested).
+- **Before tagging**, confirm CHANGELOG.md's `[Unreleased]` section actually describes what's about
+  to ship — that's the fastest sanity check that nothing half-finished is riding along.
+- **Tag naming**: use whatever `FW_VERSION` is currently committed in
+  `include/core/fw_version_gen.h` (`vYY.MM.##`) — don't invent a separate release-numbering sequence.
+  That's what makes the override-verification step above a no-op success instead of a guaranteed
+  failure.
+- **After tagging**: `git push origin <tag>` triggers the workflow; watch it with
+  `gh run watch --exit-status`, then spot-check `gh release view <tag>` and the flasher URL
+  (https://alvroga.github.io/db-radar/flasher/) actually reflect the new version.
 
-## Verification status
+## One-time manual setup (done)
 
-**Not yet exercised end-to-end on a real tag push, and the repo is currently private** — the
-workflow YAML has been written and reviewed against a real, working reference pipeline
-(socquique/capsule-radar's own `release.yml`), but nothing has actually been deployed. Before relying
-on this:
-
-1. Decide to make the repo public (see the Scope decision above — this is a real, deliberate
-   decision, not just a config toggle).
-2. Enable GitHub Pages (see above).
-3. Push a real tag and confirm the Release assets and the Pages URL both come up correctly.
-4. Test the web flasher against real hardware (a blank board, and an already-flashed one).
-5. Confirm the `/update`-wrong-file behavior described above.
+GitHub Pages is set to **Settings → Pages → Build and deployment → Source = "GitHub Actions"**, and
+the repo is public — both required for the install paths above to work, and both already in place
+(see CHANGELOG.md's 2026-08-08 pipeline entry and the rename-to-public work around 2026-08-14). Only
+worth revisiting if either setting is ever found reverted.
