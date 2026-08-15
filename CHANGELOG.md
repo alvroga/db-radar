@@ -30,11 +30,15 @@ with a free tier; the only genuinely community-run, non-commercial option is pla
 standard tiles (`tile.openstreetmap.org`, no key, but their usage policy discourages embedding at real
 scale). Provider choice left open — see [ROADMAP.md](ROADMAP.md)'s "GPX Generator Tool" entry.
 
-A pastel Dragon-Ball-inspired color reskin (warm orange/gold accents, sky-blue for links/routes, muted
-coral-red for destructive actions) was mocked up and approved in direction, but deliberately not
-applied yet — the mockup staged route-mode and quest-badge UI chips that don't exist as real features
-yet (see [`docs/quests_plan.md`](docs/quests_plan.md) §9), and inert visual scaffolding for
-not-yet-built features was judged worse than waiting.
+A pastel Dragon-Ball-inspired color reskin (warm orange/gold accents, sky-blue for links/secondary
+actions, muted coral-red for destructive actions) was mocked up, approved, and **applied** the same
+day — sidebar, buttons, modal, waypoint list, toast, scrollbar, and map markers all now pull from a
+`:root` CSS custom-property token block instead of scattered hex literals, so re-skinning the manager
+and flasher later (see below) is mostly copy-the-token-block. A reference copy of the tokens lives at
+`assets/DB_Theme.css` (gitignored, not shipped/public — internal reference only). **Not** applied: the
+mockup's route-mode and quest-badge UI chips, which don't exist as real features yet (see
+[`docs/quests_plan.md`](docs/quests_plan.md) §9) — inert visual scaffolding for not-yet-built features
+was judged worse than waiting.
 
 **Follow-up, same day**: kept Esri (no realistic alternative here is more "open source" than another —
 see above), instead adding a `.leaflet-tile-pane` CSS filter (`saturate(1.3) brightness(1.03)
@@ -50,6 +54,18 @@ Neither touched yet — both are higher-stakes than the standalone generator (on
 firmware image, one gates how users flash the device). Full detail:
 [`docs/quests_plan.md`](docs/quests_plan.md)'s "Design philosophy" section,
 [ROADMAP.md](ROADMAP.md)'s "GPX Generator Tool" entry.
+
+**Second follow-up, same day — merged the standalone `alvroga/gpx-generator` repo into this one.** It
+was a stale, undiverged mirror (byte-identical to this file's pre-2026-08-15 state — confirmed before
+merging, nothing lost). New `.github/workflows/pages-tools.yml` deploys `tools/waypoint-editor/` to
+`https://alvroga.github.io/db-radar/gpx-generator/` on every push that touches it, independent of
+`release.yml`'s tagged-release cycle — no firmware build required to update the generator.
+`release.yml` also now re-includes the generator in its own Pages deploy, since GitHub Pages replaces
+the whole site every run and it would otherwise get wiped by the next firmware release; `pages-tools.yml`
+does the mirror-image fix for the flasher (re-stages its currently-live content rather than rebuilding
+firmware), so the flasher stays exactly as release-only as ADR-0030 specifies. The old repo's
+`index.html` is now a redirect to the new URL, kept in place (not deleted/archived) until
+`docs/manual.md` and any other references are updated to link the new URL directly.
 
 **Serial-toggled touch coordinate logging for troubleshooting (2026-08-12)**
 

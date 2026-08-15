@@ -95,9 +95,12 @@ what doesn't port over and why, measurement requirements, open questions):
 
 ---
 
-### GPX Generator Tool: Layout + Tile Provider — shipped; Color Reskin + Route/Sequence Mode — pending
-**Severity**: UX/Feature — the standalone web tool (`tools/waypoint-editor/index.html`, deployed at
-https://alvroga.github.io/gpx-generator/ and linked from `docs/manual.md`'s waypoint-creation section).
+### GPX Generator Tool: Layout, Tile Provider, Color Reskin — shipped; Route/Sequence Mode — pending
+**Severity**: UX/Feature — the standalone web tool, now merged into this repo and deployed at
+https://alvroga.github.io/db-radar/gpx-generator/ (`tools/waypoint-editor/index.html`, deploys via
+`.github/workflows/pages-tools.yml` on every push that touches it — see "Merged into this repo" below).
+The old `alvroga/gpx-generator` repo now just redirects there; `docs/manual.md` still needs updating to
+link the new URL directly.
 
 **Shipped 2026-08-15 — layout**: the map used to fill the full viewport edge-to-edge (`#map { flex: 1;
 height: 100vh; }`), leaving no framing and no room for future controls. Both the sidebar and the map now
@@ -122,12 +125,15 @@ filter rather than switching provider — Esri's own cartography is cooler/graye
 this narrows the gap without a keyed dependency. Not a pixel match; re-tune the filter values visually
 if it still reads off once actually viewed in a browser (unverified this session — see caveat below).
 
-**Approved in direction, not yet applied — color reskin**: a pastel Dragon-Ball-inspired palette (warm
-gi-orange + dragon-ball gold as primary accents, sky-blue for links/routes, muted coral-red for
-destructive actions, cream/parchment panels on a pale sky-blue ground) was mocked up and confirmed as the
-direction. Deliberately not applied to the real file yet — the mockup also staged route/quest badge chip
-components that don't exist as real features yet (see Ask 2 below), and those shouldn't ship as inert
-visual scaffolding before the features behind them exist.
+**Shipped 2026-08-15 — color reskin**: the pastel Dragon-Ball-inspired palette (warm gi-orange + dragon-
+ball gold as primary accents, sky-blue for links/secondary actions, muted coral-red for destructive
+actions, cream/parchment panels on a pale sky-blue ground) is applied throughout — sidebar, buttons,
+modal, waypoint list, toast, scrollbar, map markers. As CSS custom properties (`:root` token block at
+the top of the `<style>` block), not scattered hex literals, so re-skinning the manager/flasher later
+(see "Extended" below) is mostly copy-the-token-block. Reference copy of the tokens (not built/shipped,
+gitignored): `assets/DB_Theme.css`. **Not** applied: the route/quest badge chip components the mockup
+also sketched — those stay out until route mode and quest tagging are real features to skin (§9 below),
+so nothing ships as inert visual scaffolding.
 
 **Ask 2 — route mode is designed as part of the quests system, not a standalone ask.** Full design (GPX
 representation, on-device fixed-route filtering + line-to-next-point, relationship to quests, open
@@ -138,21 +144,26 @@ pending a real design, mid-walk reordering still genuinely unresolved) lives in
 independent, composable flags on a GPX file. This entry stays the layout/theme tracker; route *design*
 detail belongs in quests_plan.md, not duplicated here.
 
-**Extended 2026-08-15 — palette direction now spans three tools, not just this one.** The approved
-Dragon-Ball palette + bounded-panel layout language is the target for this generator, the on-device GPX
-manager (`src/gpx/gpx_server.cpp`'s `UPLOAD_HTML`, currently a separate dark-terminal "DRAC OS GPX
-Upload" look), and the browser web flasher (`web/flasher/index.html`, currently a third dark-terminal
-variant, "DRAC OS — Web Flasher"). Full detail: `docs/quests_plan.md`'s "Design philosophy" section.
-Recorded as a firm direction, not yet implemented on the manager or flasher — both are higher-stakes
-pages (one embedded in the firmware image, one gating device flashing) than the standalone generator.
+**Merged into this repo, 2026-08-15**: the previously separate `alvroga/gpx-generator` repo (a stale,
+undiverged mirror — confirmed byte-identical to this file's pre-2026-08-15 state before merging, so
+nothing was lost) is now just a redirect page pointing at the new URL. `pages-tools.yml` deploys the
+generator independently of `release.yml`'s tagged-release cycle — push to `main`, it's live, no firmware
+build required. `release.yml` was also updated to re-include the generator on every tagged release
+deploy (GitHub Pages replaces the whole site per deploy; without this a firmware release would silently
+wipe the generator back out) — see the workflow files' own comments for the two-directions-of-clobbering
+reasoning.
 
-**Status**: layout + tile provider (Esri, CSS-filter-tuned) live in code for the generator. Color reskin
-direction approved for all three tools; implementation only pending for the generator itself (waiting on
-route/quest UI to exist before skinning route/badge chips); the manager and flasher haven't been touched
-at all yet.
+**Extended 2026-08-15 — palette direction spans three tools, not just this one.** The Dragon-Ball
+palette + bounded-panel layout language shipped here is the target for the on-device GPX manager
+(`src/gpx/gpx_server.cpp`'s `UPLOAD_HTML`, currently a separate dark-terminal "DRAC OS GPX Upload"
+look) and the browser web flasher (`web/flasher/index.html`, currently a third dark-terminal variant,
+"DRAC OS — Web Flasher") too. Full detail: `docs/quests_plan.md`'s "Design philosophy" section. Not yet
+implemented on either — both are higher-stakes pages (one embedded in the firmware image, one gating
+device flashing) than the standalone generator, so that work needs its own explicit go-ahead.
 
-**Status**: still brainstorm stage — layout/theme direction narrowed above, route mode design moved to
-`docs/quests_plan.md` §9. Nothing implemented yet.
+**Status**: layout, tile provider, and color reskin all live in code for the generator, which now also
+deploys independently from this repo. Route mode design lives in `docs/quests_plan.md` §9, not yet
+implemented. Palette direction confirmed for the manager and flasher too, neither touched yet.
 
 ---
 

@@ -7,12 +7,35 @@
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
     <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
     <style>
+        /* Pastel palette pulled from the Dragon Ball poster — muted rather than
+           cartoon-saturated. Approved direction, see ROADMAP.md's "GPX Generator
+           Tool" entry and docs/quests_plan.md's Design Philosophy section. */
+        :root {
+            --bg: #e8f2fa;
+            --surface: #fdf7ea;
+            --surface-2: #f3ead6;
+            --ink: #332a1f;
+            --ink-soft: #8a7e68;
+            --ink-faint: #b3a68c;
+            --accent: #e2833f;
+            --accent-strong: #c96a2b;
+            --gold: #d3a13f;
+            --gold-soft: #f1dfb0;
+            --sky: #5f9bc4;
+            --sky-soft: #cfe4f0;
+            --danger: #c85c4f;
+            --danger-soft: #f2d3ce;
+            --line: #e4d6b8;
+            --line-soft: #eee2c8;
+            --on-accent: #fff9ee;
+        }
+
         * { box-sizing: border-box; margin: 0; padding: 0; }
 
         body {
             font-family: 'Courier New', monospace;
-            background: #06060f;
-            color: #e0e0e0;
+            background: var(--bg);
+            color: var(--ink);
             height: 100vh;
             overflow: hidden;
         }
@@ -33,8 +56,8 @@
             width: 320px;
             min-width: 320px;
             height: 100%;
-            background: #111124;
-            border: 1px solid #2a2a4a;
+            background: var(--surface);
+            border: 1px solid var(--line);
             border-radius: 10px;
             display: flex;
             flex-direction: column;
@@ -43,13 +66,12 @@
 
         #sidebar-header {
             padding: 16px;
-            border-bottom: 1px solid #2a2a4a;
-            background: #0d0d1a;
+            border-bottom: 1px solid var(--line-soft);
         }
 
         #sidebar-header h1 {
             font-size: 14px;
-            color: #00ff88;
+            color: var(--accent);
             letter-spacing: 2px;
             text-transform: uppercase;
             margin-bottom: 3px;
@@ -57,12 +79,12 @@
 
         #sidebar-header p {
             font-size: 11px;
-            color: #555;
+            color: var(--ink-soft);
         }
 
         #sidebar-actions {
             padding: 10px 12px;
-            border-bottom: 1px solid #2a2a4a;
+            border-bottom: 1px solid var(--line-soft);
             display: flex;
             gap: 8px;
         }
@@ -74,8 +96,8 @@
         }
 
         .waypoint-item {
-            background: #1a1a2e;
-            border: 1px solid #2a2a4a;
+            background: var(--surface-2);
+            border: 1px solid var(--line);
             border-radius: 4px;
             padding: 9px 10px;
             margin-bottom: 5px;
@@ -87,13 +109,13 @@
             gap: 8px;
         }
 
-        .waypoint-item:hover { border-color: #00aa55; }
+        .waypoint-item:hover { border-color: var(--accent); }
 
         .waypoint-item-info { flex: 1; min-width: 0; }
 
         .waypoint-name {
             font-size: 12px;
-            color: #00ff88;
+            color: var(--ink);
             font-weight: bold;
             white-space: nowrap;
             overflow: hidden;
@@ -102,7 +124,7 @@
 
         .waypoint-display {
             font-size: 11px;
-            color: #aaa;
+            color: var(--ink-soft);
             white-space: nowrap;
             overflow: hidden;
             text-overflow: ellipsis;
@@ -111,15 +133,15 @@
 
         .waypoint-coords {
             font-size: 10px;
-            color: #777;
+            color: var(--ink-faint);
             margin-top: 2px;
         }
 
         .wp-delete {
             background: none;
-            border: 1px solid #552222;
+            border: 1px solid var(--line);
             border-radius: 3px;
-            color: #ff6666;
+            color: var(--ink-soft);
             cursor: pointer;
             font-size: 13px;
             line-height: 1;
@@ -127,13 +149,13 @@
             flex-shrink: 0;
         }
 
-        .wp-delete:hover { background: #ff4444; color: #fff; border-color: #ff4444; }
+        .wp-delete:hover { background: var(--danger); color: var(--on-accent); border-color: var(--danger); }
 
         .wp-dl {
             background: none;
-            border: 1px solid #005533;
+            border: 1px solid var(--line);
             border-radius: 3px;
-            color: #00cc66;
+            color: var(--sky);
             cursor: pointer;
             font-size: 10px;
             font-family: 'Courier New', monospace;
@@ -144,17 +166,16 @@
             white-space: nowrap;
         }
 
-        .wp-dl:hover { background: #00cc66; color: #000; border-color: #00cc66; }
+        .wp-dl:hover { background: var(--sky); color: var(--on-accent); border-color: var(--sky); }
 
         #sidebar-footer {
             padding: 12px;
-            border-top: 1px solid #2a2a4a;
-            background: #0d0d1a;
+            border-top: 1px solid var(--line-soft);
         }
 
         #wp-count {
             font-size: 10px;
-            color: #888;
+            color: var(--ink-soft);
             text-align: center;
             margin-top: 8px;
         }
@@ -179,18 +200,18 @@
             font-family: 'Courier New', monospace;
             font-size: 12px;
             border: none;
-            background: rgba(255,255,255,0.95);
-            color: #222;
+            background: var(--surface);
+            color: var(--ink);
             outline: none;
         }
 
-        #search-input::placeholder { color: #999; }
+        #search-input::placeholder { color: var(--ink-faint); }
 
         #search-btn {
             padding: 9px 16px;
-            background: #00cc66;
+            background: var(--accent);
             border: none;
-            color: #000;
+            color: var(--on-accent);
             font-family: 'Courier New', monospace;
             font-size: 12px;
             font-weight: bold;
@@ -198,17 +219,17 @@
             white-space: nowrap;
         }
 
-        #search-btn:hover { background: #00ff88; }
+        #search-btn:hover { filter: brightness(1.08); }
 
         /* ── Map (bounded "window" panel, not full-bleed) ── */
         #map-panel {
             position: relative;
             flex: 1;
             height: 100%;
-            border: 1px solid #2a2a4a;
+            border: 1px solid var(--line);
             border-radius: 10px;
             overflow: hidden;
-            box-shadow: 0 4px 24px rgba(0,0,0,0.35);
+            box-shadow: 0 4px 24px rgba(120, 92, 46, 0.16);
         }
 
         #map {
@@ -230,9 +251,9 @@
             bottom: 28px;
             left: 50%;
             transform: translateX(-50%);
-            background: rgba(255,255,255,0.92);
-            border: 1px solid #ccc;
-            color: #333;
+            background: rgba(253, 247, 234, 0.92);
+            border: 1px solid var(--line);
+            color: var(--ink);
             padding: 5px 14px;
             border-radius: 20px;
             font-size: 11px;
@@ -262,20 +283,20 @@
         }
 
         .btn-primary {
-            background: #00cc66;
-            border-color: #00cc66;
-            color: #000;
+            background: var(--accent);
+            border-color: var(--accent-strong);
+            color: var(--on-accent);
         }
 
-        .btn-primary:hover { background: #00ff88; border-color: #00ff88; }
+        .btn-primary:hover { filter: brightness(1.06); }
 
         .btn-secondary {
             background: transparent;
-            border-color: #3a3a5a;
-            color: #888;
+            border-color: var(--line);
+            color: var(--ink-soft);
         }
 
-        .btn-secondary:hover { border-color: #00aa55; color: #00ff88; }
+        .btn-secondary:hover { border-color: var(--sky); color: var(--sky); }
         .btn-full { width: 100%; }
 
         /* ── Modal ── */
@@ -292,8 +313,8 @@
         #modal-overlay.open { display: flex; }
 
         #modal {
-            background: #111124;
-            border: 1px solid #2a2a4a;
+            background: var(--surface);
+            border: 1px solid var(--line);
             border-radius: 8px;
             width: 500px;
             max-width: 96vw;
@@ -304,7 +325,7 @@
 
         #modal h2 {
             font-size: 12px;
-            color: #00ff88;
+            color: var(--accent);
             letter-spacing: 2px;
             text-transform: uppercase;
             margin-bottom: 20px;
@@ -323,26 +344,26 @@
 
         .form-row label {
             font-size: 10px;
-            color: #777;
+            color: var(--ink-soft);
             text-transform: uppercase;
             letter-spacing: 1px;
         }
 
         .char-count {
             font-size: 10px;
-            color: #777;
+            color: var(--ink-soft);
         }
 
-        .char-count.warn { color: #ffaa00; }
-        .char-count.over { color: #ff4444; }
+        .char-count.warn { color: var(--gold); }
+        .char-count.over { color: var(--danger); }
 
         .form-row input,
         .form-row textarea {
             width: 100%;
-            background: #0d0d1a;
-            border: 1px solid #2a2a4a;
+            background: var(--surface-2);
+            border: 1px solid var(--line);
             border-radius: 4px;
-            color: #e0e0e0;
+            color: var(--ink);
             font-family: 'Courier New', monospace;
             font-size: 13px;
             padding: 8px 10px;
@@ -352,20 +373,20 @@
         }
 
         .form-row input:focus,
-        .form-row textarea:focus { border-color: #00ff88; }
+        .form-row textarea:focus { border-color: var(--accent); }
 
         .form-row .sub {
             font-size: 10px;
-            color: #777;
+            color: var(--ink-soft);
             margin-top: 4px;
         }
 
         .coords-box {
             font-size: 12px;
-            color: #555;
+            color: var(--ink-soft);
             padding: 7px 10px;
-            background: #0a0a18;
-            border: 1px solid #1a1a3a;
+            background: var(--surface-2);
+            border: 1px solid var(--line);
             border-radius: 4px;
         }
 
@@ -375,7 +396,7 @@
             justify-content: flex-end;
             margin-top: 20px;
             padding-top: 16px;
-            border-top: 1px solid #1a1a3a;
+            border-top: 1px solid var(--line-soft);
         }
 
         /* ── Toast ── */
@@ -384,9 +405,9 @@
             position: fixed;
             bottom: 20px;
             right: 20px;
-            background: #0d1f15;
-            border: 1px solid #00cc66;
-            color: #00ff88;
+            background: var(--surface);
+            border: 1px solid var(--accent);
+            color: var(--accent-strong);
             padding: 9px 15px;
             border-radius: 4px;
             font-size: 12px;
@@ -398,15 +419,15 @@
         .empty {
             text-align: center;
             padding: 32px 12px;
-            color: #888;
+            color: var(--ink-soft);
             font-size: 11px;
             line-height: 1.7;
         }
 
         /* ── Scrollbar ── */
         ::-webkit-scrollbar { width: 5px; }
-        ::-webkit-scrollbar-track { background: #0d0d1a; }
-        ::-webkit-scrollbar-thumb { background: #2a2a4a; border-radius: 3px; }
+        ::-webkit-scrollbar-track { background: var(--bg); }
+        ::-webkit-scrollbar-thumb { background: var(--line); border-radius: 3px; }
     </style>
 </head>
 <body>
@@ -590,8 +611,8 @@ function flyTo(lat, lon, label) {
     map.flyTo([lat, lon], 16, { duration: 1.2 });
     if (searchMarker) map.removeLayer(searchMarker);
     searchMarker = L.circleMarker([lat, lon], {
-        radius: 8, color: '#00cc66', fillColor: '#00ff88',
-        fillOpacity: 0.6, weight: 2
+        radius: 8, color: '#5f9bc4', fillColor: '#8bbdd9',
+        fillOpacity: 0.65, weight: 2
     }).addTo(map).bindPopup(label).openPopup();
     // Auto-remove marker after 6s
     setTimeout(() => { if (searchMarker) { map.removeLayer(searchMarker); searchMarker = null; } }, 6000);
@@ -602,8 +623,8 @@ function makeIcon() {
     return L.divIcon({
         className: '',
         html: `<div style="width:12px;height:12px;border-radius:50%;
-                   background:#ffcc00;border:2px solid #cc9900;
-                   box-shadow:0 0 7px #ffcc0099;"></div>`,
+                   background:#e0ac3f;border:2px solid #a67c2e;
+                   box-shadow:0 0 7px #e0ac3f99;"></div>`,
         iconSize: [12,12], iconAnchor: [6,6], popupAnchor: [0,-8]
     });
 }
@@ -652,7 +673,7 @@ function saveWaypoint() {
 
     if (!name) {
         const el = document.getElementById('f-name');
-        el.style.borderColor = '#ff4444';
+        el.style.borderColor = '#c85c4f';
         el.focus();
         setTimeout(() => el.style.borderColor = '', 1500);
         return;
