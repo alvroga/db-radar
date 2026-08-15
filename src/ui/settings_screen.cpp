@@ -599,6 +599,10 @@ static void beaconMacTextChanged(lv_event_t* e) {
     const char* raw = lv_textarea_get_text(ta);
     bool inserting = strlen(raw) >= strlen(s_beacon_mac_prev);
 
+    // Cursor pos right after LVGL's own edit (insert/delete), still expressed
+    // against the raw (not-yet-reformatted) string.
+    int old_cursor = lv_textarea_get_cursor_pos(ta);
+
     char hex[13];
     int hex_len = 0;
     for (const char* p = raw; *p && hex_len < 12; p++) {
@@ -609,21 +613,44 @@ static void beaconMacTextChanged(lv_event_t* e) {
         }
     }
 
+    // How many hex digits sit before the cursor in the raw string — this is
+    // what the cursor position should track, not the string length, so a
+    // backspace that lands right after a re-inserted ':' doesn't jump the
+    // cursor to the end (was the "stuck at colon" bug).
+    int hex_before_cursor = 0;
+    {
+        int seen = 0;
+        for (const char* p = raw; *p && seen < old_cursor; p++, seen++) {
+            char c = *p;
+            if (c >= 'a' && c <= 'f') c -= ('a' - 'A');
+            if ((c >= '0' && c <= '9') || (c >= 'A' && c <= 'F')) hex_before_cursor++;
+        }
+    }
+    if (hex_before_cursor > hex_len) hex_before_cursor = hex_len;
+
     char formatted[18];
     int out_len = 0;
+    int new_cursor = 0;
+    bool marked = (hex_before_cursor == 0);
     for (int i = 0; i < hex_len; i++) {
         if (i > 0 && i % 2 == 0) formatted[out_len++] = ':';
         formatted[out_len++] = hex[i];
+        if (!marked && (i + 1) == hex_before_cursor) {
+            new_cursor = out_len;
+            marked = true;
+        }
     }
     if (inserting && hex_len > 0 && hex_len % 2 == 0 && hex_len < 12) {
         formatted[out_len++] = ':';  // pair just completed — show the separator right away
+        if (hex_before_cursor == hex_len) new_cursor = out_len;  // cursor rides along with it when typing forward
     }
     formatted[out_len] = '\0';
+    if (!marked) new_cursor = out_len;
 
     if (strcmp(raw, formatted) != 0) {
         s_beacon_mac_formatting = true;
         lv_textarea_set_text(ta, formatted);
-        lv_textarea_set_cursor_pos(ta, out_len);
+        lv_textarea_set_cursor_pos(ta, new_cursor);
         s_beacon_mac_formatting = false;
     }
     strncpy(s_beacon_mac_prev, formatted, sizeof(s_beacon_mac_prev) - 1);
@@ -1726,7 +1753,7 @@ void createDisplayTab(lv_obj_t* parent) {
     lv_obj_t* cal_status = lv_label_create(parent);
     lv_label_set_text(cal_status, cal_settings.compass_calibrated ? "Status: Calibrated" : "Status: Not calibrated");
     lv_obj_set_style_text_color(cal_status, cal_settings.compass_calibrated ?
-                                 lv_color_hex(0x00AA00) : lv_color_hex(0xAA6600), 0);
+                                 lv_color_hex(0x00AA00) : lv_color_hex(0xFF4444), 0);
     lv_obj_set_style_text_font(cal_status, &iosevka_16, 0);
     lv_obj_align(cal_status, LV_ALIGN_TOP_LEFT, 0, y_offset);
     y_offset += 30;

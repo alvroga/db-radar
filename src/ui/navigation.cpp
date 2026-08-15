@@ -1313,11 +1313,10 @@ void updateRadarDisplay() {
             auto health = compass_qmc5883l::classifyHealth(dev.last_compass_data, settings.compass_cal_h0);
             if (health == compass_qmc5883l::CompassHealth::DISTURBANCE) {
                 text = "Compass: interference"; color = 0xFF4444;
-            } else if (health == compass_qmc5883l::CompassHealth::TILTED) {
-                text = "Compass: hold flat"; color = 0xFFAA00;
             } else if (quality_poor) {
                 text = "Compass: recalibrate?"; color = 0xFFAA00;
             }
+            // TILTED is expected/self-evident (device isn't flat) -- no message for it.
             // else HEALTHY with a good calibration -- text stays null, label hides.
         } else if (settings.compass_calibrated) {
             text = "Compass: recalibrate?"; color = 0xFFAA00;  // calibrated before H0 tracking existed -- no baseline
