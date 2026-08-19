@@ -866,8 +866,7 @@ static void wifiPopulateList(lv_obj_t* network_list) {
             default:        color = lv_color_hex(0xFF8800); break;
         }
         lv_obj_set_style_text_color(btn, color, 0);
-        lv_obj_set_user_data(btn, (void*)(intptr_t)i);
-        lv_obj_add_event_cb(btn, wifiOnNetworkSelected, LV_EVENT_CLICKED, nullptr);
+        lv_obj_add_event_cb(btn, wifiOnNetworkSelected, LV_EVENT_CLICKED, (void*)(intptr_t)i);
     }
     Serial.printf("[WIFI] List populated with %d networks\n", count);
 }

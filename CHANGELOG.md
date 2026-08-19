@@ -207,6 +207,24 @@ changed.
 
 ### Fixed
 
+**WiFi network picker always connected to the topmost (strongest-signal) SSID (2026-08-19)**
+
+Tapping any row in the WiFi connect screen's scanned-network list connected to whichever network was
+listed first, regardless of which row was actually tapped — reported as "have to wait for the one you
+want to reach the top." Root cause: `wifiPopulateList()` (`src/ui/ui_manager.cpp`) stored each button's
+scan-result index via `lv_obj_set_user_data(btn, i)`, but registered the click handler
+(`wifiOnNetworkSelected`) with a literal `nullptr` as `lv_obj_add_event_cb()`'s event-user-data
+argument — a separate storage slot from `lv_obj_get_user_data()`. The handler reads the index back via
+`lv_event_get_user_data(e)`, which was therefore always `nullptr`/0 on every click, resolving to
+`scanner::getScanRecord(0)` no matter which button was pressed. Since ESP-IDF's WiFi scan results come
+back RSSI-sorted, index 0 is normally the strongest-signal network — the topmost row — matching the
+reported symptom exactly.
+
+**Fix**: pass the loop index directly as the event's user-data at registration
+(`lv_obj_add_event_cb(btn, wifiOnNetworkSelected, LV_EVENT_CLICKED, (void*)(intptr_t)i)`), removing the
+now-redundant `lv_obj_set_user_data()` call. Build-verified clean (RAM 51.4%, Flash 41.0%); not yet
+field-tested on hardware.
+
 **Compass polish pass: QMC5883P field range, chip-aware diagnostics, µT conversion (2026-08-14)**
 
 Found during a review of the just-shipped BE-881 work, before hardware field-testing had confirmed
