@@ -321,7 +321,7 @@ risk.
 - **Espressif** — ESP32-S3 and ESP-IDF
 - **PlatformIO** — Embedded development platform
 - **h2zero/NimBLE-Arduino** — Lightweight BLE stack
-- **Beitian** — BH-880 GPS + compass module
+- **Beitian** — BH-880 and BE-881 GPS + compass modules
 - **Quectel** — LC76G GNSS chip (used in third-party LC76G breakout modules)
 
 ---
