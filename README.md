@@ -55,24 +55,6 @@ has already shipped, but the feature itself isn't built yet — see
 
 ---
 
-## Bill of Materials
-
-One firmware image supports four GPS/compass modules — pick one. See
-[GPS Module Options](#gps-module-options) below for how to choose.
-
-| # | Part | Notes |
-|---|------|-------|
-| 1 | [Waveshare ESP32-S3-Touch-LCD-2.1](https://www.waveshare.com/esp32-s3-touch-lcd-2.1.htm) | Main board — 16MB Flash, 8MB PSRAM, 480×480 round display — [wiki](https://docs.waveshare.com/ESP32-S3-Touch-LCD-2.1) |
-| 2 | [Beitian BH-880](https://www.beitian.com/en/sys-pd/1871.html) (primary), BE-881, LC76G, **or** BN-880 | GPS module — BH-880/BE-881/BN-880 each add a built-in compass; LC76G doesn't (device runs North-Up automatically) |
-| 3 | 3.7V 1S LiPo, 1000–2000mAh | Any 1S LiPo in that range works |
-| 4 | MT3608 boost converter | Steps the board's 3.3V rail up to 5V — required for modules needing 3.6–5.5V (see [Assembly Instructions](docs/assembly.md)) |
-| 5 | 1.25mm 6-pin JST pigtail | Comes with the BH-880/BE-881 modules (LC76G/BN-880 typically use a smaller 4-pin JST instead — check yours) |
-| 6 | 3D printed enclosure | See [3D Enclosure](#3d-enclosure) below |
-| 7 | M2 screws | Enclosure mounting |
-| 8 | M1.4 screws | Fixing components inside the enclosure |
-
----
-
 ## GPS Module Options
 
 One firmware image, four supported modules — pick based on whether you want the compass, and
@@ -264,6 +246,7 @@ Measured directly from a clean build:
 
 - **[docs/manual.md](docs/manual.md)** — User manual: every mode, every setting, waypoints and
   hints, BLE beacon tracking, WiFi/GPX management, assembly steps, and what's coming next
+- **[docs/bom.md](docs/bom.md)** — Bill of materials, covering both the round and flat display variants (in progress)
 - **[docs/assembly.md](docs/assembly.md)** — Wiring diagrams and build photos (in progress)
 - **[docs/serial_commands.md](docs/serial_commands.md)** — Full serial console command reference
 - **[docs/bh880_module.md](docs/bh880_module.md)** — GPS module support: BH-880, BE-881, LC76G, and

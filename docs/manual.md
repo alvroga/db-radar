@@ -178,10 +178,9 @@ manually once you've retrieved whatever you were tracking. See
 
 ## Building One
 
-For the full bill of materials and enclosure/print settings, see the
-[README's Bill of Materials and 3D Enclosure sections](../README.md#3d-enclosure) (full README content
-ships once the project is out of "coming soon" mode — see `docs/private/public_release_plan.md`); for
-wiring diagrams, see [Assembly Instructions](assembly.md) (in progress). What follows is the
+For the full bill of materials, see [`docs/bom.md`](bom.md) (in progress); for enclosure/print
+settings, see the [README's 3D Enclosure section](../README.md#3d-enclosure); for wiring diagrams,
+see [Assembly Instructions](assembly.md) (in progress). What follows is the
 assembly sequence itself, photo by photo — see
 [`assets/manual/README.md`](../assets/manual/README.md) for the exact shot list and file naming;
 each step below already names the file it's waiting on.
