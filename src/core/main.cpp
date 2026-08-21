@@ -342,32 +342,38 @@ extern "C" void app_main() {
     delay(200);
 
     // Dedicated boot modes: create the appropriate full-screen UI
-    {
-        const auto& boot = settings_manager::getSettings();
-        if (boot.wifi_ap_enabled) {
-            setLoadingStatus("Starting upload mode...");
-            ui_manager::createAPScreen();
-            Serial.println("[MAIN] AP upload screen created");
-        } else if (boot.wifi_sta_boot) {
-            setLoadingStatus("Starting WiFi mode...");
-            ui_manager::createWiFiScreen();
-            Serial.println("[MAIN] WiFi STA screen created");
-        }
+    const auto& boot = settings_manager::getSettings();
+    const bool wifi_boot_mode = boot.wifi_ap_enabled || boot.wifi_sta_boot;
+    if (boot.wifi_ap_enabled) {
+        setLoadingStatus("Starting upload mode...");
+        ui_manager::createAPScreen();
+        Serial.println("[MAIN] AP upload screen created");
+    } else if (boot.wifi_sta_boot) {
+        setLoadingStatus("Starting WiFi mode...");
+        ui_manager::createWiFiScreen();
+        Serial.println("[MAIN] WiFi STA screen created");
     }
 
-    // Pre-create settings screen (eliminates first-press delay)
-    setLoadingStatus("Building control panels...");
-    Serial.println("[MAIN] Pre-creating settings screen...");
-    uint32_t settings_start = millis();
-    ui_manager::createSettingsScreen();
-    Serial.printf("[MAIN] ✓ Settings screen ready (%.1fs)\n",
-                  (millis() - settings_start) / 1000.0);
+    // Settings screen and navigation are unreachable from the AP/WiFi upload screens
+    // (no button/path leads to either) — skip both entirely for a WiFi-only boot rather
+    // than build-then-never-use them.
+    if (!wifi_boot_mode) {
+        // Pre-create settings screen (eliminates first-press delay)
+        setLoadingStatus("Building control panels...");
+        Serial.println("[MAIN] Pre-creating settings screen...");
+        uint32_t settings_start = millis();
+        ui_manager::createSettingsScreen();
+        Serial.printf("[MAIN] ✓ Settings screen ready (%.1fs)\n",
+                      (millis() - settings_start) / 1000.0);
 
-    // Initialize navigation system
-    setLoadingStatus("Calibrating compass...");
-    if (!navigation::init()) {
-        Serial.println("[ERROR] Navigation initialization failed");
-        while (1) { delay(1000); }
+        // Initialize navigation system
+        setLoadingStatus("Calibrating compass...");
+        if (!navigation::init()) {
+            Serial.println("[ERROR] Navigation initialization failed");
+            while (1) { delay(1000); }
+        }
+    } else {
+        Serial.println("[MAIN] WiFi boot mode — skipping settings screen and navigation init");
     }
 
     // Initialize diagnostics

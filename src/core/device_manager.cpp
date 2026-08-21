@@ -141,6 +141,16 @@ bool initializeAll(const Config& config) {
     settings_manager::init();
     Serial.println("[SETTINGS] Settings loaded");
 
+    // A WiFi-AP/STA boot is used only to reach the GPX web manager — it never touches
+    // navigation. Skip GPS/compass/accel/SD entirely rather than init-then-ignore them:
+    // saves boot time (no ~9s failed GPS baud scan when GPS is disconnected) and keeps
+    // the shared I2C bus quiet during a boot mode that has no use for it. See the
+    // separate *runtime* WiFi-vs-compass suspend gate in task_manager.cpp's systemTask()
+    // for the opposite case (WiFi enabled during an already-running navigation session)
+    // — that one stays untouched, this is a complementary boot-time skip, not a replacement.
+    const auto& boot_settings = settings_manager::getSettings();
+    const bool minimal_boot = boot_settings.wifi_ap_enabled || boot_settings.wifi_sta_boot;
+
     // 5. WiFi — initialized in main.cpp only when wifi_ap_enabled or wifi_sta_boot is set.
     // WiFi and NimBLE are mutually exclusive boot modes; wifi_manager::init() uses
     // default buffer sizes since NimBLE never starts in WiFi boot modes.
@@ -148,15 +158,27 @@ bool initializeAll(const Config& config) {
     g_device_state.scanner_ok = false;
 
     // 6. GPS - Critical for radar application
-    g_device_state.gps_ok = initGPS();
+    if (!minimal_boot) {
+        g_device_state.gps_ok = initGPS();
+    } else {
+        Serial.println("[DEVICE] Skipping GPS init — WiFi boot mode");
+    }
 
     // 6b. Compass - QMC5883L on BH-880 module (non-critical)
-    g_device_state.compass_ok = initCompass();
+    if (!minimal_boot) {
+        g_device_state.compass_ok = initCompass();
+    } else {
+        Serial.println("[DEVICE] Skipping compass init — WiFi boot mode");
+    }
 
     // 6c. Accelerometer - QMI8658 on the main board (non-critical).
     // Already on the shared bus and ACKing before this change; only transactions
     // are new. Honours the accel_enabled kill switch.
-    g_device_state.accel_ok = initAccel();
+    if (!minimal_boot) {
+        g_device_state.accel_ok = initAccel();
+    } else {
+        Serial.println("[DEVICE] Skipping accel init — WiFi boot mode");
+    }
 
     // 7. LCD Display - Critical component
     g_device_state.lcd_ok = initLCD(g_config);
@@ -166,7 +188,11 @@ bool initializeAll(const Config& config) {
     }
 
     // 8. SD Card - Optional storage (dev-mode logging)
-    g_device_state.sd_ok = initSD(g_config);
+    if (!minimal_boot) {
+        g_device_state.sd_ok = initSD(g_config);
+    } else {
+        Serial.println("[DEVICE] Skipping SD init — WiFi boot mode");
+    }
 
     // 8b. FFat - primary GPX waypoint storage (see ADR-0024). Independent of SD/EXIO,
     // mounted here purely to land before gpx_loader::init()/gpx_server::init() in main.cpp.

@@ -49,6 +49,7 @@ static void handleCompassCommand(const char* args);
 static void handleAccelCommand(const char* args);
 static void handleFlogCommand(const char* args);
 static void handleAPToggle(bool enable);
+static void handleWiFiBootCommand(const char* args);
 
 // Global state
 static Config g_config;
@@ -179,6 +180,8 @@ void parseCommand(const char* command) {
         }
     } else if (strncmp(p, "version", 7) == 0) {
         Serial.printf("DRAC OS %s\n", FW_VERSION);
+    } else if (strncmp(p, "wifi", 4) == 0) {
+        handleWiFiBootCommand(p + 4);
     } else {
         Serial.printf("Unknown command: %s\n", command);
         Serial.println("Type 'help' for available commands");
@@ -317,6 +320,39 @@ void handleAPToggle(bool enable) {
         }
 
         Serial.println("[DIAG] ✓ AP disabled");
+    }
+}
+
+// Sets the *persisted* boot-mode flags (unlike `diag ap on`, which only starts AP live for
+// this session without touching NVS) and reboots into that mode. Serial-only fallback for
+// setting boot mode when the touchscreen (Settings > WiFi) isn't reachable/working — mirrors
+// the exact save+restart sequence the UI buttons use (settings_screen.cpp).
+// Usage: wifi ap | wifi sta | wifi off  (each reboots immediately into the selected mode)
+void handleWiFiBootCommand(const char* args) {
+    while (*args == ' ') args++;
+
+    if (strncmp(args, "ap", 2) == 0) {
+        Serial.println("[WIFI] Setting boot mode: AP (rebooting)...");
+        settings_manager::saveWiFiAPEnabled(true);
+        settings_manager::saveWiFiSTABoot(false);
+        settings_manager::saveWiFiEnabled(false);
+        esp_restart();
+    } else if (strncmp(args, "sta", 3) == 0) {
+        Serial.println("[WIFI] Setting boot mode: STA (rebooting)...");
+        settings_manager::saveWiFiSTABoot(true);
+        settings_manager::saveWiFiAPEnabled(false);
+        esp_restart();
+    } else if (strncmp(args, "off", 3) == 0 || strncmp(args, "normal", 6) == 0) {
+        Serial.println("[WIFI] Setting boot mode: normal navigation boot (rebooting)...");
+        settings_manager::saveWiFiAPEnabled(false);
+        settings_manager::saveWiFiSTABoot(false);
+        esp_restart();
+    } else {
+        const auto& s = settings_manager::getSettings();
+        Serial.printf("[WIFI] Current persisted boot mode: %s\n",
+                      s.wifi_ap_enabled ? "AP" : (s.wifi_sta_boot ? "STA" : "normal"));
+        Serial.println("[WIFI] Usage: wifi ap | wifi sta | wifi off");
+        Serial.println("[WIFI]   (each reboots immediately into the selected mode)");
     }
 }
 

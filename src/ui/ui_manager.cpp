@@ -76,6 +76,15 @@ bool init(const Config& config) {
     const auto& settings = settings_manager::getSettings();
     g_ui_state.heading_up_mode = settings.heading_up_mode;  // Apply navigation mode
 
+    // WiFi-AP/STA boot never shows the radar screen (see createAPScreen()/createWiFiScreen()
+    // in main.cpp) — skip building it entirely rather than build-then-never-show it. Nothing
+    // downstream needs it: compass/GPS state is irrelevant to those screens, and
+    // flushRadarRender() (task_manager.cpp) guards against being called in this mode.
+    if (settings.wifi_ap_enabled || settings.wifi_sta_boot) {
+        Serial.println("[UI] WiFi boot mode — skipping radar screen creation");
+        return true;
+    }
+
     // No compass hardware present (e.g. an LC76G-only board, which has no QMC5883L) —
     // heading-up has nothing to rotate by, so force North-Up regardless of the saved
     // preference. Not persisted to NVS: a saved Heading-Up preference from a BH-880

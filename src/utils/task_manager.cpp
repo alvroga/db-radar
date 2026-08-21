@@ -719,6 +719,11 @@ static inline void requestRadarRender() {
 static void flushRadarRender() {
     if (!s_radar_render_pending) return;
     s_radar_render_pending = false;
+    // Defense in depth: the radar screen/HUD widgets are never built during a
+    // WiFi-AP/STA boot (ui_manager::init() skips createRadarScreen() in that mode) —
+    // bail out before touching them if anything unexpected ever queues a render here.
+    const auto& s = settings_manager::getSettings();
+    if (s.wifi_ap_enabled || s.wifi_sta_boot) return;
     if (standby_manager::isStandby()) return;  // screen is off — don't paint
     navigation::updateRadarDisplay();
 }
