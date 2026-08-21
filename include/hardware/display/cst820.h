@@ -16,3 +16,8 @@ bool cst820_begin(uint8_t i2c_addr = 0x15);
 // Returns true if read succeeded. 'pt.pressed' tells if finger is down.
 // Raw ranges vary by firmware (could be ~0..480, ~0..1023, or ~0..4095)
 bool cst820_read(CST820Point &pt, uint8_t i2c_addr = 0x15);
+
+// Write DisAutoSleep (0xFE) so polling keeps working while idle — some chip
+// firmware batches otherwise sleep after ~1-2s and NACK all I2C until touched.
+// Call only while the chip is responding; re-issue after every TP_RST.
+bool cst820_disable_auto_sleep();

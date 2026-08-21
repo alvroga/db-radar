@@ -8,7 +8,7 @@ For completed features and history, see [CHANGELOG.md](CHANGELOG.md).
 
 ## Known Issues
 
-None currently open. See Resolved below for FT-03, FT-05, FT-09.
+None currently open. See Resolved below for FT-03, FT-05, FT-09, FT-10.
 
 ---
 
@@ -226,6 +226,22 @@ arrives and turn it into a field-verified procedure.
 
 ## Resolved
 
+### FT-10: Touch Dead/Intermittent on Some Boards — CST820 Auto-Sleep — Resolved (2026-08-21)
+**Was**: touch worked briefly (right after a USB flash, or ~1-2s after a TP_RST pulse) then NACK'd
+every I2C transaction indefinitely — a total blocker on the affected board, reproduced independently
+by a second user's logs. Two collateral bugs were fixed en route (`cde07d3`: NACK-cascade reboot
+loop, Core-1 boot starvation) and the remainder was misattributed to a marginal FPC connector.
+
+**Root cause**: some CST8xx chip firmware batches auto-sleep after ~1-2s idle and NACK all I2C until
+a touch or TP_RST wakes them; the project never wrote the `0xFE` DisAutoSleep register Waveshare's
+own demo writes, and the 10-failure circuit breaker then permanently disabled the only polling path
+that could have caught the waking press.
+
+**Status**: fixed and field-verified 2026-08-21 — DisAutoSleep written at every chip-reset path,
+breaker throttles (250ms) instead of disabling, I2C wedge detector now requires ≥2 failing devices.
+No hardware fault existed. See [CHANGELOG.md](CHANGELOG.md), [docs/touch.md](docs/touch.md)'s
+Auto-Sleep section, and [ADR-0034](docs/adr/0034-touch-nack-throttle-not-permanent-breaker.md).
+
 ### Multi GPS Module Support (BH-880 + LC76G + BN-880 + BE-881) — Resolved, merged to initial-release (2026-08-14)
 **Was**: LC76G support (dropped when the project moved to BH-880) needed restoring without a separate
 build, plus support for two more field-reported lookalike modules — BN-880 (GitHub issue #1) and
@@ -239,9 +255,9 @@ BE-881→QMC5883P, LC76G→no compass, forced North-Up). LC76G, BH-880, and BE-8
 (2026-08-11, 2026-08-11, 2026-08-14 respectively) and are the three modules offered on the first-boot
 picker. **BN-880 support remains in the firmware** (Settings/serial-reachable, `gps module set bn880`)
 but was swapped out of the first-boot picker for BE-881 the same day, since it's still only
-build-verified — its first field report (2026-08-12) hit unresponsive touch on the picker screen, an
-I2C bus-wedge interaction with the accelerometer probe that's been mitigated but not yet confirmed
-against the reporting board. Two real bugs were also field-caught and fixed along the way: a
+build-verified — its first field report (2026-08-12) hit unresponsive touch on the picker screen,
+which at the time was mitigated as an I2C bus-wedge interaction but is now believed root-caused by
+FT-10 (CST820 auto-sleep, fixed 2026-08-21 — see Resolved below), same signature. Two real bugs were also field-caught and fixed along the way: a
 first-boot-picker crash, and the compass staying uninitialized after picking a module on a fresh
 board's first boot (both 2026-08-11).
 

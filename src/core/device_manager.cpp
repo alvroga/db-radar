@@ -867,6 +867,16 @@ bool initTouch() {
         }
     }
 
+    // The chip is awake right now (it just ACKed a probe) — disable its
+    // auto-sleep before it can doze off. Some CST8xx firmware batches sleep
+    // after ~1-2s idle and NACK all I2C until touched, which used to read as
+    // "touch works briefly after TP_RST then dies" (see docs/touch.md).
+    if (cst820_disable_auto_sleep()) {
+        Serial.println("[TOUCH] Auto-sleep disabled (DisAutoSleep 0xFE)");
+    } else {
+        Serial.println("[TOUCH] WARNING: DisAutoSleep write failed — touch may NACK when idle");
+    }
+
     lv_indev_drv_init(&indev_drv);
     indev_drv.type = LV_INDEV_TYPE_POINTER;
     indev_drv.read_cb = lvgl_touch_read_cb;
@@ -1358,17 +1368,39 @@ static void lvgl_touch_read_cb(lv_indev_drv_t*, lv_indev_data_t* data) {
         return;
     }
 
-    static uint8_t consecutive_fails = 0;
+    // After 10 straight failures, drop to a 250ms retry instead of disabling
+    // polling outright. A NACKing CST820 is not necessarily dead: some chip
+    // firmware batches auto-sleep when idle and NACK until a finger wakes them
+    // (see docs/touch.md) — the finger that wakes the chip is exactly the read
+    // we must not have given up on. 4Hz keeps the bus noise negligible while
+    // still catching a real press (~130-190ms) within one or two retries.
+    static uint8_t  consecutive_fails = 0;
+    static uint32_t next_retry_ms = 0;
+
+    if (consecutive_fails >= 10) {
+        uint32_t now = millis();
+        if (now < next_retry_ms) {
+            data->state = LV_INDEV_STATE_RELEASED;
+            data->point.x = last_x;
+            data->point.y = last_y;
+            return;
+        }
+        next_retry_ms = now + 250;
+    }
+
     bool read_ok = cst820_read(pt, 0x15);
 
     if (!read_ok) {
-        if (++consecutive_fails >= 10) {
-            g_device_state.touch_ok = false;
-            Serial.println("[TOUCH] 10 consecutive read failures — disabling touch polling");
-            data->state = LV_INDEV_STATE_RELEASED;
-            return;
+        if (consecutive_fails < 10 && ++consecutive_fails == 10) {
+            Serial.println("[TOUCH] 10 consecutive read failures — throttling touch polling to 250ms (chip asleep or disconnected)");
         }
     } else {
+        if (consecutive_fails >= 10) {
+            Serial.println("[TOUCH] Controller responding again — full-rate polling resumed");
+            // The chip may have been reset/asleep — its DisAutoSleep setting is
+            // volatile, so re-arm it now that it's awake.
+            cst820_disable_auto_sleep();
+        }
         consecutive_fails = 0;
     }
 

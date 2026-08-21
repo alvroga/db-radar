@@ -84,6 +84,16 @@ there is no `Wire` library anywhere in this codebase, so any advice referencing 
 **Symptoms**: no touch events, touch offset/inaccurate coordinates, touch works but at the wrong
 position.
 
+#### Touch works briefly then dies / "CST820 not found" on warm reboots
+**Symptoms**: touch functional right after a USB flash, or for ~1-2s after a reset, then every read
+NACKs; serial shows `[TOUCH] 10 consecutive read failures` and/or `[TOUCH] CST820 not found` at boot
+despite the panel being physically fine.
+
+**Cause**: some CST8xx chip batches auto-sleep after ~1-2s idle and NACK all I2C until touched or
+hardware-reset. Fixed 2026-08-21 (firmware writes the chip's DisAutoSleep register and
+retries instead of giving up; first release with the fix: v26.08.142) — if you see this on current
+firmware, update first before suspecting hardware. Full story: [`docs/touch.md`](touch.md)'s Auto-Sleep section.
+
 The touch coordinate pipeline (CST820 register reads, coordinate scaling, circular-display masking)
 is documented in detail, with exact current code references, in [`docs/touch.md`](touch.md) — consult
 that rather than a simplified snippet here, since the scaling/inversion logic is more involved than a

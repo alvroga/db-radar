@@ -1158,6 +1158,20 @@ static void checkI2CBusHealth(uint32_t now) {
     if (consecutive == 0) recovery_attempts = 0;  // sustained health clears the attempt count
     if (consecutive < WEDGED_THRESHOLD) return;
 
+    // The global counter alone is not enough: one NACKing device polled at a
+    // high rate can saturate it by itself — a sleeping/absent CST820 did
+    // exactly that (see docs/touch.md), triggering spurious full-bus reinits
+    // on a perfectly healthy bus. A real wedge (slave holding SDA low) fails
+    // *every* device, so demand consecutive failures from at least two
+    // distinct devices before declaring the bus wedged.
+    i2c_manager::DeviceStatSnapshot snap[i2c_manager::NUM_DEVICES];
+    i2c_manager::getDeviceStats(snap);
+    int failing_devices = 0;
+    for (int i = 0; i < i2c_manager::NUM_DEVICES; i++) {
+        if (snap[i].ops > 0 && snap[i].consecutive_fails >= 2) failing_devices++;
+    }
+    if (failing_devices < 2) return;
+
     if (recovery_attempts >= MAX_RECOVERY_ATTEMPTS) {
         if (!gave_up_logged) {
             gave_up_logged = true;

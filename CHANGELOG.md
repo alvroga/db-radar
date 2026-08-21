@@ -207,6 +207,48 @@ changed.
 
 ### Fixed
 
+**Touch dead/intermittent on some boards — CST820 auto-sleep root-caused after a two-day hunt (2026-08-21)**
+
+Two independent boards (the user's second unit, plus a field report whose `system_*.log` files showed
+the same signature) had touch "work briefly then die": functional right after a USB flash or for ~1-2s
+after a TP_RST pulse, then NACKing every I2C transaction indefinitely. Across 2026-08-20/21 this was
+a **project total blocker** — the affected board couldn't get past screens requiring a tap — and had
+been misattributed to failing hardware (marginal FPC connector) after two real-but-collateral bugs
+were fixed along the way (`cde07d3`: NACK-cascade reboot loop, Core-1 boot starvation).
+
+**Root cause**: some CST8xx chip firmware batches auto-enter standby after ~1-2s without a finger and
+**NACK all I2C while asleep** — on the bus, identical to a dead chip. Only a touch or TP_RST wakes
+them. Waveshare's own CST820 demo writes register `0xFE` (DisAutoSleep) after reset for exactly this
+reason; this project never did — in any era — and got away with it only because the original board's
+chip doesn't sleep aggressively. Every observed symptom follows: warm reboots don't power-cycle the
+chip, so it enters the new session asleep and fails its init probe ("CST820 not found"); TP_RST wakes
+it for exactly the ~1-2s sleep timeout ("recovers then fails", the tight timing that was misread as
+thermal/mechanical drift); a USB reflash *does* power-cycle it (why touch "mysteriously" worked right
+after flashing 26.08.120); and the then-new 10-failure circuit breaker counted the sleeping chip's
+NACKs and permanently disabled polling ~1s after boot — turning off the only path (a polled finger
+press) that could ever have woken the chip again.
+
+**Fix** (three parts, [ADR-0034](docs/adr/0034-touch-nack-throttle-not-permanent-breaker.md)):
+1. New `cst820_disable_auto_sleep()` writes `0xFE`; the setting is volatile, so it's re-armed at
+   every chip-reset path — end of `initTouch()`, standby-wake's TP_RST, and read-callback recovery.
+2. The read-failure circuit breaker (`lvgl_touch_read_cb()`) now throttles to one retry per 250ms
+   after 10 consecutive failures instead of permanently disabling polling, resuming full rate (and
+   re-arming DisAutoSleep) on the first successful read.
+3. The I2C bus-wedge detector (`checkI2CBusHealth()`, `task_manager.cpp`) now requires consecutive
+   failures from ≥2 distinct devices before declaring the bus wedged — the sleeping touch chip alone
+   had been saturating the single global counter and triggering spurious full-bus reinits on a
+   healthy bus (the crash/reboot at the top of the affected board's log).
+
+**Field-verified 2026-08-21** on the affected board: touch works and stays working across idle
+periods and reboots. No hardware fault existed; the FPC-connector theory is retired. Also resolves
+the unconfirmed 2026-08-12 BN-880 field report ("unresponsive touch on the picker screen") — same
+signature, same fix. **Build impact**: +~0.4KB flash, RAM unchanged (51.4%).
+
+**Files**: `src/hardware/display/cst820.cpp`/`.h`, `src/core/device_manager.cpp`
+(`initTouch()`, `lvgl_touch_read_cb()`), `src/utils/standby_manager.cpp` (wake path),
+`src/utils/task_manager.cpp` (`checkI2CBusHealth()`). Full write-up: [`docs/touch.md`](docs/touch.md)'s
+Auto-Sleep section.
+
 **WiFi network picker always connected to the topmost (strongest-signal) SSID (2026-08-19)**
 
 Tapping any row in the WiFi connect screen's scanned-network list connected to whichever network was

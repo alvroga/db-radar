@@ -340,6 +340,14 @@ cfg.psram_trans_align = 64;             // PSRAM alignment
 - **Never** perform I2C operations in tight loops (causes bus errors)
 - **Always** hold LCD_CS HIGH after display init (prevent SPI conflicts)
 - **Avoid** global variables in vendor code (thread safety issues)
+- **A NACKing CST820 is not necessarily dead — it may be asleep.** Some CST8xx chip batches
+  auto-sleep after ~1-2s idle and NACK *all* I2C until touched or TP_RST'd. `cst820_disable_auto_sleep()`
+  (DisAutoSleep, reg `0xFE`) is written at every chip-reset path (`initTouch()`, standby wake,
+  read-callback recovery) — the setting is volatile, so **don't remove any re-arm site**, and don't
+  turn the touch read-failure throttle back into a permanent disable (that's what kept touch dead a
+  whole session, FT-10). The I2C wedge detector requires **≥2 distinct failing devices** for the same
+  reason — one sleeping device must not trigger full-bus reinits. See [`docs/touch.md`](docs/touch.md)'s
+  Auto-Sleep section and [ADR-0034](docs/adr/0034-touch-nack-throttle-not-permanent-breaker.md).
 
 ## Serial Console Interface
 
@@ -822,4 +830,4 @@ belongs at the link, not duplicated above it.
 
 *This document serves as the master reference for ESP32-S3 Touch LCD projects. Keep it updated as the architecture evolves.*
 
-**Last updated**: 2026-08-10 — see [CHANGELOG.md](CHANGELOG.md) for the full history.
+**Last updated**: 2026-08-21 — see [CHANGELOG.md](CHANGELOG.md) for the full history.

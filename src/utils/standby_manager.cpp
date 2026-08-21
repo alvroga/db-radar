@@ -11,6 +11,7 @@
 #include "hardware/sensors/gps_bh880.h"
 #include "hardware/connectivity/beacon_proximity.h"
 #include "i2c_manager.h"
+#include "cst820.h"
 #include <lvgl.h>
 #include <ctime>
 
@@ -384,7 +385,11 @@ static void restoreActivePowerSettings() {
 
     // Verify CST820 is responding before returning
     if (i2c_manager::ping(i2c_manager::TOUCH_DEVICE)) {
-        Serial.println("[STANDBY] ✓ CST820 responding on I2C");
+        // TP_RST wiped the chip's volatile DisAutoSleep setting — re-arm it
+        // while it's awake, or some firmware batches doze off ~1-2s from now
+        // and NACK all polling until touched (see docs/touch.md).
+        cst820_disable_auto_sleep();
+        Serial.println("[STANDBY] ✓ CST820 responding on I2C (auto-sleep re-disabled)");
     } else {
         Serial.println("[STANDBY] ⚠ CST820 not responding — touch may be unavailable");
     }

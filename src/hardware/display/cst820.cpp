@@ -9,6 +9,17 @@ bool cst820_begin(uint8_t i2c_addr) {
     return i2c_manager::ping(i2c_manager::TOUCH_DEVICE);
 }
 
+// Some CST8xx firmware batches auto-enter standby after ~1-2s without touch and
+// NACK every I2C transaction while asleep (only a touch or TP_RST wakes them) —
+// indistinguishable on the bus from a dead/disconnected chip. Waveshare's own
+// CST820 demo writes DisAutoSleep (0xFE, any non-zero value) right after reset
+// for exactly this reason. Must be called while the chip is awake (i.e. right
+// after a successful probe or TP_RST), and re-issued after any chip reset —
+// the register does not survive one.
+bool cst820_disable_auto_sleep() {
+    return i2c_manager::writeByte(i2c_manager::TOUCH_DEVICE, 0xFE, 0xFF);
+}
+
 // CST8xx packet at registers 0x01-0x06:
 // 0x01: gesture, 0x02: point count, 0x03: XH, 0x04: XL, 0x05: YH, 0x06: YL
 // Coordinates are 12-bit: X = ((XH & 0x0F) << 8) | XL
