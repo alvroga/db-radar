@@ -3,18 +3,12 @@
 # Working / design files — not for public repo
 tickets/
 assets/
-CLAUDE.md.bak2
 
-# Full README draft, held back until the initial public release (README.md
-# ships as a "coming soon" placeholder until then) — see docs/public_release_plan.md
-README.full.md
-
-# Private working docs — contain personal data (email, device MAC, real coordinates)
-# and internal process notes; must never reach the public repo
-docs/public_release_plan.md
-docs/pre_release_doc_audit_findings.md
-docs/konami_easter_egg_retry_notes.md
-docs/release_review_2026-08-09.md
+# Private working docs — contain personal data (email, device MAC, real coordinates),
+# internal process notes, and superseded drafts; must never reach the public repo.
+# Everything gitignored-and-doc-like lives under here so `ls docs/private/` shows
+# at a glance what's being held back. See docs/private/public_release_plan.md.
+docs/private/
 
 # PlatformIO Build Files
 .pio/
