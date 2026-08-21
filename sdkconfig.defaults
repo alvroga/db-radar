@@ -103,7 +103,13 @@ CONFIG_BOOTLOADER_APP_ROLLBACK_ENABLE=y
 
 # Main task stack (app_main runs here before spawning FreeRTOS tasks)
 CONFIG_ESP_MAIN_TASK_STACK_SIZE=8192
-CONFIG_ESP_MAIN_TASK_AFFINITY_CPU1=y
+# CPU0, not CPU1: UI_Task (Core 1, priority 5) deliberately free-runs once frame
+# time exceeds one panel period (it always does, ~85-94ms vs 26.6ms) — see the
+# Render Pipeline vsync comment in task_manager.cpp. Sharing Core 1 with it
+# starves main_task's boot-time code (priority 1) indefinitely, with no panic
+# since main_task isn't a watchdog-subscribed task. Verified via a hang right
+# after task_manager::startTasks() during the post-boot stabilization wait.
+CONFIG_ESP_MAIN_TASK_AFFINITY_CPU0=y
 
 # Watchdog
 CONFIG_ESP_TASK_WDT=y

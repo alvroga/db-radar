@@ -1318,6 +1318,13 @@ static void lvgl_touch_read_cb(lv_indev_drv_t*, lv_indev_data_t* data) {
     CST820Point pt;
     static int16_t last_x = 240, last_y = 240;  // Screen center
 
+    // Touch controller never came up (or was lost after init) — stop polling
+    // instead of hammering the shared I2C bus with NACKs forever.
+    if (!g_device_state.touch_ok) {
+        data->state = LV_INDEV_STATE_RELEASED;
+        return;
+    }
+
     // Don't poll the CST820 during standby — continuous I2C reads at 100Hz
     // with the display off corrupt the touch controller's state over time.
     if (standby_manager::isStandby()) {
@@ -1325,7 +1332,21 @@ static void lvgl_touch_read_cb(lv_indev_drv_t*, lv_indev_data_t* data) {
         return;
     }
 
-    if (cst820_read(pt, 0x15) && pt.pressed) {
+    static uint8_t consecutive_fails = 0;
+    bool read_ok = cst820_read(pt, 0x15);
+
+    if (!read_ok) {
+        if (++consecutive_fails >= 10) {
+            g_device_state.touch_ok = false;
+            Serial.println("[TOUCH] 10 consecutive read failures — disabling touch polling");
+            data->state = LV_INDEV_STATE_RELEASED;
+            return;
+        }
+    } else {
+        consecutive_fails = 0;
+    }
+
+    if (read_ok && pt.pressed) {
         int16_t lx = scale_to_480(pt.x);
         int16_t ly = scale_to_480(pt.y);
 
