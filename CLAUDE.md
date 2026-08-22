@@ -567,12 +567,20 @@ dead leftovers — see the doc for which ones, don't resurrect logic around them
 
 ---
 
-## GPS Module Support: BH-880 (primary), LC76G, BN-880, or BE-881
+## GPS Module Support: BE-881 (primary), BH-880, LC76G, or BN-880
 
-**Status**: LC76G + BH-880 + BE-881 field-verified (2026-08-11, 2026-08-11, 2026-08-14) — these three are
-the **qualified** set offered on the first-boot picker; BN-880 build-verified only, kept in the
-firmware and reachable via Settings/serial, but dropped off the picker 2026-08-14 pending field
-verification | [Full Guide](docs/bh880_module.md) | [ADR-0032](docs/adr/0032-pinned-gps-module-not-always-auto-detect.md) | [ADR-0033](docs/adr/0033-compass-internal-dispatch-not-rename.md)
+**BE-881 is the current default/primary target for new boards** (2026-08-22) — it's the module
+actually available to buy. The original BH-880 this firmware was developed against is no longer sold
+anywhere; existing BH-880 boards remain fully supported, it's just no longer what new development
+targets first.
+
+**Status**: LC76G + BH-880 + BE-881 field-verified (2026-08-11, 2026-08-11, 2026-08-14); BN-880
+build-verified only. **All four are offered on the first-boot picker as of 2026-08-22** — BN-880
+rejoined it (was dropped 2026-08-14 pending field verification) after its one adverse field report was
+judged root-caused by FT-10 (CST820 auto-sleep, fixed 2026-08-21) rather than BN-880 itself; GitHub
+issue #1 closed 2026-08-22 on that reasoning, without a fresh BN-880-specific field retest — treat
+BN-880 as reopened-if-a-new-report-comes-in, not re-verified.
+| [Full Guide](docs/bh880_module.md) | [ADR-0032](docs/adr/0032-pinned-gps-module-not-always-auto-detect.md) | [ADR-0033](docs/adr/0033-compass-internal-dispatch-not-rename.md)
 
 One firmware image supports all four modules (`gps_bh880.cpp`; BN-880 reuses the LC76G NMEA/PAIR path
 byte-for-byte, BE-881 reuses the BH-880 UBX path byte-for-byte — neither needs a separate GPS parser).
@@ -584,12 +592,12 @@ BH-880 that also emits default NMEA chatter before `begin()` enables NAV-PVT cou
 valid NMEA lines before 3 UBX sync pairs, misdetecting it. See ADR-0032 for the full reasoning.
 
 The module type is a **persisted choice**, not re-detected every boot (`settings_manager`'s
-`gps_module_type`/`gps_module_configured`) — a one-time 3-button picker appears on first boot
-(`main.cpp::showGpsModulePickerBlocking()`, buttons: BH-880 / BE-881 / LC76G as of 2026-08-14 — BN-880
-was swapped out for BE-881 once BE-881 got field verification, not deleted, see below), and every
+`gps_module_type`/`gps_module_configured`) — a one-time picker appears on first boot
+(`main.cpp::showGpsModulePickerBlocking()`, 2×2 grid as of 2026-08-22: BE-881/BH-880 top row,
+BN-880/LC76G bottom row, BE-881 first as the current default), and every
 later boot calls `gps_bh880::beginWithProtocol()` (single-pass baud scan only, no protocol guessing).
 Changing the pin later is via Settings > GPS or serial (`gps module set bh880|lc76g|bn880|be881`,
-`gps module reset` — all four values still valid, the picker is just a curated subset), requires a
+`gps module reset`), requires a
 reboot to apply (`esp_restart()`, same pattern as the WiFi/AP screens). **The first-boot picker itself
 also reboots immediately after saving** — not just later pin changes — because `initCompass()` runs
 during Phase 2, before the picker can possibly have shown; without this reboot a freshly-picked

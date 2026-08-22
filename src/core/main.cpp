@@ -55,11 +55,14 @@ static void setLoadingStatus(const char* message) {
 // finish its first session with no working compass despite Settings showing the correct
 // pin — field-caught 2026-08-11.
 //
-// Picker offers only the three field-verified modules (BH-880, BE-881, LC76G) as of
-// 2026-08-14. BN-880/HMC5883L support still exists in the firmware (GpsModule::BN880_NMEA,
-// compass_hmc5883l.cpp) and remains reachable via Settings > GPS or `gps module set bn880`
-// — it just isn't offered here until it gets the same field verification the other three
-// have. Don't delete the BN-880 code path when it drops off this screen.
+// Picker offers all four supported modules as of 2026-08-22 (BE-881, BH-880, BN-880, LC76G
+// — BN-880 was previously excluded pending field verification; its one adverse report is now
+// believed root-caused by FT-10/CST820 auto-sleep, not BN-880 itself, and the user judged it
+// resolved on that basis, see GitHub issue #1). BE-881 is listed first: it's the current
+// default/primary target for new boards, since it's the module actually available to buy —
+// the original BH-880 this firmware was developed against is no longer sold anywhere. BH-880
+// stays supported (all existing BH-880 boards keep working) but is no longer the one new
+// development targets first.
 // Blocking here on a tap is safe: LVGL is still single-threaded (task_manager::startTasks()
 // hasn't run yet) — same precondition setLoadingStatus() above relies on.
 // Returns the picker object so the caller can delete it, kept as defense-in-depth even
@@ -96,45 +99,47 @@ static lv_obj_t* showGpsModulePickerBlocking() {
     static uint8_t s_picked_type = 0;
     s_picked = false;
 
-    // Three stacked buttons — heights/gaps compressed from the original two-button
-    // layout (55px/70px) to 50px/58px so all three plus the hint label still clear
-    // the round display's safe area (verified: at y=325, 300px from top edge, the
-    // circular chord width is still ~330px, comfortably more than the 300px hint).
-    lv_obj_t* btn_bh880 = lv_btn_create(picker);
-    lv_obj_set_size(btn_bh880, 220, 50);
-    lv_obj_align(btn_bh880, LV_ALIGN_TOP_MID, 0, 145);
-    lv_obj_set_style_bg_color(btn_bh880, lv_color_hex(0x0080FF), 0);
-    lv_obj_add_event_cb(btn_bh880, [](lv_event_t*) { s_picked_type = 0; s_picked = true; }, LV_EVENT_CLICKED, nullptr);
-    lv_obj_t* lbl_bh880 = lv_label_create(btn_bh880);
-    lv_label_set_text(lbl_bh880, "BH-880\n(GPS + Compass)");
-    lv_label_set_long_mode(lbl_bh880, LV_LABEL_LONG_WRAP);
-    lv_obj_set_style_text_align(lbl_bh880, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_set_style_text_font(lbl_bh880, &iosevka_16, 0);
-    lv_obj_center(lbl_bh880);
+    // 2x2 grid, not a 4-tall stack — BE-881 (top-left, current default/primary target) /
+    // BH-880 (top-right) / BN-880 (bottom-left) / LC76G (bottom-right). A grid uses two
+    // button-rows of vertical space instead of four, so despite adding a fourth option this
+    // layout finishes *higher* on screen (hint bottom ~y=350) than the three-button single
+    // column it replaced did (hint bottom ~y=370, itself already verified against the round
+    // display's safe area) — strictly more conservative, not less.
+    struct ModuleBtn { const char* label; uint8_t type; };
+    static const ModuleBtn kModules[4] = {
+        {"BE-881\nGPS+Compass", 3},
+        {"BH-880\nGPS+Compass", 0},
+        {"BN-880\nGPS+Compass", 2},
+        {"LC76G\nGPS only",     1},
+    };
+    constexpr int col_w = 150, col_gap = 20, row_h = 60, row_gap = 12;
+    constexpr int grid_w = col_w * 2 + col_gap;
+    constexpr int start_x = (480 - grid_w) / 2;
+    constexpr int start_y = 145;
 
-    lv_obj_t* btn_be881 = lv_btn_create(picker);
-    lv_obj_set_size(btn_be881, 220, 50);
-    lv_obj_align(btn_be881, LV_ALIGN_TOP_MID, 0, 203);
-    lv_obj_set_style_bg_color(btn_be881, lv_color_hex(0x0080FF), 0);
-    lv_obj_add_event_cb(btn_be881, [](lv_event_t*) { s_picked_type = 3; s_picked = true; }, LV_EVENT_CLICKED, nullptr);
-    lv_obj_t* lbl_be881 = lv_label_create(btn_be881);
-    lv_label_set_text(lbl_be881, "BE-881\n(GPS + Compass)");
-    lv_label_set_long_mode(lbl_be881, LV_LABEL_LONG_WRAP);
-    lv_obj_set_style_text_align(lbl_be881, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_set_style_text_font(lbl_be881, &iosevka_16, 0);
-    lv_obj_center(lbl_be881);
+    for (int i = 0; i < 4; i++) {
+        int row = i / 2, col = i % 2;
+        int x = start_x + col * (col_w + col_gap);
+        int y = start_y + row * (row_h + row_gap);
 
-    lv_obj_t* btn_lc76g = lv_btn_create(picker);
-    lv_obj_set_size(btn_lc76g, 220, 50);
-    lv_obj_align(btn_lc76g, LV_ALIGN_TOP_MID, 0, 261);
-    lv_obj_set_style_bg_color(btn_lc76g, lv_color_hex(0x0080FF), 0);
-    lv_obj_add_event_cb(btn_lc76g, [](lv_event_t*) { s_picked_type = 1; s_picked = true; }, LV_EVENT_CLICKED, nullptr);
-    lv_obj_t* lbl_lc76g = lv_label_create(btn_lc76g);
-    lv_label_set_text(lbl_lc76g, "LC76G\n(GPS only, North-Up)");
-    lv_label_set_long_mode(lbl_lc76g, LV_LABEL_LONG_WRAP);
-    lv_obj_set_style_text_align(lbl_lc76g, LV_TEXT_ALIGN_CENTER, 0);
-    lv_obj_set_style_text_font(lbl_lc76g, &iosevka_16, 0);
-    lv_obj_center(lbl_lc76g);
+        lv_obj_t* btn = lv_btn_create(picker);
+        lv_obj_set_size(btn, col_w, row_h);
+        lv_obj_set_pos(btn, x, y);
+        lv_obj_set_style_bg_color(btn, lv_color_hex(0x0080FF), 0);
+        lv_obj_add_event_cb(btn, [](lv_event_t* e) {
+            if (lv_event_get_code(e) != LV_EVENT_CLICKED) return;
+            s_picked_type = (uint8_t)(intptr_t)lv_event_get_user_data(e);
+            s_picked = true;
+        }, LV_EVENT_CLICKED, (void*)(intptr_t)kModules[i].type);
+
+        lv_obj_t* lbl = lv_label_create(btn);
+        lv_label_set_text(lbl, kModules[i].label);
+        lv_label_set_long_mode(lbl, LV_LABEL_LONG_WRAP);
+        lv_obj_set_style_text_align(lbl, LV_TEXT_ALIGN_CENTER, 0);
+        lv_obj_set_style_text_font(lbl, &iosevka_16, 0);
+        lv_obj_set_width(lbl, col_w - 8);
+        lv_obj_center(lbl);
+    }
 
     lv_obj_t* hint = lv_label_create(picker);
     lv_label_set_text(hint, "One-time choice - change later in\nSettings > GPS");
@@ -143,7 +148,7 @@ static lv_obj_t* showGpsModulePickerBlocking() {
     lv_obj_set_style_text_color(hint, lv_color_hex(0x666666), 0);
     lv_obj_set_style_text_font(hint, &iosevka_16, 0);
     lv_obj_set_width(hint, 300);
-    lv_obj_align(hint, LV_ALIGN_TOP_MID, 0, 325);
+    lv_obj_align(hint, LV_ALIGN_TOP_MID, 0, start_y + 2 * row_h + row_gap + 25);
 
     lv_task_handler();
     while (!s_picked) {

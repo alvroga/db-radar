@@ -1,10 +1,17 @@
-# GPS Modules: Beitian BH-880 (primary), LC76G, BN-880, and BE-881
+# GPS Modules: BE-881 (primary), BH-880, LC76G, and BN-880
 
-**Status**: GPS ✅ Working | Compass ✅ Working (WMM declination applied) | Four modules supported in firmware, **three qualified** for the first-boot picker (BH-880, LC76G, BE-881 — all field-verified); BN-880 build-verified only, kept in the firmware, reachable via Settings/serial, not on the picker as of 2026-08-14
+**Status**: GPS ✅ Working | Compass ✅ Working (WMM declination applied) | Four modules supported in
+firmware, all four offered on the first-boot picker as of 2026-08-22 (BE-881, BH-880, LC76G
+field-verified; BN-880 build-verified only — its one adverse field report is now believed
+root-caused by FT-10/CST820 auto-sleep rather than the module itself, see GitHub issue #1, closed
+2026-08-22 on that basis without a fresh BN-880-specific retest).
 
 ## Module Overview
 
-The BH-880 is a combined GNSS + magnetometer module and is the primary/recommended module. It uses the
+**BE-881 is now the primary/default target for new boards** (2026-08-22) — it's the module actually
+available to buy; the original BH-880 this firmware was developed against is no longer sold anywhere.
+BH-880 remains fully supported (existing BH-880 boards are unaffected), it's just no longer what new
+development targets first. The BH-880 is a combined GNSS + magnetometer module. It uses the
 same UART pins (GPIO43/44) as the original LC76G GPS-only module it initially replaced.
 
 **LC76G support was brought back 2026-08-10** (see [ADR-0032](adr/0032-pinned-gps-module-not-always-auto-detect.md))
@@ -214,15 +221,20 @@ entirely (LC76G) — see
 "try one chip, fall back to the other" shortcut was rejected even for the first-boot case.
 
 **First boot**: before `gps_module_configured` is ever true, a one-time full-screen picker appears
-(`main.cpp`, right after `ui_manager::init()`, before the loading-screen sequence) with three buttons —
-**BH-880 / BE-881 / LC76G as of 2026-08-14**, showing what the GPS auto-detect scan found this boot as
-a hint but always requiring an explicit tap. This set is a deliberately curated subset: it's the three
-modules with real field verification, not the full list of modules the firmware supports. **BN-880 was
-swapped out of the picker for BE-881 the same day BE-881 got field-verified** — BN-880's code path
-(`GpsModule::BN880_NMEA`, `compass_hmc5883l.cpp`) was not removed, it's just no longer offered here
-until it gets equivalent field verification; it remains reachable via Settings > GPS or
-`gps module set bn880`. GPS itself isn't gated by this picker — it already came up via the two-pass
-auto-detect earlier in boot (before display was even ready). **Picking a module reboots immediately**
+(`main.cpp`, right after `ui_manager::init()`, before the loading-screen sequence) with **all four
+modules as of 2026-08-22**, laid out as a 2×2 grid — **BE-881 / BH-880** (top row) / **BN-880 / LC76G**
+(bottom row) — showing what the GPS auto-detect scan found this boot as a hint but always requiring an
+explicit tap. BE-881 leads because it's the current default/primary target (the one actually available
+to buy). The grid replaced a 3-tall single-column layout (BH-880/BE-881/LC76G, 2026-08-14 through
+2026-08-21): adding BN-880 as a 4th stacked button would have pushed the bottom hint further down the
+round display than the already-verified-safe position, so the layout switched to two rows instead,
+which uses *less* total vertical space than the old 3-tall stack did. **BN-880 rejoining the picker**
+reverses the 2026-08-14 exclusion — its one adverse field report (unresponsive touch, 2026-08-12) is
+now believed root-caused by FT-10 (CST820 auto-sleep, fixed 2026-08-21), the same signature as other
+boards hit before that fix, not a BN-880-specific defect; GitHub issue #1 was closed 2026-08-22 on that
+reasoning, without a fresh BN-880-specific field retest. GPS itself isn't gated by this picker — it
+already came up via the two-pass auto-detect earlier in boot (before display was even ready).
+**Picking a module reboots immediately**
 (`esp_restart()` inside `showGpsModulePickerBlocking()`) — not just a preference save. This is required
 for the compass, not GPS: `initCompass()` runs during Phase 2, before this picker can possibly have
 shown, so on an unconfigured first boot it always skips compass entirely (no auto-probe); without the
@@ -270,7 +282,7 @@ a BH-880 board does — only LC76G forces North-Up.
 | `src/hardware/i2c/i2c_manager.cpp` / `.h` | `COMPASS_DEVICE_HMC` (0x1E) + `COMPASS_DEVICE_QMCP` (0x2C) device handles, `NUM_DEVICES` raised to 8 |
 | `src/core/device_manager.cpp` | `initGPS()`/`initCompass()` branch on `gps_module_configured` + pinned type, no auto-probing |
 | `src/utils/settings_manager.cpp` / `.h` | `gps_module_type`/`gps_module_configured`, `saveGPSModuleSelection()`, `resetGPSModuleConfiguration()`, compass-cal reset on module change |
-| `src/core/main.cpp` | First-boot picker (`showGpsModulePickerBlocking()`), 3 buttons: BH-880/BE-881/LC76G (BN-880 removed from the picker 2026-08-14, code kept — see above) |
+| `src/core/main.cpp` | First-boot picker (`showGpsModulePickerBlocking()`), 2×2 grid: BE-881/BH-880/BN-880/LC76G (BN-880 rejoined the picker 2026-08-22 — see above) |
 | `src/ui/ui_manager.cpp` | Forces North-Up when `!compass_ok` (unchanged — already module-agnostic) |
 | `src/ui/settings_screen.cpp` | GPS Module dropdown (3 options) + reboot button; nav-mode dropdown disabled when no compass |
 | `src/utils/diagnostics.cpp` | `gps module [set\|reset]` serial commands |

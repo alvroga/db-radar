@@ -11,6 +11,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+**First-boot GPS module picker now offers all four modules; BE-881 is the new primary target (2026-08-22)**
+
+`main.cpp::showGpsModulePickerBlocking()` switched from a 3-tall single-column layout (BH-880/BE-881/
+LC76G) to a 2×2 grid (BE-881/BH-880 top row, BN-880/LC76G bottom row) so BN-880 could rejoin the picker
+without pushing content further down the round display than the previously-verified-safe area — the
+grid actually uses less total vertical space than the 3-button stack it replaced. BN-880 had been
+dropped from the picker 2026-08-14 pending field verification after an adverse report (unresponsive
+touch); that's now believed root-caused by FT-10 (CST820 auto-sleep, fixed 2026-08-21), not a
+BN-880-specific defect, so GitHub issue #1 was closed on that reasoning — without a fresh
+BN-880-specific field retest, worth reopening if a new BN-880 report surfaces.
+
+Also declared **BE-881 the primary/default target for new boards**, replacing BH-880 in that role —
+BE-881 is the module actually available to buy; the original BH-880 this firmware was developed
+against is no longer sold anywhere (existing BH-880 boards remain fully supported). Updated
+CLAUDE.md, ROADMAP.md, and `docs/bh880_module.md` accordingly. Build-verified clean
+(`pio run`); **not yet field-tested on hardware** — the round-display safe-area geometry was checked by
+calculation against the display's known 480px circular bounds, not by flashing a board.
+
 **GPX Generator tool: bounded map layout + tile provider swap (2026-08-15)**
 
 `tools/waypoint-editor/index.html` (the standalone waypoint editor at

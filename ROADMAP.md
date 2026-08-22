@@ -323,14 +323,19 @@ auto-identified on first boot and then pinned as a persisted choice (Settings > 
 `gps module set ...`) rather than re-detected every boot — compass chip selection is never
 auto-probed, only ever a direct consequence of the pin (BH-880→QMC5883L, BN-880→HMC5883L,
 BE-881→QMC5883P, LC76G→no compass, forced North-Up). LC76G, BH-880, and BE-881 are **field-verified**
-(2026-08-11, 2026-08-11, 2026-08-14 respectively) and are the three modules offered on the first-boot
-picker. **BN-880 support remains in the firmware** (Settings/serial-reachable, `gps module set bn880`)
-but was swapped out of the first-boot picker for BE-881 the same day, since it's still only
-build-verified — its first field report (2026-08-12) hit unresponsive touch on the picker screen,
-which at the time was mitigated as an I2C bus-wedge interaction but is now believed root-caused by
-FT-10 (CST820 auto-sleep, fixed 2026-08-21 — see Resolved below), same signature. Two real bugs were also field-caught and fixed along the way: a
-first-boot-picker crash, and the compass staying uninitialized after picking a module on a fresh
-board's first boot (both 2026-08-11).
+(2026-08-11, 2026-08-11, 2026-08-14 respectively); BN-880 remains build-verified only. Two real bugs
+were also field-caught and fixed along the way: a first-boot-picker crash, and the compass staying
+uninitialized after picking a module on a fresh board's first boot (both 2026-08-11).
+
+**Updated 2026-08-22**: all four modules are now offered on the first-boot picker (2×2 grid:
+BE-881/BH-880 top row, BN-880/LC76G bottom row). BN-880 had been swapped off the picker 2026-08-14
+after a field report (unresponsive touch on the picker screen) that was mitigated at the time as an
+I2C bus-wedge interaction but is now believed root-caused by FT-10 (CST820 auto-sleep, fixed
+2026-08-21), same signature as other boards hit before that fix — not a BN-880-specific defect. GitHub
+issue #1 was closed on that reasoning, without a fresh BN-880-specific field retest. **BE-881 is now
+the primary/default target for new boards** — it's the module actually available to buy; the original
+BH-880 this firmware was developed against is no longer sold anywhere (BH-880 stays fully supported
+for existing boards).
 
 See [CHANGELOG.md](CHANGELOG.md), [docs/bh880_module.md](docs/bh880_module.md),
 [ADR-0032](docs/adr/0032-pinned-gps-module-not-always-auto-detect.md), and
