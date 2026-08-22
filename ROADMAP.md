@@ -83,6 +83,24 @@ slider LVGL widget styles need their own light variants or just background/text 
 
 ---
 
+### Settings Tabs May Need Rearranging — brainstorm stage
+**Severity**: UX — organization, not a bug
+
+**Ask**: revisit the current tab order/grouping (GPS, WiFi, Display, Sound, Beacon, DEV in
+`settings_screen.cpp`). Surfaced 2026-08-22 while discussing the GPS Module dropdown
+(`createGPSTab()`, `src/ui/settings_screen.cpp:1022-1034`) — it's a control a regular user should
+essentially never touch after first boot (the module is fixed at assembly; the picker already made
+the real choice), kept in main Settings only as a self-service recovery path for a mis-tapped
+first-boot pick, not for routine use. That raises the general question of whether every current tab
+groups the right things for a "regular user vs. rarely-touched/recovery" split, not just GPS
+specifically.
+
+**Status**: no specific rearrangement proposed yet — this is a placeholder to revisit tab
+organization as a whole next time Settings gets worked on, informed by whatever's learned from the
+swipe-sync fix and light-mode work above (both touch the same tab bar).
+
+---
+
 ## Planned
 
 ### Quests *(design substantially resolved, feature not yet built)*
