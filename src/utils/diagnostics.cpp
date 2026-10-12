@@ -304,8 +304,11 @@ void handleAPToggle(bool enable) {
             char ip[20] = {};
             gpx_server::getStatus(ip, sizeof(ip));
             Serial.println("[DIAG] ✓ AP created and web server started");
-            Serial.printf("[DIAG]   SSID: Radar-GPX\n");
-            Serial.printf("[DIAG]   Password: radar123\n");
+            // Print the actual configured credentials, not a hardcoded placeholder —
+            // both SSID and password are user-configurable (Settings > WiFi) and the
+            // password now defaults to a per-device value, not a fixed string.
+            Serial.printf("[DIAG]   SSID: %s\n", settings_manager::getSettings().ap_ssid);
+            Serial.printf("[DIAG]   Password: %s\n", settings_manager::getSettings().ap_password);
             Serial.printf("[DIAG]   Web portal ready at: http://%s\n", ip);
         } else {
             Serial.println("[DIAG] ✗ Failed to start AP/web server");
@@ -1066,8 +1069,8 @@ void handleGPXCommand(const char* args) {
                 if (gpx_server::isRunning()) {
                     wifi_sta_list_t sta_list = {};
                     esp_wifi_ap_get_sta_list(&sta_list);
-                    Serial.printf("AP SSID:         Radar-GPX\n");
-                    Serial.printf("AP Password:     radar123\n");
+                    Serial.printf("AP SSID:         %s\n", settings_manager::getSettings().ap_ssid);
+                    Serial.printf("AP Password:     %s\n", settings_manager::getSettings().ap_password);
                     Serial.printf("Connected:       %d clients\n", sta_list.num);
                 }
             }

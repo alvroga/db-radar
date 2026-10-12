@@ -121,15 +121,19 @@ to someone and let them hunt for it with nothing but the radar.
 
 Two WiFi modes, switchable in **Settings > WiFi**:
 
-- **Access Point mode** — the device hosts its own WiFi network (default SSID `Radar-GPX`, default
-  password `radar123`). Connect your phone or laptop directly to it, no router or home network
+- **Access Point mode** — the device hosts its own WiFi network (default SSID `Radar-GPX`, with a
+  password generated per device from its MAC address — shown on the Settings > WiFi screen, and
+  changeable there). Connect your phone or laptop directly to it, no router or home network
   required. The web portal is at `http://192.168.4.1`.
 - **Station (STA) mode** — the device joins your home WiFi instead. The web portal is then reachable
   at the device's IP address, shown right there in the Settings screen.
 
 The web portal is where you upload, browse, and delete `.gpx` files, and (once the device is on your
 network) where firmware updates over WiFi happen too — see the README's Installation section for the
-OTA update flow.
+OTA update flow. Uploading, deleting, and firmware updates all prompt for the AP password (any
+username, the AP password from Settings > WiFi) the first time you use them in a browser session —
+this is what stops other devices on the same network (particularly in STA mode) from doing those
+things without you.
 
 ---
 

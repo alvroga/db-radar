@@ -16,6 +16,7 @@
 #include "esp_ota_ops.h"
 #include "esp_system.h"
 #include "esp_vfs_fat.h"
+#include "mbedtls/base64.h"  // Basic-Auth decoding for admin-gated endpoints (see check_admin_auth)
 
 #include <sys/stat.h>
 #include <dirent.h>
@@ -842,19 +843,47 @@ static const char LOGS_HTML[] = R"rawliteral(
                 if (data.files && data.files.length > 0) {
                     bulkActions.style.display = 'flex';
                     data.files.forEach(file => {
+                        // Log filenames come from the SD card, not from any HTTP input on this
+                        // device — but built via DOM APIs + textContent (never innerHTML with an
+                        // interpolated name, and never inline onclick="...('${name}')", which a
+                        // filename containing a quote could break out of) so a crafted filename
+                        // on the card can't inject HTML or JS either way.
                         const item = document.createElement('div');
                         item.className = 'log-item';
-                        item.innerHTML = `
-                            <input type="checkbox" class="log-checkbox item-checkbox" value="${file.name}" onchange="updateBulkUI()">
-                            <div class="log-info">
-                                <div class="log-name">${file.name}</div>
-                                <div class="log-size">${formatBytes(file.size)}</div>
-                            </div>
-                            <div class="log-actions">
-                                <button class="download-btn" onclick="downloadLog('${file.name}')">Download</button>
-                                <button class="delete-btn" onclick="deleteLog('${file.name}')">Delete</button>
-                            </div>
-                        `;
+
+                        const checkbox = document.createElement('input');
+                        checkbox.type = 'checkbox';
+                        checkbox.className = 'log-checkbox item-checkbox';
+                        checkbox.value = file.name;
+                        checkbox.addEventListener('change', updateBulkUI);
+
+                        const info = document.createElement('div');
+                        info.className = 'log-info';
+                        const nameDiv = document.createElement('div');
+                        nameDiv.className = 'log-name';
+                        nameDiv.textContent = file.name;
+                        const sizeDiv = document.createElement('div');
+                        sizeDiv.className = 'log-size';
+                        sizeDiv.textContent = formatBytes(file.size);
+                        info.appendChild(nameDiv);
+                        info.appendChild(sizeDiv);
+
+                        const actions = document.createElement('div');
+                        actions.className = 'log-actions';
+                        const dlBtn = document.createElement('button');
+                        dlBtn.className = 'download-btn';
+                        dlBtn.textContent = 'Download';
+                        dlBtn.addEventListener('click', () => downloadLog(file.name));
+                        const delBtn = document.createElement('button');
+                        delBtn.className = 'delete-btn';
+                        delBtn.textContent = 'Delete';
+                        delBtn.addEventListener('click', () => deleteLog(file.name));
+                        actions.appendChild(dlBtn);
+                        actions.appendChild(delBtn);
+
+                        item.appendChild(checkbox);
+                        item.appendChild(info);
+                        item.appendChild(actions);
                         logList.appendChild(item);
                     });
                 } else {
@@ -889,7 +918,7 @@ static const char LOGS_HTML[] = R"rawliteral(
         }
 
         function downloadLog(filename) {
-            window.location.href = `/download/logs/${filename}`;
+            window.location.href = `/download/logs/${encodeURIComponent(filename)}`;
         }
 
         function downloadSelected() {
@@ -910,7 +939,7 @@ static const char LOGS_HTML[] = R"rawliteral(
             if (!confirm(`Delete ${filename}?`)) return;
 
             try {
-                const response = await fetch(`/delete/logs/${filename}`, {
+                const response = await fetch(`/delete/logs/${encodeURIComponent(filename)}`, {
                     method: 'DELETE'
                 });
 
@@ -933,7 +962,7 @@ static const char LOGS_HTML[] = R"rawliteral(
             let failed = 0;
             for (const filename of filenames) {
                 try {
-                    const response = await fetch(`/delete/logs/${filename}`, { method: 'DELETE' });
+                    const response = await fetch(`/delete/logs/${encodeURIComponent(filename)}`, { method: 'DELETE' });
                     if (!response.ok) failed++;
                 } catch (error) {
                     failed++;
@@ -1046,11 +1075,105 @@ static const char OTA_HTML[] =
 // Security helper
 // ============================================================================
 
+// Whitelist rather than blacklist: only characters that can never form a path
+// traversal or an absolute path are allowed at all, on any filesystem this
+// project may end up running on (FFat/FAT and the SD/FAT path both accepted
+// by this same check). A blacklist of ".." and "/" is easy to get right for
+// today's two callers but easy to get wrong the next time someone adds a
+// route — e.g. it still let through a leading "\", NUL-adjacent tricks via
+// overlong names, or a bare "." / ".." as the entire name.
 static bool is_safe_filename(const char* name) {
     if (!name || *name == '\0') return false;
-    if (strstr(name, "..") != nullptr) return false;
-    if (strchr(name, '/') != nullptr) return false;
+    size_t len = strlen(name);
+    if (len > 96) return false;               // filepath[256] = folder + '/' + name; stay well under it
+    if (strcmp(name, ".") == 0) return false;
+    if (strcmp(name, "..") == 0) return false;
+    for (size_t i = 0; i < len; i++) {
+        unsigned char c = (unsigned char)name[i];
+        bool ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+                  (c >= '0' && c <= '9') || c == '.' || c == '-' || c == '_';
+        if (!ok) return false;
+    }
     return true;
+}
+
+// ============================================================================
+// Admin authentication (HTTP Basic Auth, shared secret = AP password)
+// ============================================================================
+// SECURITY: previously every state-changing endpoint — including /update
+// (arbitrary unsigned firmware flash), /upload, /delete/*, and /reload — was
+// reachable by anyone who could reach the device's HTTP port with *no*
+// credential at all. That's a non-issue only in AP mode, where joining the
+// WiFi already requires the AP password; in STA mode the device joins the
+// owner's existing network, and every other device on that network could
+// otherwise flash firmware or delete files with zero authentication.
+//
+// This reuses the AP password the owner already manages from Settings > WiFi
+// as a shared HTTP Basic-Auth secret, rather than inventing a second
+// credential with no UI to set or view it. The username is not checked —
+// there is exactly one credential for the whole device, matching how the
+// hardware itself is single-owner.
+//
+// This is a pragmatic mitigation, not a replacement for TLS: HTTP Basic Auth
+// sends the password base64-encoded (not encrypted) on every request, so
+// anyone able to sniff the local WiFi traffic (trivial on an open AP, harder
+// but not impossible on WPA2/3) can recover it. It stops casual/opportunistic
+// LAN neighbors and off-path attackers; it does not stop an on-path passive
+// sniffer. Firmware images written over /update are also still unsigned (no
+// Secure Boot) — this auth check does not add cryptographic integrity to the
+// image itself, only gates *who* may submit one.
+static bool constant_time_equal(const char* a, const char* b) {
+    size_t la = strlen(a), lb = strlen(b);
+    // Still walk a fixed number of bytes even on a length mismatch so a
+    // remote timing measurement can't distinguish "wrong length" from
+    // "right length, wrong content" as easily as an early return would.
+    size_t n = la > lb ? la : lb;
+    volatile unsigned char diff = (unsigned char)(la != lb);
+    for (size_t i = 0; i < n; i++) {
+        unsigned char ca = (i < la) ? (unsigned char)a[i] : 0;
+        unsigned char cb = (i < lb) ? (unsigned char)b[i] : 0;
+        diff |= (unsigned char)(ca ^ cb);
+    }
+    return diff == 0;
+}
+
+static bool check_admin_auth(httpd_req_t* req) {
+    char hdr[160];
+    if (httpd_req_get_hdr_value_str(req, "Authorization", hdr, sizeof(hdr)) != ESP_OK) {
+        return false;
+    }
+    const char* prefix = "Basic ";
+    const size_t prefix_len = 6;
+    if (strncmp(hdr, prefix, prefix_len) != 0) return false;
+
+    const char* b64 = hdr + prefix_len;
+    unsigned char decoded[128];
+    size_t decoded_len = 0;
+    if (mbedtls_base64_decode(decoded, sizeof(decoded) - 1, &decoded_len,
+                               (const unsigned char*)b64, strlen(b64)) != 0) {
+        return false;  // malformed or too long to fit our buffer -> reject
+    }
+    decoded[decoded_len] = '\0';
+
+    // decoded is "username:password" — only the password half is meaningful here.
+    char* colon = strchr((char*)decoded, ':');
+    if (!colon) return false;
+    const char* supplied_password = colon + 1;
+
+    const char* expected = settings_manager::getSettings().ap_password;
+    return constant_time_equal(supplied_password, expected);
+}
+
+// Sends a 401 with a WWW-Authenticate challenge, which makes browsers pop
+// their native username/password dialog automatically (including for
+// fetch()/XHR requests) — no client-side JS changes needed on the upload or
+// firmware-update pages.
+static esp_err_t require_admin_auth(httpd_req_t* req) {
+    if (check_admin_auth(req)) return ESP_OK;
+    httpd_resp_set_status(req, "401 Unauthorized");
+    httpd_resp_set_hdr(req, "WWW-Authenticate", "Basic realm=\"DRAC OS admin\"");
+    httpd_resp_send(req, "Authentication required", HTTPD_RESP_USE_STRLEN);
+    return ESP_FAIL;
 }
 
 // Appends src to dst (which must already be null-terminated) with JSON string
@@ -1155,6 +1278,7 @@ static esp_err_t send_html_chunked(httpd_req_t* req, const char* html) {
 }
 
 static esp_err_t ota_page_handler(httpd_req_t* req) {
+    if (require_admin_auth(req) != ESP_OK) return ESP_FAIL;
     Serial.println("[OTA] GET /update - firmware update page");
     httpd_resp_set_type(req, "text/html; charset=utf-8");
     return send_html_chunked(req, OTA_HTML);
@@ -1165,6 +1289,7 @@ static esp_err_t ota_page_handler(httpd_req_t* req) {
 static bool ota_already_triggered = false;
 
 static esp_err_t ota_upload_handler(httpd_req_t* req) {
+    if (require_admin_auth(req) != ESP_OK) return ESP_FAIL;
     if (ota_already_triggered) {
         Serial.println("[OTA] BLOCKED: second POST ignored — OTA already completed this session");
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
@@ -1248,6 +1373,7 @@ static esp_err_t root_handler(httpd_req_t* req) {
 }
 
 static esp_err_t upload_handler(httpd_req_t* req) {
+    if (require_admin_auth(req) != ESP_OK) return ESP_FAIL;
     // Filename comes from ?filename= query param; body is raw file bytes
     char query[256];
     if (httpd_req_get_url_query_str(req, query, sizeof(query)) != ESP_OK) {
@@ -1319,6 +1445,7 @@ static esp_err_t upload_handler(httpd_req_t* req) {
 // on a reload from inside every individual upload/delete. Safe to call any
 // number of times, including zero net-new files (e.g. after a failed upload).
 static esp_err_t reload_handler(httpd_req_t* req) {
+    if (require_admin_auth(req) != ESP_OK) return ESP_FAIL;
     int reloaded = gpx_loader::refreshGPXFiles();
     Serial.printf("[GPX_SERVER] Manual reload: %d waypoints\n", reloaded);
 
@@ -1429,6 +1556,9 @@ static esp_err_t logs_page_handler(httpd_req_t* req) {
         httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "Not Found");
         return ESP_FAIL;
     }
+    // Field logs contain raw GPS breadcrumbs — location history — so on top
+    // of the dev_mode gate above, also require the admin credential.
+    if (require_admin_auth(req) != ESP_OK) return ESP_FAIL;
     Serial.println("[GPX_SERVER] GET /logs - logs page");
     httpd_resp_set_type(req, "text/html");
     return send_html_chunked(req, LOGS_HTML);
@@ -1439,6 +1569,7 @@ static esp_err_t logs_list_handler(httpd_req_t* req) {
         httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "Not Found");
         return ESP_FAIL;
     }
+    if (require_admin_auth(req) != ESP_OK) return ESP_FAIL;
     DIR* dir = opendir(LOGS_FOLDER);
     if (!dir) {
         httpd_resp_set_type(req, "application/json");
@@ -1483,6 +1614,7 @@ static esp_err_t logs_list_handler(httpd_req_t* req) {
 // Handles DELETE /delete/<filename>  (GPX)
 //     and DELETE /delete/logs/<filename>  (log)
 static esp_err_t delete_handler(httpd_req_t* req) {
+    if (require_admin_auth(req) != ESP_OK) return ESP_FAIL;
     const char* uri = req->uri;
     char filepath[256];
     const char* filename = nullptr;
@@ -1547,6 +1679,8 @@ static esp_err_t download_handler(httpd_req_t* req) {
             httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "Not Found");
             return ESP_FAIL;
         }
+        // Same rationale as logs_page_handler: this is raw GPS location history.
+        if (require_admin_auth(req) != ESP_OK) return ESP_FAIL;
         folder   = LOGS_FOLDER;
         filename = uri + 15;
         mime     = "text/plain";

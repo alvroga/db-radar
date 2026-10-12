@@ -11,6 +11,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+**Long Range (LE Coded PHY) scanning: new `db-radar-lr` env (2026-10-12)** — *written from sources; not built, not field-tested*
+
+New opt-in PlatformIO env `db-radar-lr` (`extends = env:db-radar`) that adds `sdkconfig.lr.defaults`
+(`CONFIG_BT_NIMBLE_EXT_ADV=y`) so esp-nimble-cpp scans through `ble_gap_ext_disc()` on 1M **and** LE Coded. The
+default env, its sdkconfig and the release pipeline are unchanged. Other changes: `scripts/patch_nimble_cpp_idf5.py`
+patch 4 (the extended-scan "forever" duration was truncated by a `uint16_t` to ~524 s; inert in the default env);
+`beacon_proximity.cpp` lowers the zone floor and sonar floor to −100 dBm only when `CONFIG_BT_NIMBLE_EXT_ADV` is set,
+fixes the stale boot message ("OUT_OF_RANGE < -85dBm") by printing the real thresholds, and reports the scan mode in
+the boot log and `beacon status`. Companion to db-ball's `-lr` firmware. Build impact (flash/SRAM) **not measured**;
+legacy sample rate under dual-PHY scanning **not measured**. Details and the list of what is unverified:
+[`docs/long_range.md`](docs/long_range.md); decision: [ADR-0035](docs/adr/0035-long-range-as-separate-env.md).
+
 **GPX Generator tool: bounded map layout + tile provider swap (2026-08-15)**
 
 `tools/waypoint-editor/index.html` (the standalone waypoint editor at

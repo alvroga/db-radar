@@ -53,6 +53,11 @@ struct RadarSettings {
     bool wifi_ap_enabled = false;        // AP upload mode boot flag (NVS-persisted via wifi_ap_en)
     bool wifi_sta_boot = false;          // WiFi STA mode boot flag (NVS-persisted via wifi_sta_en)
     char ap_ssid[33]     = "Radar-GPX"; // AP mode SSID (user-configurable, NVS-persisted)
+    // Struct-literal placeholder only — never used to bring up an AP. Overwritten by
+    // loadSettings() before wifi_manager/gpx_server ever run: either the user's saved
+    // NVS value, or a per-device default derived from the MAC (see
+    // deriveDefaultAPPassword() in settings_manager.cpp). Kept non-empty here only so
+    // ap_password is never blank in a struct default-constructed before loadSettings().
     char ap_password[64] = "radar123";  // AP mode password (user-configurable, NVS-persisted)
 
     // GPX management

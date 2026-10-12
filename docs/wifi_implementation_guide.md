@@ -226,20 +226,43 @@ After any firmware flash (USB upload or OTA), the device always boots to radar m
 ## Security Model
 
 **Current state:**
-- The OTA endpoint (`POST /update`) has no authentication beyond network access
+- State-changing endpoints — `POST /update` (firmware flash), `POST /upload`, `DELETE /delete/*`,
+  `POST /reload` — and the `/logs*` routes require HTTP Basic Auth, checked against the AP password
+  (`check_admin_auth()` / `require_admin_auth()` in `gpx_server.cpp`). Read-only browsing (`/`,
+  `/list`, `/waypoints`, `/storage`, GPX downloads) does not, so viewing already-loaded caches
+  doesn't repeatedly prompt for a password.
 - In AP mode, the WPA2 password (`radar123`) is the only barrier — anyone who knows it can reach the web server
-- In STA mode, anyone on the same local network can reach the web server
-- WiFi is opt-in: the device boots to radar mode (no network) by default
+- In STA mode, the device joins an existing network where the owner doesn't control who else is on
+  it; the same HTTP Basic Auth check is what stops other devices on that network from reaching the
+  admin endpoints, since WPA2 association is no longer a meaningful gate there.
+- HTTP Basic Auth is sent base64-encoded, not encrypted — there is no TLS. It stops opportunistic and
+  off-path access; it does not stop an on-path passive sniffer on the same WiFi segment (trivial on
+  an open/WEP-class attacker position, harder on WPA2/3 but not impossible). Treat it as raising the
+  bar, not as a substitute for a trusted network.
+- Firmware images accepted by `/update` are still unsigned — Secure Boot / `SECURE_SIGNED_APPS` are
+  not enabled (see `sdkconfig.db-radar`). The auth check above gates *who* may submit an image; it
+  does not add cryptographic integrity to the image itself. Enabling Secure Boot v2 / Flash Encryption
+  would close that gap, but burns eFuses irreversibly and needs its own key-management process — out
+  of scope for this pass, left as a deliberate follow-up.
+- WiFi is opt-in: the device boots to radar mode (no network) by default.
 
 **For open source use:**
-- The default AP credentials (`Radar-GPX` / `radar123`) are public knowledge once the source is published — users should be advised to change them
-- The AP SSID and password are currently hardcoded in `gpx_server.cpp` and not configurable from the settings UI — making them NVS-configurable would be the correct fix
-- OTA endpoint protection (HTTP Basic Auth with a configurable password) is recommended for any deployment outside a trusted local network
+- The AP password now defaults to a value derived per-device from the factory MAC
+  (`deriveDefaultAPPassword()` in `settings_manager.cpp`) instead of one fixed string shared by every
+  unit — publishing the source no longer hands out every device's default AP password. A user who
+  already saved a custom password in NVS keeps it unchanged.
+- AP SSID and password are NVS-configurable from Settings → WiFi (`saveAPSSID()` / `saveAPPassword()`
+  in `settings_manager.cpp`), not hardcoded.
 
 **Threat model:**
-- Device is not always-on — WiFi only activates when the user explicitly enables it
-- OTA requires physical proximity (WiFi range) or access to the same LAN
-- The primary threat is a known-default-password AP being exploited by a nearby attacker during an update session
+- Device is not always-on — WiFi only activates when the user explicitly enables it.
+- OTA requires either WiFi range of the AP, or presence on the STA network the device has joined,
+  plus the admin credential.
+- The primary remaining threats are: (1) an attacker who obtains the AP/admin password (by sniffing
+  an unencrypted HTTP Basic Auth exchange, social engineering, or physical access to the Settings
+  screen) can still submit an unsigned firmware image; (2) STA-mode LAN neighbors without the
+  password are blocked from the admin endpoints but can still see that the device exists and probe
+  the read-only routes.
 
 ---
 

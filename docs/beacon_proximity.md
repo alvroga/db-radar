@@ -208,8 +208,8 @@ Zones prevent rapid oscillation at zone boundaries:
 
 | Zone | RSSI Threshold | Role |
 |------|---------------|------|
-| OUT_OF_RANGE | < -90 dBm | Silent, no ring |
-| VERY_FAR | -90 to -85 dBm | — |
+| OUT_OF_RANGE | < -90 dBm (**< -100 dBm in the `db-radar-lr` build**) | Silent, no ring |
+| VERY_FAR | -90 to -85 dBm (-100 to -85 in the LR build) | — |
 | FAR | -85 to -75 dBm | — |
 | MEDIUM | -75 to -65 dBm | — |
 | CLOSE | ≥ -65 dBm | Solid fill + ball + star |
@@ -242,6 +242,10 @@ Available via serial: `beacon trend`
 
 ## ⚠️ The tag MUST advertise in Legacy (BLE 4.0) mode
 
+> **Exception: the `db-radar-lr` env** (added 2026-10-12, not field-tested) sets `CONFIG_BT_NIMBLE_EXT_ADV` and
+> scans 1M and LE Coded; there a Coded tag *is* visible. Everything below describes the **default** `db-radar`
+> env. See [long_range.md](long_range.md). `beacon status` prints which scan mode the running firmware has.
+
 `CONFIG_BT_NIMBLE_EXT_ADV` is **not set** in `sdkconfig.db-radar`, so this firmware compiles the
 `ble_gap_disc()` path and can only receive **legacy** advertisements. If the tag's configurator app is
 switched to *Extend Advertisement (BLE 5.0)* or *PHY Coded (BLE 5.0)*, the radar will not see it
@@ -252,9 +256,11 @@ Diagnose it with `beacon status`: **`Scan callbacks: N total, 0 matched target`*
 the scan is working fine and the tag is simply invisible to it — check the tag's Adv Mode before
 suspecting anything in this firmware.
 
-Enabling BLE 5.0 extended advertising would mean turning on `CONFIG_BT_NIMBLE_EXT_ADV`, which changes
-the scan to `ble_gap_ext_disc()` and costs SRAM. Not worth it: legacy advertising is what a proximity
-beacon wants anyway, and this project's SRAM budget is tight.
+Enabling BLE 5.0 extended advertising means turning on `CONFIG_BT_NIMBLE_EXT_ADV`, which changes the scan
+to `ble_gap_ext_disc()` (1M **and** Coded) and may cost SRAM and legacy sample rate (neither measured). So it is
+**not** in the default env: legacy advertising is what a proximity beacon normally wants and this project's SRAM
+budget is tight. It is available as the opt-in `db-radar-lr` env instead — see [long_range.md](long_range.md) and
+[ADR-0035](adr/0035-long-range-as-separate-env.md).
 
 ## BLE Scanning — one continuous passive scan
 

@@ -11,8 +11,6 @@ round display, part of the db-radar project. Load a GPX file over WiFi, step out
 shows where each waypoint sits relative to the direction you're facing — no phone, no app, no signal
 required once it's loaded.
 
-https://github.com/user-attachments/assets/c2a9bff7-52dd-4847-a037-6d4f90e02dc0
-
 ---
 
 ## What It Does
@@ -38,6 +36,7 @@ finder.
   auto-releases if you end up more than 100km away
 - **BLE beacon proximity** (50m zoom) — point the radar at a specific Bluetooth tag instead of a
   waypoint; an arc gauge and buzzer tone track signal strength continuously as you get closer
+  (opt-in `db-radar-lr` build also receives BLE Long Range / LE Coded tags)
 - **GPX file management over WiFi** — upload, browse, and delete `.gpx` files from any browser,
   no companion app or cable needed after initial setup
 - **Two WiFi modes** — the device can host its own access point (no router needed) or join your
@@ -123,6 +122,11 @@ cd db-radar
 pio run -e db-radar -t upload
 ```
 
+**Optional — Long Range scanning.** `pio run -e db-radar-lr -t upload` builds the same firmware with
+BLE 5 extended scanning, so a tag that transmits on the LE Coded PHY (e.g. a db-ball built with a `-lr`
+env) can also be found. It is opt-in, not in the releases, and not field-tested — see
+[docs/long_range.md](docs/long_range.md).
+
 Already flashed and just want to update? Use the device's own web portal instead — open
 `http://<device-ip>/update` and upload the smaller, app-only OTA image from the same release (not
 the full image — the portal expects the raw app binary only).
@@ -136,13 +140,22 @@ the full image — the portal expects the raw app binary only).
 
 ### Loading GPX Waypoints
 
-1. Power on the board — it creates a WiFi access point named `Radar-GPX` (password: `radar123`)
+1. Power on the board — it creates a WiFi access point named `Radar-GPX`. Each device generates its
+   own default password from its WiFi MAC address (shown on the Settings > WiFi screen as
+   `radar-xxxxxx`) instead of shipping with a shared password — earlier builds used a fixed
+   `radar123` password for every unit, which this default replaces. You can change both the SSID
+   and password from Settings > WiFi at any time.
 2. Connect your phone or laptop to that network
 3. Browse to `http://192.168.4.1`
-4. Upload any `.gpx` file — waypoints appear on the radar immediately
+4. The upload page, GPX upload, file deletion, and firmware update (`/update`) now prompt for a
+   username/password the first time — enter anything as the username and the AP password (from
+   Settings > WiFi) as the password. Browsing the already-loaded GPX list does not require this.
+5. Upload any `.gpx` file — waypoints appear on the radar immediately
 
 Alternatively, switch to STA mode in Settings to join your home network instead; the web portal is
-then reachable at the device's IP address, shown on the Settings screen.
+then reachable at the device's IP address, shown on the Settings screen. In STA mode this
+credential is what stops other devices on your home network from uploading files or flashing
+firmware to the radar without your knowledge.
 
 Don't have a GPX file yet? Build one — including per-waypoint hint text — with the
 **[GPX Generator](https://alvroga.github.io/db-radar/gpx-generator/)**, or export one from any standard
@@ -260,6 +273,7 @@ Measured directly from a clean build:
 - **[docs/waypoint_filtering.md](docs/waypoint_filtering.md)** — Waypoint filtering and off-screen indicators
 - **[docs/navigation_modes.md](docs/navigation_modes.md)** — Heading-up vs. north-up navigation
 - **[docs/beacon_proximity.md](docs/beacon_proximity.md)** — BLE beacon proximity system
+- **[docs/long_range.md](docs/long_range.md)** — Opt-in `db-radar-lr` env: LE Coded PHY ("Long Range") scanning
 - **[docs/battery_monitoring.md](docs/battery_monitoring.md)** — Battery ADC and display
 - **[docs/standby_mode.md](docs/standby_mode.md)** — Low-power standby mode
 - **[docs/firmware_installation.md](docs/firmware_installation.md)** — Release pipeline and web flasher internals

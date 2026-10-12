@@ -95,6 +95,9 @@ board_build.flash_mode = dio        ; ROM-loader mode only — runs QIO at runti
 board_build.f_flash = 80000000L
 ```
 
+A second env, **`db-radar-lr`**, extends this one with `sdkconfig.lr.defaults` for BLE Long Range scanning
+(opt-in, own `sdkconfig.db-radar-lr`, not in releases) — see [`docs/long_range.md`](docs/long_range.md).
+
 ### **Memory Layout**
 - **Custom Partitions**: `partitions/partitions_ota.csv` — 2 × 4MB OTA app slots + ~7.69MB FFat,
   grown from the original 2MB/11.7MB split 2026-08-06 (that split was an unexamined Arduino IDE
@@ -413,6 +416,7 @@ Detailed component documentation is available in the `docs/` directory:
 - [`docs/peripherals.md`](docs/peripherals.md) - RTC and GPS integration guides
 - [`docs/wifi_implementation_guide.md`](docs/wifi_implementation_guide.md) - WiFi boot modes, GPX web portal, OTA updates (BLE: see Beacon Proximity below)
 - [`docs/standby_mode.md`](docs/standby_mode.md) - Low-power standby: entry/wake, power settings, thread-safety history
+- [`docs/long_range.md`](docs/long_range.md) - Opt-in `db-radar-lr` env: LE Coded PHY scanning
 - [`docs/troubleshooting.md`](docs/troubleshooting.md) - Common issues and solutions
 - [`docs/documentation_standards.md`](docs/documentation_standards.md) - Full documentation process (see also Documentation Standards below)
 
@@ -629,9 +633,10 @@ in dBm, not zoned — RSSI ≈ C − 20·log₁₀(d), so equal dBm steps are eq
 configured beacon MAC gets closer. NimBLE stack, ~25KB SRAM.
 
 **Three load-bearing warnings, easy to re-break**:
-- **The tag must advertise in Legacy (BLE 4.0) mode.** Extended Advertisement/PHY Coded (BLE 5.0) is
-  completely invisible — indistinguishable from a dead tag (-127 dBm, silent). `beacon status`
-  disambiguates: high `Scan callbacks` with `0 matched target` means the scan is healthy and the tag
+- **The tag must advertise in Legacy (BLE 4.0) mode** (default `db-radar` env). Extended Advertisement/PHY Coded (BLE 5.0) is
+  completely invisible — indistinguishable from a dead tag (-127 dBm, silent). The opt-in **`db-radar-lr`** env
+  (`CONFIG_BT_NIMBLE_EXT_ADV` via `sdkconfig.lr.defaults`) also scans LE Coded — untested, see
+  [`docs/long_range.md`](docs/long_range.md). `beacon status` prints the scan mode, and disambiguates: high `Scan callbacks` with `0 matched target` means the scan is healthy and the tag
   is the problem.
 - **Passive scanning is load-bearing, not a power choice** — active scanning defers NimBLE's
   `onResult` callback until the scan response arrives for a legacy `ADV_IND` advertiser; passive

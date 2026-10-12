@@ -78,6 +78,7 @@ venv.bak/
 # ESP32 Specific
 sdkconfig
 sdkconfig.old
+sdkconfig.db-radar-lr
 partition_table/
 fatfs_image/
 spiffs_image/

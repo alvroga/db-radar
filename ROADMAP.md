@@ -85,6 +85,13 @@ slider LVGL widget styles need their own light variants or just background/text 
 
 ## Planned
 
+### Long Range (`db-radar-lr`) — validate on hardware
+**Status**: Implemented 2026-10-12, never built or run. First steps: `pio run -e db-radar-lr`, compare `beacon status`
+sample rate and `memory stats` against `db-radar` with the same tag, test a Coded-transmitting tag (db-ball `-lr`) at
+distance, then calibrate the −100 dBm zone floor. Possible later: publish it from the release pipeline, fold it into
+the default env if it matches it on rate and memory. Detail: [`docs/long_range.md`](docs/long_range.md),
+[ADR-0035](docs/adr/0035-long-range-as-separate-env.md).
+
 ### Quests *(design substantially resolved, feature not yet built)*
 **Severity**: Feature — design largely settled, implementation not started
 

@@ -127,7 +127,8 @@ deliberate and saved ~40KB SRAM. Do not "fix" this by switching back to standard
    callbacks, zero matching the target MAC) — the two look identical from the outside otherwise.
 3. The target device must advertise in **Legacy (BLE 4.0)** mode — BLE 5.0 Extended
    Advertising/Coded PHY is invisible to this scanner and looks exactly like a dead/out-of-range
-   device.
+   device. (Exception: the opt-in `db-radar-lr` env also scans LE Coded — see
+   [`docs/long_range.md`](long_range.md); `beacon status` shows which scan mode is running.)
 
 **Full guide**: [`docs/beacon_proximity.md`](beacon_proximity.md).
 

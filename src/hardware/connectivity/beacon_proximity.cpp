@@ -73,7 +73,26 @@ static constexpr float DISPLAY_TAU_S     = 2.0f;
 static constexpr int8_t ZONE_CLOSE_THRESHOLD    = -65;  // RSSI >= -65 = CLOSE
 static constexpr int8_t ZONE_MEDIUM_THRESHOLD   = -75;  // RSSI >= -75 = MEDIUM
 static constexpr int8_t ZONE_FAR_THRESHOLD      = -85;  // RSSI >= -85 = FAR
+
+// ── Long Range build (env db-radar-lr) ───────────────────────────────────────
+// `CONFIG_BT_NIMBLE_EXT_ADV` is set only by sdkconfig.lr.defaults. With it, esp-nimble-cpp
+// scans through ble_gap_ext_disc() on BOTH the 1M and the LE Coded PHY, so legacy and Coded
+// advertisements both arrive in onResult() (see docs/long_range.md). The default build keeps the
+// legacy-only scan and these constants are unchanged from before.
+//
+// Coded PHY (S=8) receives down to roughly -103 dBm, versus roughly -95 dBm for 1M. The lowest zone
+// boundary must therefore move down too, or Coded-only signals between -90 and about -100 dBm
+// would still be reported as OUT_OF_RANGE — silent, no ring — exactly the distances this build
+// exists for. -100 leaves ~3 dB of margin above the typical Coded floor. Not field-measured.
+#if CONFIG_BT_NIMBLE_EXT_ADV
+static constexpr bool   BEACON_SCAN_LONG_RANGE  = true;
+static constexpr int8_t ZONE_VERY_FAR_THRESHOLD = -100; // RSSI >= -100 = VERY_FAR (LR build)
+static constexpr float  SONAR_RSSI_FAR_DBM      = -100.0f;
+#else
+static constexpr bool   BEACON_SCAN_LONG_RANGE  = false;
 static constexpr int8_t ZONE_VERY_FAR_THRESHOLD = -90;  // RSSI >= -90 = VERY_FAR
+static constexpr float  SONAR_RSSI_FAR_DBM      = -90.0f;
+#endif
 static constexpr int8_t HYSTERESIS_DB = 3;              // ±3 dB band
 
 // Zone confirmation is a *duration*, not a sample count, for the same reason the
@@ -163,6 +182,12 @@ static void updateRSSI_EMA(int8_t raw, uint32_t now);
 static void calculateTrend();
 static void updateZone(float ema, uint32_t now, bool& zone_changed_out, ProximityZone& changed_to_out);
 static ProximityZone classifyRSSI(float rssi, ProximityZone current_zone);
+
+static const char* scanModeString() {
+    return BEACON_SCAN_LONG_RANGE
+        ? "extended — 1M + LE Coded PHY (Long Range build)"
+        : "legacy only (LE Coded / extended advertising NOT received)";
+}
 
 // ============================================================================
 // BLE Scan Callback
@@ -337,7 +362,7 @@ static ProximityZone classifyRSSI(float rssi, ProximityZone current_zone) {
     int8_t close_threshold    = ZONE_CLOSE_THRESHOLD;    // -65
     int8_t medium_threshold   = ZONE_MEDIUM_THRESHOLD;   // -75
     int8_t far_threshold      = ZONE_FAR_THRESHOLD;      // -85
-    int8_t very_far_threshold = ZONE_VERY_FAR_THRESHOLD; // -90
+    int8_t very_far_threshold = ZONE_VERY_FAR_THRESHOLD; // -90 (-100 in the LR build)
 
     // Apply hysteresis per boundary based on current zone.
     // Raise the exit bar to prevent rapid oscillation at zone edges.
@@ -477,7 +502,9 @@ void init() {
 
     Serial.println("[BEACON] Beacon proximity initialized (NimBLE — ~25KB SRAM)");
     Serial.printf("[BEACON] Found state restored from NVS: %s\n", g_found ? "FOUND" : "MISSING");
-    Serial.println("[BEACON] Zones: OUT_OF_RANGE < -85dBm < FAR < -65dBm < CLOSE");
+    Serial.printf("[BEACON] Zones: OUT_OF_RANGE < %ddBm < VERY_FAR < %ddBm < FAR < %ddBm < MEDIUM < %ddBm < CLOSE\n",
+                  ZONE_VERY_FAR_THRESHOLD, ZONE_FAR_THRESHOLD, ZONE_MEDIUM_THRESHOLD, ZONE_CLOSE_THRESHOLD);
+    Serial.printf("[BEACON] Scan mode: %s\n", scanModeString());
 }
 
 void deinit() {
@@ -724,7 +751,7 @@ void updateSonar() {
     //
     // The zone is still what decides *whether* to beep (that decision is genuinely
     // discrete, and keeps its hysteresis); it no longer decides how fast.
-    constexpr float SONAR_RSSI_FAR  = -90.0f;   // slowest tempo at/below
+    constexpr float SONAR_RSSI_FAR  = SONAR_RSSI_FAR_DBM;   // slowest tempo at/below (-90; -100 in the LR build)
     constexpr float SONAR_RSSI_NEAR = -50.0f;   // fastest tempo at/above
     constexpr float SONAR_MS_FAR    = 1500.0f;
     constexpr float SONAR_MS_NEAR   = 150.0f;
@@ -984,8 +1011,8 @@ void debugPrintState() {
                   zoneToString(g_state.pending_zone),
                   (unsigned long)(g_state.pending_since_ms ? millis() - g_state.pending_since_ms : 0),
                   (unsigned long)ZONE_CONFIRM_MS);
-    Serial.printf("  Thresholds: CLOSE>=%d, FAR>=%d, Hysteresis=±%d dB\n",
-                  ZONE_CLOSE_THRESHOLD, ZONE_FAR_THRESHOLD, HYSTERESIS_DB);
+    Serial.printf("  Thresholds: CLOSE>=%d, FAR>=%d, VERY_FAR>=%d, Hysteresis=±%d dB\n",
+                  ZONE_CLOSE_THRESHOLD, ZONE_FAR_THRESHOLD, ZONE_VERY_FAR_THRESHOLD, HYSTERESIS_DB);
     Serial.println("---");
 
     Serial.println("[TREND]");
@@ -1004,6 +1031,14 @@ void debugPrintState() {
     }
     Serial.printf("  Thresholds: ±%.1f dBm/s over a %lums window\n",
                   TREND_APPROACHING_THRESHOLD, (unsigned long)TREND_WINDOW_MS);
+    Serial.println("---");
+
+    Serial.println("[SCAN MODE]");
+    Serial.printf("  %s\n", scanModeString());
+    if (!BEACON_SCAN_LONG_RANGE) {
+        Serial.println("  A tag advertising on LE Coded PHY / extended PDUs is invisible to this build; "
+                       "flash env db-radar-lr to receive it (docs/long_range.md)");
+    }
     Serial.println("---");
 
     Serial.println("[TIMING]");

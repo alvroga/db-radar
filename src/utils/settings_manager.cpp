@@ -2,9 +2,29 @@
 #include "nvs_flash.h"
 #include "nvs.h"
 #include <string.h>
+#include <stdio.h>
 #include "core/fw_version_gen.h"
+#include "esp_mac.h"
 
 namespace settings_manager {
+
+// SECURITY: previously every device shipped with the same hardcoded AP
+// password ("radar123"), published in the README — anyone within WiFi range
+// of any db-radar unit could join its AP regardless of ownership. When the
+// user hasn't set a custom password, derive a per-device default from the
+// factory-burned WiFi MAC instead, so an un-configured device still has a
+// unique, non-guessable-from-public-docs password. Deterministic (same MAC
+// -> same password every boot), so it doesn't need its own NVS write, and it
+// is always shown back to the owner on the Settings > WiFi screen.
+// esp_read_mac() reads the eFuse-burned factory MAC directly — no WiFi driver
+// init required, safe to call this early in boot (before wifi_manager::init()).
+static void deriveDefaultAPPassword(char* out, size_t out_size) {
+    uint8_t mac[6] = {0};
+    esp_read_mac(mac, ESP_MAC_WIFI_STA);
+    // "radar-" + 6 hex chars = 12 chars, comfortably above WPA2-PSK's 8-char
+    // minimum regardless of MAC value.
+    snprintf(out, out_size, "radar-%02x%02x%02x", mac[3], mac[4], mac[5]);
+}
 
 // NVS namespace names
 static const char* NAMESPACE_SETTINGS = "radar";
@@ -248,7 +268,7 @@ bool loadSettings(RadarSettings& settings) {
     nvs_getstr(h, KEY_AP_SSID, settings.ap_ssid, sizeof(settings.ap_ssid));
     if (settings.ap_ssid[0] == '\0') strncpy(settings.ap_ssid, "Radar-GPX", sizeof(settings.ap_ssid) - 1);
     nvs_getstr(h, KEY_AP_PASS, settings.ap_password, sizeof(settings.ap_password));
-    if (settings.ap_password[0] == '\0') strncpy(settings.ap_password, "radar123", sizeof(settings.ap_password) - 1);
+    if (settings.ap_password[0] == '\0') deriveDefaultAPPassword(settings.ap_password, sizeof(settings.ap_password));
     nvs_getstr(h, KEY_GPX_FILE, settings.active_gpx_file, sizeof(settings.active_gpx_file));
     settings.gpx_auto_load                = nvs_getbool(h, KEY_GPX_AUTO, false);
     settings.button_sound_enabled         = nvs_getbool(h, KEY_BTN_SOUND, false);

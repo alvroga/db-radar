@@ -65,11 +65,12 @@ date — sort on that for chronology, not on the filename.
 | [0032](0032-pinned-gps-module-not-always-auto-detect.md) | Pinned GPS module selection (first-boot picker), not always-auto-detect — 2026-08-11 addendum adds BN-880 as a third option | 2026-08-10 | Accepted |
 | [0033](0033-compass-internal-dispatch-not-rename.md) | Compass internal chip dispatch (QMC5883L/HMC5883L), not a public namespace rename | 2026-08-11 | Accepted |
 | [0034](0034-touch-nack-throttle-not-permanent-breaker.md) | Touch NACK handling: throttled retry + DisAutoSleep re-arm, not a permanent circuit breaker; wedge detector needs ≥2 failing devices | 2026-08-21 | Accepted |
+| [0035](0035-long-range-as-separate-env.md) | Long Range (LE Coded) scanning as a separate `db-radar-lr` env, not the default | 2026-10-12 | Accepted |
 
 ## Status
 
 - **Going forward**: new architectural decisions get an ADR at the time they're made (see CLAUDE.md
-  → Documentation Standards). Next free number: **0035**.
+  → Documentation Standards). Next free number: **0036**.
 - **Historical backfill**: ✅ complete (2026-08-01). ADRs 0004–0017 were reconstructed from
   CHANGELOG.md, ROADMAP.md, `docs/performance_optimization_backlog.md`, the component docs and git
   history. They carry

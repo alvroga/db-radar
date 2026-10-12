@@ -49,6 +49,16 @@ already does the job; this project never calls setScanDuplicateCacheSize()/
 setScanFilterMode() (the only things the manual bt_cfg block customizes
 beyond the default), so nothing is lost by not building bt_cfg by hand.
 
+PATCH 4 — src/NimBLEScan.cpp (only compiled when CONFIG_BT_NIMBLE_EXT_ADV is set, i.e. the Long
+Range env db-radar-lr; inert in the default env): NimBLEScan::start() maps "duration 0" to
+BLE_HS_FOREVER (INT32_MAX) and then, in the extended-scan branch, passes `duration/10` to
+ble_gap_ext_disc(), whose duration parameter is a uint16_t in units of 10 ms. INT32_MAX/10 =
+214748364 truncates to 0xCCCC = 52428 → the "forever" scan silently stops after about 524 s
+(~8.7 min). Fixed by passing 0 (= scan until stopped, per the NimBLE API) for BLE_HS_FOREVER.
+beacon_proximity::update() restarts a stopped scan, which would have hidden the defect behind a
+periodic gap in the feed; this removes the gap. Finite durations (e.g. the 3 s `beacon scan`
+debug scan) are unchanged.
+
 Idempotent and safe by construction, same as the I2C patch script: each
 patch applies only if its exact known-bad block is found untouched; if the
 pinned esp-nimble-cpp tag ever changes and the surrounding code no longer
@@ -140,6 +150,17 @@ DEVICE_DBLINIT_NEW = """        // PATCHED (scripts/patch_nimble_cpp_idf5.py, 20
 """
 
 
+SCAN_REL = os.path.join("src", "NimBLEScan.cpp")
+SCAN_OLD = """    int rc = ble_gap_ext_disc(NimBLEDevice::m_own_addr_type,
+                              duration/10,
+"""
+SCAN_NEW = """    // PATCHED (scripts/patch_nimble_cpp_idf5.py): ble_gap_ext_disc() takes a uint16_t duration in
+    // 10 ms units, so BLE_HS_FOREVER/10 truncated to ~524 s. 0 means "until stopped".
+    int rc = ble_gap_ext_disc(NimBLEDevice::m_own_addr_type,
+                              (duration == (uint32_t)BLE_HS_FOREVER) ? 0 : duration/10,
+"""
+
+
 def apply_patch(lib_dir, rel_path, old_block, new_block, tag):
     target_path = os.path.join(lib_dir, rel_path)
     if not os.path.isfile(target_path):
@@ -182,6 +203,8 @@ def main():
                 "NimBLEDevice.cpp deinit() IDF5 fix")
     apply_patch(lib_dir, DEVICE_REL, DEVICE_DBLINIT_OLD, DEVICE_DBLINIT_NEW,
                 "NimBLEDevice.cpp init() double controller-init fix")
+    apply_patch(lib_dir, SCAN_REL, SCAN_OLD, SCAN_NEW,
+                "NimBLEScan.cpp ext-scan forever-duration truncation fix")
 
 
 main()
