@@ -51,6 +51,14 @@
 
 // Others
 #define LV_USE_LOG 1
+#define LV_LOG_LEVEL LV_LOG_LEVEL_WARN
+#define LV_LOG_PRINTF 0   // routed via lv_log_register_print_cb() in device_manager::initLVGL()
+
+// LVGL's default assert handler is while(1) — a silent hang the task watchdog may or
+// may not catch. abort() gives a panic + backtrace + ESP_RST_PANIC, so it is counted
+// by boot_info and visible on the DEV tab. (Default LV_USE_ASSERT_NULL/MALLOC stay on.)
+#define LV_ASSERT_HANDLER_INCLUDE <stdlib.h>
+#define LV_ASSERT_HANDLER abort();
 #define LV_USE_USER_DATA 1
 
 #endif // LV_CONF_H

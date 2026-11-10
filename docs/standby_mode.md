@@ -40,7 +40,7 @@ Applied by `applyStandbyPowerSettings()` once the 3-second overlay timer fires:
 | WiFi scanning | Disabled, only if it was on before entry |
 | AP / web GPX manager | Stopped, only if it was on before entry |
 | GPS | **Stays on**, switched to power mode `0x02` ("Aggressive 1Hz") — not full power-down, since continuous track logging is the whole point of standby existing |
-| CPU frequency | 240MHz → 80MHz (`setCpuFrequencyMhz(80)`) — safe because GPS UART, I2C, and the RGB panel all run off independent clock sources |
+| CPU frequency | **Unchanged — stays 240MHz.** `setCpuFrequencyMhz()` is a stub in this ESP-IDF build (`arduino_compat.h`, `CONFIG_PM_ENABLE` off); an earlier version of this doc and the serial log claimed 80MHz / ~85mA saved, which never happened. Real scaling would need PM enabled and a measurement first. |
 | Touch (CST820) | **Not polled at all** — `lvgl_touch_read_cb()` returns immediately while `standby_manager::isStandby()`, because continuous I2C reads at 100Hz with the display off were found to corrupt the touch controller's state over time. This is *why* wake requires a button press specifically — touch input is physically not being read during standby, not just ignored at the UI layer. |
 
 **Why `off()`, not `setPercent(0)`**: `backlight::setPercent()` enforces a 5% floor so a misconfigured
@@ -70,7 +70,7 @@ Thread-Safety below). `wakeFromStandby()`:
    This exists because the ESP32 I2C controller's hardware state machine can be left stuck after the
    touch chip goes quiet for a while in standby — a soft bus recovery (SCL pulsing) alone doesn't
    clear it, only a full driver teardown/rebuild plus a physical touch-chip reset does.
-6. GPS power mode restored to `0x00` (full power), CPU restored to 240MHz.
+6. GPS power mode restored to `0x00` (full power).
 
 A 1200ms post-wake suppression window (`device_manager.cpp`) swallows the trailing `SINGLE_PRESS`
 that the button state machine would otherwise fire after the wake press's double-press window
@@ -117,8 +117,8 @@ backlight is already off.
 
 Originally measured at first implementation: **~520mA active → ~55mA standby (89% reduction)**,
 **5.8h active → 54h standby** on a 3000mAh pack. **These have not been re-measured** since two
-later additions that should only improve on them — CPU frequency scaling (240MHz→80MHz) and GPS's
-"Aggressive 1Hz" power mode — were added after that original measurement. Treat the 55mA/89%/54h
+later addition that should only improve on it — GPS's
+"Aggressive 1Hz" power mode — was added after that original measurement. Treat the 55mA/89%/54h
 figures as a conservative floor from an earlier, less-optimized version of standby, not a current
 verified number.
 

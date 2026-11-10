@@ -582,11 +582,23 @@ static void systemTask(void* parameter) {
             const auto& nav_state = navigation::getNavState();
             uint32_t frame_ms = nav_state.label_us / 1000 + nav_state.refr_ms;
 
-            char heartbeat_msg[224];
+            // LVGL pool health. lv_mem_monitor() walks the TLSF pool, so it must not run
+            // concurrently with LVGL allocations: take display_mutex, skip if busy.
+            unsigned lv_free = 0, lv_frag = 0, lv_big = 0;
+            if (display_mutex && xSemaphoreTake(display_mutex, pdMS_TO_TICKS(20)) == pdTRUE) {
+                lv_mem_monitor_t mon;
+                lv_mem_monitor(&mon);
+                xSemaphoreGive(display_mutex);
+                lv_free = mon.free_size;
+                lv_frag = mon.frag_pct;
+                lv_big = mon.free_biggest_size;
+            }
+
+            char heartbeat_msg[256];
             snprintf(heartbeat_msg, sizeof(heartbeat_msg),
-                     "Up=%lum Heap=%lu(largest=%lu) Frame=%lums UI=%s I2C=%s GPS=%s | "
+                     "Up=%lum Heap=%lu(largest=%lu) LVGL=%u(big=%u,frag=%u%%) Frame=%lums UI=%s I2C=%s GPS=%s | "
                      "i2c_ops=%lu i2c_fails=%lu i2c_consec=%lu",
-                     uptime_min, heap_free, heap_largest_block, (unsigned long)frame_ms,
+                     uptime_min, heap_free, heap_largest_block, lv_free, lv_big, lv_frag, (unsigned long)frame_ms,
                      system_stats.ui_task.is_healthy ? "OK" : "FAIL",
                      system_stats.i2c_task.is_healthy ? "OK" : "FAIL",
                      dev_state.last_gps_data.valid ? "FIX" : "NO",
@@ -594,6 +606,9 @@ static void systemTask(void* parameter) {
                      (unsigned long)i2c_stats.consecutive_failures);
 
             system_logger::info("HEALTH", heartbeat_msg);
+            // The logger only writes to SD (and only in dev mode); mirror to serial so the
+            // heartbeat is visible in normal mode too. 1 line / 60s.
+            Serial.printf("[HEALTH] %s\n", heartbeat_msg);
 
             // Per-device breakdown, same cadence — see docs/i2c.md. Cheap:
             // getDeviceStats() only reads counters, no I2C traffic.

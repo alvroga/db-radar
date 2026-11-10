@@ -11,6 +11,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+**B1: observability + honest standby docs (2026-11-10, built, not yet hardware-verified)**
+
+- Standby no longer claims to drop the CPU to 80MHz / save ~85mA: `setCpuFrequencyMhz()` is a stub
+  (`arduino_compat.h`, `CONFIG_PM_ENABLE` off), so the clock never changed. Removed the log lines and the
+  "~106mA" estimate; corrected `docs/standby_mode.md` and CLAUDE.md.
+- LVGL: `LV_ASSERT_HANDLER` is now `abort()` (was a silent `while(1)`); LVGL warnings/errors are routed
+  to serial + system logger via `lv_log_register_print_cb`; the 60s heartbeat now includes LVGL pool
+  free / biggest block / fragmentation (read under `display_mutex`, skipped if busy).
+- New `boot_info` module (`utils/boot_info.*`): NVS namespace `bootinfo` keeps boot count, abnormal-reset
+  count (PANIC/INT_WDT/TASK_WDT/WDT/BROWNOUT) and last crash reason; shown on the DEV tab.
+- Build: RAM 51.4% (168,376 B), flash 41.0% (1,721,295 B) — no before-figure captured for this batch.
+
 **First-boot GPS module picker now offers all four modules; BE-881 is the new primary target (2026-08-22)**
 
 `main.cpp::showGpsModulePickerBlocking()` switched from a 3-tall single-column layout (BH-880/BE-881/

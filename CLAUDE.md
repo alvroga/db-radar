@@ -463,7 +463,7 @@ ROADMAP.md).
 **Status**: Complete ✅ | [Complete Guide](docs/standby_mode.md)
 
 Low-power sleep: 4-second GPIO0 hold (or an optional inactivity timeout, Settings > Display > Auto
-Sleep) turns backlight off, drops CPU 240MHz→80MHz, disables WiFi/AP, and stops polling touch
+Sleep) turns backlight off, leaves the CPU at 240MHz (the old 80MHz switch was a stub, removed 2026-11-10), disables WiFi/AP, and stops polling touch
 entirely, while GPS stays on at a reduced power mode for continuous track logging. Any button press
 wakes (touch isn't read during standby, so it can't). **`enterStandby()`/`wakeFromStandby()` must
 never be called directly from a button callback** — they make LVGL calls, callbacks run outside

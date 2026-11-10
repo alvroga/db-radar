@@ -723,8 +723,17 @@ bool initBacklight(const Config& config) {
     return true;
 }
 
+// LVGL warnings/errors -> serial + system logger (was silent: LV_LOG_PRINTF was off).
+// Can be called from any task that calls LVGL; both sinks are safe for that.
+static void lvglLogCb(const char* buf) {
+    Serial.print("[LVGL] ");
+    Serial.print(buf);
+    system_logger::warn("LVGL", buf);
+}
+
 bool initLVGL(const Config& config) {
     lv_init();
+    lv_log_register_print_cb(lvglLogCb);
 
     // Allocate LVGL buffers in PSRAM
     const size_t buf_size = config.screen_width * config.buffer_lines * sizeof(lv_color_t);

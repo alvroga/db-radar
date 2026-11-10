@@ -28,6 +28,7 @@
 #include "i2c_manager.h"
 #include "hardware/sensors/battery.h"
 #include "utils/watchdog.h"
+#include "utils/boot_info.h"
 #include "hardware/connectivity/beacon_proximity.h"
 
 // Pumps LVGL alongside a loading-screen status update, so the boot spinner keeps
@@ -214,7 +215,9 @@ extern "C" void app_main() {
 
     // BOOT PHASE 5: Settings manager and GPS settings
     Serial.printf("[T+%08lu] BOOT: Phase 5 - Loading settings from NVS...\n", millis());
-    if (!settings_manager::init()) {
+    const bool settings_ok = settings_manager::init();
+    boot_info::record();  // NVS is up now; counts abnormal resets
+    if (!settings_ok) {
         Serial.println("[WARN] Settings manager initialization failed - using defaults");
         system_logger::warn("BOOT", "Settings manager init failed - using defaults");
     } else {

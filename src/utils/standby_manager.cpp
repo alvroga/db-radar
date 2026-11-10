@@ -314,13 +314,10 @@ static void applyStandbyPowerSettings() {
     gps_bh880::setPowerMode(0x02);
     Serial.println("[STANDBY] ✓ GPS: Aggressive 1Hz mode (low power, maintains fix)");
 
-    // Reduce CPU frequency to save ~85mA (240MHz → 80MHz)
-    // Safe: GPS UART, I2C, and RGB panel have independent clock sources
-    setCpuFrequencyMhz(80);
-    Serial.println("[STANDBY] ✓ CPU: 80MHz (was 240MHz, saves ~85mA)");
+    // NOTE: CPU stays at 240MHz in standby. setCpuFrequencyMhz() is a stub here
+    // (arduino_compat.h; CONFIG_PM_ENABLE is off), so no clock switch ever happened.
 
     Serial.println("[STANDBY] Power settings applied - standby active");
-    Serial.println("[STANDBY] Estimated power draw: ~106mA");
 }
 
 static void restoreActivePowerSettings() {
@@ -349,10 +346,6 @@ static void restoreActivePowerSettings() {
     // GPS: restore full power
     gps_bh880::setPowerMode(0x00);
     Serial.println("[STANDBY] ✓ GPS: Full Power mode restored");
-
-    // Restore CPU frequency to 240MHz
-    setCpuFrequencyMhz(240);
-    Serial.println("[STANDBY] ✓ CPU: 240MHz restored");
 
     // Recover I2C bus and CST820 touch controller.
     // After standby, the ESP32 I2C controller FSM can be stuck in error state —

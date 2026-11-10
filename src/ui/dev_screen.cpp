@@ -8,6 +8,7 @@
 #include "ui/field_log_screen.h"
 #include "ui/tilt_bench_screen.h"
 #include "core/arduino_compat.h"
+#include "utils/boot_info.h"
 
 namespace dev_screen {
 
@@ -422,6 +423,16 @@ void createDevTab(lv_obj_t* parent) {
     lv_obj_set_width(perf_stats_label, 330);  // Match tab width
 
     y_offset += 175;  // Space for 9-line breakdown
+
+    // === BOOT / CRASH INFO === (static: values are fixed for the whole session)
+    lv_obj_t* boot_label = lv_label_create(parent);
+    lv_label_set_text_fmt(boot_label, "Boot: %s\nBoots: %lu  Crashes: %lu\nLast crash: %s",
+                          boot_info::resetReasonName(), (unsigned long)boot_info::bootCount(),
+                          (unsigned long)boot_info::crashCount(), boot_info::lastCrashReasonName());
+    lv_obj_set_style_text_color(boot_label, lv_color_hex(0xCCCCCC), 0);
+    lv_obj_set_style_text_font(boot_label, &iosevka_16, 0);
+    lv_obj_align(boot_label, LV_ALIGN_TOP_LEFT, 0, y_offset);
+    y_offset += 70;
 
     // Initial status update
     updateLoggerStatus();
