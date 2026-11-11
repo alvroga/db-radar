@@ -1,4 +1,5 @@
 #include "task_manager.h"
+#include <atomic>
 #include "system_config.h"
 #include "utils/wmm_declination.h"
 #include "navigation.h"
@@ -66,10 +67,32 @@ static void processI2CRequest(I2CRequest& request);
 static void processUIUpdate(const UIUpdate& update);
 static void updateMemoryStats();
 static void updateStatusLabels();
+static volatile bool s_gps_save_requested = false;
+static volatile uint32_t s_gps_rejected_total = 0;  // samples dropped by the quality/HDOP gate (heartbeat)  // set by requestGpsSave(), consumed in updateStatusLabels()
 static void checkTaskHealth();
 static void checkI2CBusHealth(uint32_t now);
 static void logDeviceStatsSummary(const char* context);
 static void flushRadarRender();
+static void drainSensorMailboxes();
+
+// ---------------------------------------------------------------------------------------------
+// Sensor mailboxes (latest-value, lock-free) -- replace queued COMPASS_UPDATE / RADAR_REFRESH.
+//
+// Those two used to go through the same 16-slot FIFO as button/zoom/standby events at 10Hz each.
+// During a slow UI frame (100-150ms) the sensor items filled the FIFO and the next user event was
+// dropped ("Queue FULL - dropped ZOOM_CHANGE", or worse the direct enterStandby() fallback).
+// Sensor data is "latest wins" by nature -- a stale heading is worthless once a newer one exists
+// -- so it now lives in single-slot mailboxes that can never back up or block a producer, and the
+// FIFO carries only discrete events.
+//   * heading: the System Task publishes the already-smoothed heading (the EMA runs at exactly the
+//     compass sample rate there; run per UI pass its time constant would stretch with frame time).
+//   * refresh: a plain "position/waypoints changed, repaint" flag; the position itself is read
+//     via device_manager::snapshotGPS().
+// ---------------------------------------------------------------------------------------------
+static std::atomic<float>    s_heading_mailbox{0.0f};
+static std::atomic<bool>     s_heading_dirty{false};
+static std::atomic<bool>     s_radar_refresh_flag{false};
+
 
 // =============================================================================
 // ZOOM-BASED FEATURE ACTIVATION (50m zoom only)
@@ -183,6 +206,9 @@ static void uiTask(void* parameter) {
                 system_stats.ui_updates_queued++;
                 processed++;
             }
+
+            // Latest-value sensor data (heading, repaint request) -- never queued.
+            drainSensorMailboxes();
 
             // Single coalesced radar render for everything processed above.
             flushRadarRender();
@@ -424,8 +450,9 @@ static void highRateTask(void* parameter) {
         bool accel_ok = accel_qmi8658::read(a);
 
         const device_manager::DeviceState& ds = device_manager::getDeviceState();
-        const CompassData& c = ds.last_compass_data;
-        const GPSData&     g = ds.last_gps_data;
+        (void)ds;
+        const CompassData c = device_manager::snapshotCompass();
+        const GPSData     g = device_manager::snapshotGPS();
 
         field_log::Row row = {};
         row.ms = millis();
@@ -597,13 +624,15 @@ static void systemTask(void* parameter) {
             char heartbeat_msg[256];
             snprintf(heartbeat_msg, sizeof(heartbeat_msg),
                      "Up=%lum Heap=%lu(largest=%lu) LVGL=%u(big=%u,frag=%u%%) Frame=%lums UI=%s I2C=%s GPS=%s | "
-                     "i2c_ops=%lu i2c_fails=%lu i2c_consec=%lu",
+                     "i2c_ops=%lu i2c_fails=%lu i2c_consec=%lu | gps_rx=%lu pvt=%lu pvt_age=%lus rej=%lu",
                      uptime_min, heap_free, heap_largest_block, lv_free, lv_big, lv_frag, (unsigned long)frame_ms,
                      system_stats.ui_task.is_healthy ? "OK" : "FAIL",
                      system_stats.i2c_task.is_healthy ? "OK" : "FAIL",
                      dev_state.last_gps_data.valid ? "FIX" : "NO",
                      (unsigned long)i2c_stats.total_ops, (unsigned long)i2c_stats.failed_ops,
-                     (unsigned long)i2c_stats.consecutive_failures);
+                     (unsigned long)i2c_stats.consecutive_failures,
+                     (unsigned long)gps_bh880::rxBytes(), (unsigned long)gps_bh880::pvtFrames(),
+                     (unsigned long)(gps_bh880::pvtAgeMs() / 1000), (unsigned long)s_gps_rejected_total);
 
             system_logger::info("HEALTH", heartbeat_msg);
             // The logger only writes to SD (and only in dev mode); mirror to serial so the
@@ -730,9 +759,33 @@ static void processI2CRequest(I2CRequest& request) {
 // the batch: at most one render per loop, and rotation tracks the fastest producer.
 static bool s_radar_render_pending = false;
 
+
 static inline void requestRadarRender() {
     s_radar_render_pending = true;
 }
+
+// UI Task, display_mutex held: apply anything the sensor tasks posted since the last loop.
+static void drainSensorMailboxes() {
+    if (s_heading_dirty.exchange(false, std::memory_order_acq_rel)) {
+        ui_manager::UIState& ui = ui_manager::getUIState();
+        float prev_heading = ui.current_heading;
+        ui.current_heading = s_heading_mailbox.load(std::memory_order_acquire);
+
+        // Render deadband on the smoothed heading (see the history of this constant in git:
+        // 1.5 -> 0.5 deg when the compass went to 10Hz and the frame to ~94ms). Above the
+        // stationary noise floor after the a=0.15 EMA, below a genuine 5 deg/s turn per sample.
+        // ui.current_heading is already updated, so a suppressed render never stales the
+        // heading -- the next render from any source paints the current value.
+        constexpr float HEADING_RENDER_DEADBAND_DEG = 0.5f;
+        float delta = fabsf(ui.current_heading - prev_heading);
+        if (delta > 180.0f) delta = 360.0f - delta;
+        if (delta >= HEADING_RENDER_DEADBAND_DEG) requestRadarRender();
+    }
+    if (s_radar_refresh_flag.exchange(false, std::memory_order_acq_rel)) {
+        requestRadarRender();
+    }
+}
+
 
 // Called by the UI Task after draining the update queue, still holding display_mutex.
 static void flushRadarRender() {
@@ -889,39 +942,10 @@ static void processUIUpdate(const UIUpdate& update) {
             break;
         }
 
-        case UIUpdateType::COMPASS_UPDATE: {
-            float prev_heading = ui.current_heading;
-            ui.current_heading = navigation::smoothHeading(
-                ui.current_heading, update.compass_heading, navigation::HEADING_SMOOTHING);
-
-            // Render deadband on the *smoothed* heading. Note ui.current_heading is
-            // already updated above, so a suppressed render never stales the heading —
-            // the next render from any source paints the current value.
-            //
-            // 1.5° -> 0.5° now that the compass runs at 10Hz and a frame costs ~94ms
-            // instead of ~499ms. The arithmetic that picks this number:
-            //   - raw QMC5883L noise standing still is ~±2°, and HEADING_SMOOTHING
-            //     (EMA a=0.15, tau ~0.62s) attenuates a single-sample excursion to
-            //     ~0.3° of it, so 0.5° sits above the noise floor and the radar holds
-            //     still. This was ~0.6° when a was 0.3 — the deadband got *more*
-            //     margin, not less, when the smoothing was strengthened.
-            //   - a genuine turn at 5°/s is 0.5°/sample at 10Hz and now passes; under
-            //     the old 1.5° threshold nothing slower than 15°/s produced a redraw.
-            // Raise it back toward 1.0° if the radar visibly twitches while stationary.
-            //
-            // This threshold is close to vestigial as a load control: whenever GPS has
-            // a fix it queues RADAR_REFRESH every sample (10Hz), so renders happen at
-            // the tick rate regardless of what the compass does. It only actually gates
-            // anything with no fix — indoors, which is exactly where compass noise is
-            // the only thing moving.
-            constexpr float HEADING_RENDER_DEADBAND_DEG = 0.5f;
-            float delta = fabsf(ui.current_heading - prev_heading);
-            if (delta > 180.0f) delta = 360.0f - delta;
-            if (delta < HEADING_RENDER_DEADBAND_DEG) break;
-
-            requestRadarRender();
+        case UIUpdateType::COMPASS_UPDATE:
+            // Legacy: heading now travels via s_heading_mailbox (see drainSensorMailboxes()).
+            // Kept so a stray queued item is harmless.
             break;
-        }
 
         case UIUpdateType::DEV_MODE_CHANGE: {
             // Show or hide the DEV label based on current dev_mode setting
@@ -956,77 +980,33 @@ static void updateMemoryStats() {
 }
 
 /**
- * @brief Attempt to recover a hung task via suspend/resume
- * @param task_handle FreeRTOS task handle
- * @param task_name Name for logging
- * @param health Task health tracking structure
- * @return true if recovery was attempted
+ * @brief Log a stalled task with enough context for post-mortem. Does NOT try to "recover" it.
+ *
+ * This used to vTaskSuspend()/vTaskResume() the stalled task. That cannot unblock a task that is
+ * waiting on a mutex or a driver call -- resume just returns it to the same wait -- and it can
+ * suspend a task while it HOLDS the I2C bus or display mutex, stalling every other task behind
+ * it. The task watchdog (30s, panic_on_timeout, every task subscribed -- see watchdog.cpp and
+ * main.cpp) is the real recovery: a task that is truly stuck stops feeding it and the device
+ * reboots cleanly, with "Reset reason: TASK_WDT" on the next boot (boot_info). This function
+ * only makes the stall visible earlier than that 30s.
  */
-static bool attemptTaskRecovery(TaskHandle_t task_handle, const char* task_name, TaskHealth& health) {
-    if (!task_handle) {
-        return false;
-    }
+static void logTaskStall(TaskHandle_t task_handle, const char* task_name, TaskHealth& health) {
+    if (!task_handle) return;
+    // Rate-limit: one log per ~30s of continuous stall (the health check runs every 5s).
+    if (health.unresponsive_count != 2 && (health.unresponsive_count % 6) != 0) return;
 
-    // Check if we've exceeded max recovery attempts
-    if (health.recovery_attempts >= TaskHealth::MAX_RECOVERY_ATTEMPTS) {
-        Serial.printf("[HEALTH] %s: Max recovery attempts (%lu) reached - giving up\n",
-                     task_name, health.recovery_attempts);
-
-        // Log detailed failure info for post-crash analysis
-        char fail_msg[192];
-        snprintf(fail_msg, sizeof(fail_msg),
-                 "%s UNRECOVERABLE: attempts=%lu heap=%lu uptime=%lums",
-                 task_name, health.recovery_attempts,
-                 esp_get_free_heap_size(), millis());
-        system_logger::error("TASK_HEALTH", fail_msg);
-
-        // Log stack high water mark for the failed task
-        UBaseType_t stack_hwm = uxTaskGetStackHighWaterMark(task_handle);
-        snprintf(fail_msg, sizeof(fail_msg),
-                 "%s stack remaining: %u bytes (low=danger)",
-                 task_name, (unsigned int)(stack_hwm * sizeof(StackType_t)));
-        system_logger::error("TASK_HEALTH", fail_msg);
-
-        // Capture system state for crash analysis
-
-        return false;
-    }
-
-    health.recovery_attempts++;
-
-    Serial.printf("[HEALTH] 🔧 Attempting recovery #%lu for %s...\n",
-                 health.recovery_attempts, task_name);
-
-    // Log recovery attempt with context
-    char recovery_msg[128];
-    snprintf(recovery_msg, sizeof(recovery_msg),
-             "Recovery attempt #%lu for %s (heap=%lu)",
-             health.recovery_attempts, task_name, esp_get_free_heap_size());
-    system_logger::warn("TASK_HEALTH", recovery_msg);
-
-    // Strategy: Suspend then resume the task
-    // This can help if the task is blocked on a resource
-    vTaskSuspend(task_handle);
-    health.is_suspended = true;
-
-    // Brief delay to let resources release
-    vTaskDelay(pdMS_TO_TICKS(100));
-
-    // Resume the task
-    vTaskResume(task_handle);
-    health.is_suspended = false;
-
-    // Reset unresponsive count to give the task a chance
-    health.unresponsive_count = 0;
-    health.last_loop_time_ms = millis();
-
-    Serial.printf("[HEALTH] ✓ %s resumed (attempt #%lu)\n", task_name, health.recovery_attempts);
-
-    return true;
+    UBaseType_t stack_hwm = uxTaskGetStackHighWaterMark(task_handle);
+    char msg[160];
+    snprintf(msg, sizeof(msg),
+             "%s stalled for %lu checks: state=%d stack_hwm=%u heap=%lu (watchdog will reboot at 30s)",
+             task_name, (unsigned long)health.unresponsive_count, (int)eTaskGetState(task_handle),
+             (unsigned)(stack_hwm * sizeof(StackType_t)), (unsigned long)esp_get_free_heap_size());
+    Serial.printf("[HEALTH] %s\n", msg);
+    system_logger::error("TASK_HEALTH", msg);
 }
 
 /**
- * @brief Check health of a specific task and attempt recovery if needed
+ * @brief Check health of a specific task and log stalls
  * @param task_handle FreeRTOS task handle
  * @param task_name Name for logging
  * @param stats Task statistics structure
@@ -1060,11 +1040,8 @@ static uint32_t checkSingleTaskHealth(
             stats.is_healthy = false;
             strcpy(stats.status_message, "Unresponsive");
         } else if (stats.health.unresponsive_count >= 2) {
-            // Multiple failures - attempt recovery
-            Serial.printf("[HEALTH] 🔴 %s hung for %lu checks - attempting recovery\n",
-                         task_name, stats.health.unresponsive_count);
-
-            attemptTaskRecovery(task_handle, task_name, stats.health);
+            // Multiple failures - log it; the task watchdog does the actual recovery.
+            logTaskStall(task_handle, task_name, stats.health);
         }
     } else {
         // Task is making progress
@@ -1386,6 +1363,14 @@ bool queueI2CRequest(const I2CRequest& req) {
     return xQueueSend(i2c_request_queue, &req, pdMS_TO_TICKS(10)) == pdTRUE;
 }
 
+void requestRadarRefresh() {
+    s_radar_refresh_flag.store(true, std::memory_order_release);
+}
+
+void requestGpsSave() {
+    s_gps_save_requested = true;
+}
+
 bool queueUIUpdate(const UIUpdate& update) {
     if (!ui_update_queue) return false;
 
@@ -1434,17 +1419,18 @@ void printTaskStatus() {
     Serial.println();
     Serial.println("==== GPS Health (TIER 1) ====");
     const device_manager::DeviceState& dev_state = device_manager::getDeviceState();
+    const GPSData gps_snap = device_manager::snapshotGPS();  // torn-read-safe
     if (dev_state.gps_ok) {
-        Serial.printf("GPS Status: %s\n", dev_state.last_gps_data.valid ? "FIXED" : "SEARCHING");
-        Serial.printf("Satellites: %d\n", dev_state.last_gps_data.sats);
-        if (dev_state.last_gps_data.valid) {
-            Serial.printf("Position: %.6f, %.6f\n", dev_state.last_gps_data.lat, dev_state.last_gps_data.lon);
-            Serial.printf("Altitude: %.1fm\n", dev_state.last_gps_data.alt);
-            Serial.printf("HDOP: %.1f\n", dev_state.last_gps_data.hdop);
-            Serial.printf("Speed: %.1f km/h\n", dev_state.last_gps_data.speed);
-            Serial.printf("Course: %.1f°\n", dev_state.last_gps_data.course);
+        Serial.printf("GPS Status: %s\n", gps_snap.valid ? "FIXED" : "SEARCHING");
+        Serial.printf("Satellites: %d\n", gps_snap.sats);
+        if (gps_snap.valid) {
+            Serial.printf("Position: %.6f, %.6f\n", gps_snap.lat, gps_snap.lon);
+            Serial.printf("Altitude: %.1fm\n", gps_snap.alt);
+            Serial.printf("HDOP: %.1f\n", gps_snap.hdop);
+            Serial.printf("Speed: %.1f km/h\n", gps_snap.speed);
+            Serial.printf("Course: %.1f°\n", gps_snap.course);
         }
-        uint32_t age_ms = millis() - dev_state.last_gps_data.last_update_ms;
+        uint32_t age_ms = millis() - gps_snap.last_update_ms;
         Serial.printf("Last Update: %lu ms ago\n", age_ms);
         if (age_ms > 5000) {
             Serial.println("⚠️  WARNING: GPS data is stale (>5s old)");
@@ -1469,6 +1455,11 @@ static void updateStatusLabels() {
     if (now - s_last_gps_read >= system_config::timing::GPS_UPDATE_INTERVAL_MS) {
         s_last_gps_read = now;
 
+        // Apply any queued GPS power-mode change here, on the task that owns the GPS UART
+        // (standby enter/wake and the serial console post requests; they never touch the UART).
+        gps_bh880::servicePending();
+        gps_bh880::ensurePvtOutput();  // re-enable NAV-PVT if the module has gone quiet
+
         // Read GPS data
         GPSData gps_data;
         if (gps_bh880::read(gps_data)) {
@@ -1490,17 +1481,22 @@ static void updateStatusLabels() {
             // First fix (updates_received <= 1) is always allowed to establish initial position
             constexpr float MAX_HDOP_ACCEPT = 10.0f;
             bool hdop_acceptable = isnan(gps_data.hdop) || gps_data.hdop <= MAX_HDOP_ACCEPT;
-            // The first-fix exemption must key on "first VALID fix", not "first sample":
-            // updates_received counts every sample including empty ones (0 sats), so it is
-            // long past 1 by the time a cold start (e.g. after travelling far from the last
-            // saved fix) produces its first real solution -- often with HDOP > 10 for a
-            // while. Rejecting that left last_gps_data invalid: UI stuck on "Searching",
-            // position never updated, module LED blinking, until a reboot got a hot start.
-            static bool s_have_accepted_fix = false;
-            const bool first_valid_fix = gps_data.valid && !s_have_accepted_fix;
+            // The exemption must key on "do we currently HOLD a valid position?", not on
+            // "first sample" (updates_received counts empty 0-sat samples too) and not on
+            // "first valid fix this boot" either. Both left a lockout:
+            //   1. a fix is accepted, 2. it is lost -- the no-fix samples (0 sats, HDOP NaN)
+            //   pass the gate because NaN counts as acceptable, so the UI shows "Searching",
+            //   3. the fix returns with HDOP > 10 (indoors / poor sky) and every sample is
+            //   rejected, so the UI stays on "Searching" with the module LED blinking until a
+            //   reboot resets the flag. (Field-confirmed 2026-11-10 on BE-881: last accepted
+            //   sample ~6 min after boot, nothing for 25 min, reboot recovered.)
+            // While we hold a valid position, a poor sample is rejected and the last good one
+            // is kept. While we hold none, there is nothing to protect, so show the fix.
+            static bool s_holding_valid_fix = false;
+            const bool no_valid_to_hold = gps_data.valid && !s_holding_valid_fix;
             gps_position_valid = gps_position_valid &&
-                                 (quality.updates_received <= 1 || hdop_acceptable || first_valid_fix);
-            if (gps_data.valid && gps_position_valid) s_have_accepted_fix = true;
+                                 (quality.updates_received <= 1 || hdop_acceptable || no_valid_to_hold);
+            if (gps_position_valid) s_holding_valid_fix = gps_data.valid;
             // Rejection logging is edge-triggered + throttled, never once-per-sample.
             //
             // Sampling runs at 10Hz (GPS_UPDATE_INTERVAL_MS = 100), and a poor-sky condition
@@ -1568,27 +1564,46 @@ static void updateStatusLabels() {
             // Only store and use GPS data if position is valid (no jump detected)
             if (gps_position_valid) {
                 // Store in device state for diagnostic access
-                // NOTE: GPS data is updated atomically (single assignment) - no mutex needed
-                // Using display_mutex here was causing UI Task starvation (display_mutex held 300ms+)
-                // which led to mutex timeouts and race conditions
-                device_manager::DeviceState& dev_state = const_cast<device_manager::DeviceState&>(device_manager::getDeviceState());
-                dev_state.last_gps_data = gps_data;
+                // NOT atomic as a plain struct assignment (GPSData has doubles = two 32-bit
+                // stores, and the UI Task reads it from the other core): published via a
+                // seqlock, readers use device_manager::snapshotGPS(). No mutex -- display_mutex
+                // here once starved the UI Task (held 300ms+, mutex timeouts).
+                device_manager::publishGPS(gps_data);
+            } else {
+                s_gps_rejected_total++;
             }
 
             // ===================================================================
             // GPS STATE SAVING - For Hot/Warm Start on next boot
             // ===================================================================
-            // Save position every 5 minutes when we have a valid fix
+            // Save position for hot/warm start on next boot -- but only when it is worth a
+            // flash write. An NVS commit briefly stalls both cores (same mechanism as the GPX
+            // upload display glitch), so: at most every 5 minutes AND only after moving
+            // >= 100m from the last SAVED position (a stationary device never rewrites the
+            // same spot), plus once on standby entry (requestGpsSave) so the position you
+            // stopped at is what the next boot starts from.
             // CRITICAL: Only save if position is valid (no jump detected)
-            // This enables hot start (<4h) or warm start (<24h) on next boot
             static uint32_t s_last_gps_save = 0;
+            static double   s_saved_lat = 999.0, s_saved_lon = 999.0;  // 999 = none saved this session
             constexpr uint32_t GPS_SAVE_INTERVAL_MS = 300000;  // 5 minutes
+            constexpr double   GPS_SAVE_MIN_MOVE_M  = 100.0;
+            constexpr double   GPS_SAVE_FORCED_MIN_MOVE_M = 5.0;  // standby: skip only if truly unmoved
 
-            if (gps_position_valid && gps_data.valid && (now - s_last_gps_save >= GPS_SAVE_INTERVAL_MS)) {
-                s_last_gps_save = now;
+            const bool forced = s_gps_save_requested;
+            if (gps_position_valid && gps_data.valid &&
+                (forced || (now - s_last_gps_save >= GPS_SAVE_INTERVAL_MS))) {
+                double moved_m = 1e9;  // nothing saved yet this session -> always eligible
+                if (s_saved_lat < 900.0) {
+                    const double dlat_m = (gps_data.lat - s_saved_lat) * 111320.0;
+                    const double dlon_m = (gps_data.lon - s_saved_lon) * 111320.0 *
+                                          cos(gps_data.lat * 3.14159265358979 / 180.0);
+                    moved_m = sqrt(dlat_m * dlat_m + dlon_m * dlon_m);
+                }
+                const double need_m = forced ? GPS_SAVE_FORCED_MIN_MOVE_M : GPS_SAVE_MIN_MOVE_M;
 
-                // Convert GPS time to Unix timestamp
-                if (gps_data.hasTime && gps_data.year > 2020) {
+                if (moved_m >= need_m && gps_data.hasTime && gps_data.year > 2020) {
+                    s_gps_save_requested = false;
+                    s_last_gps_save = now;
                     struct tm tm_gps = {};
                     tm_gps.tm_year = gps_data.year - 1900;
                     tm_gps.tm_mon = gps_data.month - 1;
@@ -1598,11 +1613,17 @@ static void updateStatusLabels() {
                     tm_gps.tm_sec = gps_data.second;
                     uint32_t fix_time = mktime(&tm_gps);
 
-                    // Save to NVS for hot/warm start on next boot
                     if (settings_manager::saveGPSState(gps_data.lat, gps_data.lon, fix_time)) {
-                        Serial.printf("[GPS_STATE] ✓ Position saved for fast fix: %.6f, %.6f\n",
-                                     gps_data.lat, gps_data.lon);
+                        s_saved_lat = gps_data.lat;
+                        s_saved_lon = gps_data.lon;
+                        Serial.printf("[GPS_STATE] ✓ Position saved for fast fix: %.6f, %.6f%s\n",
+                                     gps_data.lat, gps_data.lon, forced ? " (standby)" : "");
                     }
+                } else {
+                    // Not worth a write (hasn't moved enough / no time yet): restart the
+                    // interval so we re-evaluate in 5 min rather than every 100ms sample.
+                    s_gps_save_requested = false;
+                    s_last_gps_save = now;
                 }
             }
 
@@ -1682,10 +1703,7 @@ static void updateStatusLabels() {
             // Update radar display if GPS has valid fix AND position is stable
             // CRITICAL: Skip radar update if position jump detected to prevent waypoint disappearance
             if (gps_position_valid && gps_data.valid) {
-                UIUpdate radar_update;
-                radar_update.type = UIUpdateType::RADAR_REFRESH;
-                radar_update.timestamp = millis();  // Fix: Set timestamp to avoid bogus latency values
-                queueUIUpdate(radar_update);
+                requestRadarRefresh();  // latest-value flag, not a FIFO item
             }
 
             // ===================================================================
@@ -1806,8 +1824,7 @@ static void updateStatusLabels() {
                     if (compass_qmc5883l::read(compass_data)) {
                         s_compass_fail_count = 0;
                         s_nodata_since = 0;
-                        device_manager::DeviceState& mutable_state = const_cast<device_manager::DeviceState&>(compass_dev_state);
-                        mutable_state.last_compass_data = compass_data;
+                        device_manager::publishCompass(compass_data);
 
                         if (compass_data.valid) {
                             // WP-6: tilt-compensated heading when the gravity estimate is
@@ -1833,11 +1850,17 @@ static void updateStatusLabels() {
                                 if (true_heading >= 360.0f) true_heading -= 360.0f;
                             }
 
-                            UIUpdate upd = {};
-                            upd.type = UIUpdateType::COMPASS_UPDATE;
-                            upd.compass_heading = true_heading;
-                            upd.timestamp = compass_now;
-                            queueUIUpdate(upd);
+                            // EMA at the sample rate (tau re-derived for 10Hz, see navigation.h),
+                            // then publish latest-value; the UI Task picks it up on its next loop.
+                            static float s_smoothed_heading = 0.0f;
+                            static bool  s_smoothed_init = false;
+                            s_smoothed_heading = s_smoothed_init
+                                ? navigation::smoothHeading(s_smoothed_heading, true_heading,
+                                                            navigation::HEADING_SMOOTHING)
+                                : true_heading;
+                            s_smoothed_init = true;
+                            s_heading_mailbox.store(s_smoothed_heading, std::memory_order_release);
+                            s_heading_dirty.store(true, std::memory_order_release);
                         }
                     } else if (compass_qmc5883l::lastReadWasNoData()) {
                         // Bus is fine, chip just has no new sample yet (DRDY clear). Not a

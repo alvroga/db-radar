@@ -124,7 +124,13 @@ static void parseNavPVT(const uint8_t* payload, GPSData& g) {
   memcpy(&pvt, payload, sizeof(pvt));
 
   // Fix type: 2=2D, 3=3D, 4=GNSS+dead reckoning
-  g.valid = (pvt.fixType >= 2 && pvt.fixType <= 4);
+  // AND flags.gnssFixOK (bit 0): "valid fix, i.e. within the DOP and accuracy masks". fixType
+  // alone is not enough -- after the signal degrades the receiver keeps reporting fixType 2/3
+  // for a while with gnssFixOK cleared (pDOP 9999, 3-5 sats, position wandering 100m+ and
+  // "speeds" of 300 km/h). Field 2026-11-10 on BE-881: module LED off, HDOP "---", UI still
+  // "Fixed (4 sats)". The LED/timepulse follows gnssFixOK; now so does the UI.
+  const bool fix_ok = (pvt.flags & 0x01) != 0;
+  g.valid = (pvt.fixType >= 2 && pvt.fixType <= 4) && fix_ok;
 
   // Position (int32 * 1e-7 -> double degrees)
   double lat = pvt.lat * 1e-7;
@@ -660,6 +666,14 @@ const char* moduleTypeName(uint8_t type) {
   }
 }
 
+static volatile uint32_t s_rx_bytes = 0;
+static volatile uint32_t s_pvt_frames = 0;
+static volatile uint32_t s_pvt_last_ms = 0;
+
+uint32_t rxBytes()   { return s_rx_bytes; }
+uint32_t pvtFrames() { return s_pvt_frames; }
+uint32_t pvtAgeMs()  { return millis() - s_pvt_last_ms; }
+
 bool read(GPSData &out) {
   bool updated = false;
 
@@ -677,6 +691,7 @@ bool read(GPSData &out) {
     if (chunk_pos >= chunk_len) {
       chunk_len = uart_read_bytes(GPS_UART, chunk, sizeof(chunk), 0);
       if (chunk_len <= 0) break;   // nothing buffered — done for this call
+      s_rx_bytes += (uint32_t)chunk_len;
       chunk_pos = 0;
     }
     const uint8_t c = chunk[chunk_pos++];
@@ -777,6 +792,8 @@ bool read(GPSData &out) {
           if (s_msg_class == 0x01 && s_msg_id == 0x07 && s_msg_len == 92) {
             parseNavPVT(s_payload, s_last);
             updated = true;
+            s_pvt_frames++;
+            s_pvt_last_ms = millis();
             s_protocol = GpsProtocol::UBX;
           }
         }
@@ -862,6 +879,46 @@ bool setPowerMode(uint8_t mode, uint16_t periodMs, uint16_t onTimeMs) {
 
   sendUBX(0x06, 0x86, payload, sizeof(payload));
   return waitForAck(0x06, 0x86);
+}
+
+static portMUX_TYPE s_pms_mux = portMUX_INITIALIZER_UNLOCKED;
+static bool     s_pms_pending = false;
+static uint8_t  s_pms_mode = 0;
+static uint16_t s_pms_period = 0, s_pms_on = 0;
+
+void requestPowerMode(uint8_t mode, uint16_t periodMs, uint16_t onTimeMs) {
+  portENTER_CRITICAL(&s_pms_mux);
+  s_pms_mode = mode; s_pms_period = periodMs; s_pms_on = onTimeMs;
+  s_pms_pending = true;
+  portEXIT_CRITICAL(&s_pms_mux);
+}
+
+void servicePending() {
+  if (!s_pms_pending) return;  // cheap unlocked peek; bool store/load is atomic on Xtensa
+  uint8_t mode; uint16_t period, on;
+  portENTER_CRITICAL(&s_pms_mux);
+  mode = s_pms_mode; period = s_pms_period; on = s_pms_on;
+  s_pms_pending = false;
+  portEXIT_CRITICAL(&s_pms_mux);
+  setPowerMode(mode, period, on);  // logs its own ACK/NAK/timeout line
+}
+
+void ensurePvtOutput() {
+  if (!s_uart_installed || s_protocol != GpsProtocol::UBX) return;
+  static uint32_t s_last_reenable_ms = 0;
+  static uint32_t s_rx_at_last_check = 0;
+  const uint32_t now = millis();
+  if (pvtAgeMs() < 5000) { s_rx_at_last_check = s_rx_bytes; return; }
+  if (now - s_last_reenable_ms < 10000) return;
+  s_last_reenable_ms = now;
+
+  const uint32_t rx_delta = s_rx_bytes - s_rx_at_last_check;
+  s_rx_at_last_check = s_rx_bytes;
+  Serial.printf("[GPS] No NAV-PVT for %lus (rx +%lu bytes since last check, %lu frames total) -- re-enabling NAV-PVT\n",
+                (unsigned long)(pvtAgeMs() / 1000), (unsigned long)rx_delta, (unsigned long)s_pvt_frames);
+  uint8_t enablePVT[] = {0x01, 0x07, 0x01};
+  sendUBX(0x06, 0x01, enablePVT, sizeof(enablePVT));
+  waitForAck(0x06, 0x01);
 }
 
 bool setUpdateRateVALSET(uint32_t intervalMs, uint8_t layers) {
@@ -1213,6 +1270,13 @@ void dumpRaw(uint32_t duration_ms) {
     Serial.println("[GPS] No serial port initialized");
     return;
   }
+
+  // The loops below treat any pending console byte as "user pressed a key, abort". The
+  // CR/LF that terminated the "gps raw" command is still sitting in the console buffer, so
+  // without this the dump aborted at 0 ms and reported "No data received" -- a false
+  // negative that looks exactly like a dead module.
+  delay(20);  // let a trailing \n after a \r arrive
+  while (Serial.available()) Serial.read();
 
   if (s_protocol == GpsProtocol::NMEA) {
     // Sentence-type counter table (up to 16 unique types, keyed by the 3-char type

@@ -1409,9 +1409,7 @@ static esp_err_t reload_handler(httpd_req_t* req) {
     int reloaded = gpx_loader::refreshGPXFiles();
     Serial.printf("[GPX_SERVER] Manual reload: %d waypoints\n", reloaded);
 
-    task_manager::UIUpdate upd = {};
-    upd.type = task_manager::UIUpdateType::RADAR_REFRESH;
-    task_manager::queueUIUpdate(upd);
+    task_manager::requestRadarRefresh();
 
     char buf[48];
     int len = snprintf(buf, sizeof(buf), "{\"waypoints\":%d}", reloaded);

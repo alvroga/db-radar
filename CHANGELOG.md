@@ -11,7 +11,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-**B5: GPX upload and OTA safety (2026-11-10, built, not hardware-verified)**
+**B6: cross-task correctness (2026-11-10, built, not hardware-verified)**
+
+- #6 `attemptTaskRecovery()` (vTaskSuspend/Resume of a "hung" task) removed: it cannot unblock a task waiting on a
+  mutex/driver call and could suspend one *holding* the I2C or display mutex. Replaced by `logTaskStall()` (state,
+  stack HWM, heap, rate-limited). Recovery is the 30s task watchdog (all tasks subscribed, `panic_on_timeout`), whose
+  reset reason the next boot records (B1).
+- #8 GPS `setPowerMode()` (blocks up to 500ms on an ACK, reads the same UART as `read()`) no longer runs on the UI
+  Task during standby enter/wake. New non-blocking `gps_bh880::requestPowerMode()` (single slot, last-writer-wins);
+  the System Task applies it via `servicePending()` right before its `read()`. The serial `gps power ...` commands
+  use it too.
+- #16 `last_gps_data` / `last_compass_data` are multi-word structs (GPSData has doubles = two 32-bit stores) written
+  on Core 0 and read by the UI Task on Core 1 -- a plain assignment could be seen half-written (new lat, old lon).
+  Now published through a seqlock (`device_manager::publishGPS/publishCompass`) and read via `snapshotGPS/Compass()`
+  in navigation, settings screen, high-rate logger and diagnostics. The old comment calling the assignment "atomic"
+  was wrong.
+- #17 (cheap version) NVS position save now needs >=100m moved since the last *saved* position (still at most every
+  5 min), plus one forced save on standby entry (`task_manager::requestGpsSave()`, executed by the System Task; skipped
+  if moved <5m). Stationary use no longer rewrites flash.
+- #12 `COMPASS_UPDATE` and `RADAR_REFRESH` no longer go through the 16-slot FIFO shared with button/zoom/standby
+  events. Heading is smoothed (same alpha=0.15 EMA, now at exactly the sample rate on the System Task) and published
+  to a latest-value mailbox; repaint is a flag (`requestRadarRefresh()`). The UI Task drains both after the FIFO each
+  loop. The FIFO now carries only discrete events, so a slow frame can no longer fill it with sensor items and
+  drop a press. The direct `enterStandby()`/`wakeFromStandby()` queue-full fallbacks in `device_manager.cpp` are left
+  in place (CLAUDE.md documents them) but should now be effectively unreachable.
+  Behaviour change: heading EMA now starts from the first sample instead of from 0.
+- GPS "Searching" while the module has a fix (BE-881, 2026-11-10): hardware showed the last accepted sample ~348s after
+  boot, then nothing for 25 min, while the module still ACKed `CFG-PMS` (UART alive both ways). Cause not yet
+  determined. Added `gps_rx / pvt / pvt_age / rej` to the `[HEALTH]` line (bytes received, NAV-PVT frames parsed, age of
+  the last frame, samples rejected by the quality gate) to separate silent module / wrong output / parser or filter
+  drop, and `gps_bh880::ensurePvtOutput()`: if a UBX module produces no NAV-PVT for 5s it re-sends the NAV-PVT enable
+  (max once per 10s) and logs rx-byte context. `gps raw` no longer aborts at 0 ms on the command's own trailing LF.
+- ROOT CAUSE of the "Searching while the module has a fix" lockout (reboot recovered it; field-reproduced on BE-881
+  2026-11-10): the HDOP gate's first-fix exemption was once per boot (`s_have_accepted_fix`). Sequence: a fix is
+  accepted -> it is lost and the no-fix samples (0 sats, HDOP NaN, which counts as "acceptable") are accepted, UI
+  shows Searching -> the fix returns with HDOP > 10 (poor sky) and every sample is rejected, so the UI never leaves
+  Searching and `last_update` goes stale. Fix: the exemption is now `s_holding_valid_fix` -- a poor fix is rejected
+  only while we hold a valid position; while we hold none it is shown. The NAV-PVT self-heal above is kept as cheap
+  insurance but was not the cause.
+- UBX `valid` now also requires `flags.gnssFixOK` (NAV-PVT flags bit 0). Field 2026-11-10: after losing sky the module
+  LED stopped and HDOP showed `---` (pDOP 9999), yet the UI kept saying "Fixed (4 sats)" because only `fixType` was
+  checked -- the receiver keeps reporting fixType 2/3 with the flag cleared, with wandering positions (130m jumps,
+  300 km/h). Applies to BE-881 and BH-880 (UBX path); NMEA modules unchanged.
+- Build: flash ~1,724,9xx B (+~900 B vs B5), RAM +64 B.
+
+**B5: GPX upload and OTA safety (2026-11-10, ca6813b; normal upload verified, failure paths not exercised)**
 
 - #9 `upload_handler`: streams to `<gpx>/_upload.tmp` and renames into place only when complete, so a dropped
   connection, full disk or failed write leaves any existing same-name file intact (before: `fopen(final,"wb")`

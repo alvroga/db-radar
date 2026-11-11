@@ -25,6 +25,7 @@
 #include "esp_attr.h"
 #include <string.h>
 #include <time.h>
+#include <atomic>
 #include "driver/sdmmc_host.h"
 #include "sdmmc_cmd.h"
 #include "esp_vfs_fat.h"
@@ -98,6 +99,41 @@ static bool on_frame_buf_complete(esp_lcd_panel_handle_t panel, const esp_lcd_rg
 const DeviceState& getDeviceState() {
     return g_device_state;
 }
+
+// ---- seqlock handoff (single writer: System Task) ----
+// Even sequence = stable, odd = write in progress. Readers retry until they see the same even
+// value before and after the copy. The writer never blocks (no mutex -- display_mutex here once
+// starved the UI Task, see the note this replaces in task_manager.cpp).
+static std::atomic<uint32_t> s_gps_seq{0};
+static std::atomic<uint32_t> s_compass_seq{0};
+
+template <typename T>
+static void seqPublish(std::atomic<uint32_t>& seq, T& dst, const T& src) {
+    seq.fetch_add(1, std::memory_order_acq_rel);           // -> odd
+    std::atomic_thread_fence(std::memory_order_seq_cst);
+    dst = src;
+    std::atomic_thread_fence(std::memory_order_seq_cst);
+    seq.fetch_add(1, std::memory_order_release);           // -> even
+}
+
+template <typename T>
+static T seqSnapshot(const std::atomic<uint32_t>& seq, const T& src) {
+    T out;
+    for (int tries = 0; tries < 1000; tries++) {
+        uint32_t s1 = seq.load(std::memory_order_acquire);
+        if (s1 & 1) continue;  // writer mid-copy (a ~100B copy; spins for well under a microsecond)
+        std::atomic_thread_fence(std::memory_order_seq_cst);
+        out = src;
+        std::atomic_thread_fence(std::memory_order_seq_cst);
+        if (seq.load(std::memory_order_acquire) == s1) return out;
+    }
+    return src;  // give up spinning rather than hang a task; a torn sample beats a stall
+}
+
+void publishGPS(const GPSData& g)         { seqPublish(s_gps_seq, g_device_state.last_gps_data, g); }
+void publishCompass(const CompassData& c) { seqPublish(s_compass_seq, g_device_state.last_compass_data, c); }
+GPSData snapshotGPS()         { return seqSnapshot(s_gps_seq, g_device_state.last_gps_data); }
+CompassData snapshotCompass() { return seqSnapshot(s_compass_seq, g_device_state.last_compass_data); }
 
 bool initializeAll(const Config& config) {
     g_config = config;

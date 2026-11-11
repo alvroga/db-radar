@@ -72,7 +72,26 @@ namespace gps_bh880 {
 
     // UBX configuration commands
     bool setUpdateRate(uint32_t intervalMs);
+    // BLOCKING (up to 500ms waiting for the ACK) and reads the same UART as read(), so it must
+    // only run on the task that owns GPS reads (the System Task) -- otherwise the two steal each
+    // other's bytes. Every other task (UI Task standby paths, serial console) must use
+    // requestPowerMode() instead.
     bool setPowerMode(uint8_t mode, uint16_t periodMs = 0, uint16_t onTimeMs = 0);
+    // Non-blocking, any task. Single-slot, last-writer-wins (enter-then-wake coalesces to the
+    // final desired state). Applied by servicePending() on the GPS-owning task.
+    void requestPowerMode(uint8_t mode, uint16_t periodMs = 0, uint16_t onTimeMs = 0);
+    // Call from the GPS-owning task immediately before read(): applies a pending request, if any.
+    void servicePending();
+
+    // Receive-path health, for the [HEALTH] heartbeat and the no-data watchdog. Distinguishes
+    // "module silent" (rx not growing) / "module sending something else" (rx grows, pvt doesn't)
+    // / "parser or filter dropping valid frames" (pvt grows, UI doesn't).
+    uint32_t rxBytes();      // total bytes pulled off the GPS UART by read()
+    uint32_t pvtFrames();    // total valid NAV-PVT frames parsed
+    uint32_t pvtAgeMs();     // ms since the last valid NAV-PVT frame (since boot if none yet)
+    // Call from the GPS-owning task each GPS tick. If a UBX module has produced no NAV-PVT for
+    // 5s, re-sends the NAV-PVT enable (rate-limited to once per 10s) and logs rx-byte context.
+    void ensurePvtOutput();
     bool setUpdateRateVALSET(uint32_t intervalMs, uint8_t layers = 0x01);
     bool setBaudrate(uint32_t baud);
     bool hotStart();

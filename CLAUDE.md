@@ -729,7 +729,8 @@ Per-stage breakdown, scaling behavior at 240MHz, and the full historical measure
 **Sensor rate**: `SYSTEM_UPDATE_MS = 100` is the sensor clock — it drives *both* the compass sub-timer
 (20ms gate) and the GPS gate (`GPS_UPDATE_INTERVAL_MS = 100`), so compass and GPS both sample at 10Hz.
 Safe only because render requests are coalesced to at most one per UI Task loop. With a GPS fix,
-`RADAR_REFRESH` is queued every sample, so the UI Task renders nearly every loop and polls
+a repaint request (`task_manager::requestRadarRefresh()`, a latest-value flag — sensor data no longer rides the
+UI FIFO, so it can't crowd out button events) is raised every sample, so the UI Task renders nearly every loop and polls
 button/touch once per ~90ms rather than once per 26.6ms vsync — **verified fine outdoors**, since
 90ms is shorter than a real button press (132–186ms). If Core 1 ever needs relief, drop the
 *GPS-driven* refresh to 5Hz and leave the compass at 10Hz (translation matters less than rotation) —

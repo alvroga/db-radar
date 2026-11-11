@@ -90,6 +90,17 @@ bool initializeAll(const Config& config = Config{});
 // Get current device state
 const DeviceState& getDeviceState();
 
+// Torn-read-safe handoff of the GPS / compass samples between tasks (seqlock).
+// last_gps_data / last_compass_data are multi-word structs (GPSData holds doubles, which are
+// two separate 32-bit loads on Xtensa) written by the System Task and read by the UI Task on
+// the other core, so a plain struct assignment can be observed half-written -- e.g. a new
+// latitude paired with an old longitude. The single writer (System Task) must publish through
+// publish*(); any other task must read through snapshot*() instead of touching the fields.
+void publishGPS(const GPSData& g);
+void publishCompass(const CompassData& c);
+GPSData snapshotGPS();
+CompassData snapshotCompass();
+
 // Individual initialization functions
 bool initLED(int pin);
 bool initI2C(int sda, int scl, uint32_t freq);

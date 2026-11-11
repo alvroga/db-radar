@@ -311,8 +311,11 @@ static void applyStandbyPowerSettings() {
 
     // GPS: switch to Aggressive 1Hz to save power while maintaining fix
     // Note: M10 ignores interval mode (0x01) despite ACKing it - agg1 (0x02) is the only working low-power mode
-    gps_bh880::setPowerMode(0x02);
-    Serial.println("[STANDBY] ✓ GPS: Aggressive 1Hz mode (low power, maintains fix)");
+    // Posted to the System Task (it owns the GPS UART); this runs on the UI Task under
+    // display_mutex, so it must not block ~500ms on an ACK or compete with read() for bytes.
+    gps_bh880::requestPowerMode(0x02);
+    task_manager::requestGpsSave();  // persist the position we stopped at (System Task does the NVS write)
+    Serial.println("[STANDBY] ✓ GPS: Aggressive 1Hz mode requested (low power, maintains fix)");
 
     // NOTE: CPU stays at 240MHz in standby. setCpuFrequencyMhz() is a stub here
     // (arduino_compat.h; CONFIG_PM_ENABLE is off), so no clock switch ever happened.
@@ -344,8 +347,8 @@ static void restoreActivePowerSettings() {
     }
 
     // GPS: restore full power
-    gps_bh880::setPowerMode(0x00);
-    Serial.println("[STANDBY] ✓ GPS: Full Power mode restored");
+    gps_bh880::requestPowerMode(0x00);
+    Serial.println("[STANDBY] ✓ GPS: Full Power mode requested");
 
     // Recover I2C bus and CST820 touch controller.
     // After standby, the ESP32 I2C controller FSM can be stuck in error state —

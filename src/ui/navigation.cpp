@@ -1189,7 +1189,8 @@ void radarDrawEventCb(lv_event_t* e) {
 
 void updateRadarDisplay() {
     ui_manager::UIState& ui = ui_manager::getUIState();
-    const device_manager::DeviceState& dev = device_manager::getDeviceState();
+    // One torn-read-safe copy per render (System Task writes these on the other core).
+    const GPSData gps = device_manager::snapshotGPS();
 
     // Comprehensive object validation before any operations
     if (!ui.radar_obj) {
@@ -1232,8 +1233,8 @@ void updateRadarDisplay() {
         static bool  s_last_gps_valid   = false;
         static int   s_last_sats        = -1;
         static bool  s_last_day_status  = false;
-        bool gps_valid = dev.last_gps_data.valid;
-        int  sats      = dev.last_gps_data.sats;
+        bool gps_valid = gps.valid;
+        int  sats      = gps.sats;
         if (gps_valid != s_last_gps_valid || sats != s_last_sats || g_daylight_mode != s_last_day_status) {
             if (gps_valid) {
                 lv_label_set_text_fmt(ui.gps_status_label, "GPS: Fixed (%d sats)", sats);
@@ -1250,12 +1251,12 @@ void updateRadarDisplay() {
 
     // Update GPS quality label — speed EMA always updated, label only when displayed value changes
     if (ui.gps_quality_label && lv_obj_is_valid(ui.gps_quality_label)) {
-        if (dev.last_gps_data.valid) {
-            float hdop = dev.last_gps_data.hdop;
+        if (gps.valid) {
+            float hdop = gps.hdop;
 
             // Speed EMA filter: α=0.2 smooths spikes, 0.5 km/h floor eliminates stationary noise
             static float s_speed_ema = 0.0f;
-            float raw_speed_kmh = (isnan(dev.last_gps_data.speed) ? 0.0f : dev.last_gps_data.speed) * 1.852f;
+            float raw_speed_kmh = (isnan(gps.speed) ? 0.0f : gps.speed) * 1.852f;
             s_speed_ema = 0.2f * raw_speed_kmh + 0.8f * s_speed_ema;
             float speed_kmh = (s_speed_ema < 0.5f) ? 0.0f : s_speed_ema;
 
@@ -1310,7 +1311,7 @@ void updateRadarDisplay() {
         const char* text = nullptr;
         uint32_t color = 0x888888;
         if (has_baseline) {
-            auto health = compass_qmc5883l::classifyHealth(dev.last_compass_data, settings.compass_cal_h0);
+            auto health = compass_qmc5883l::classifyHealth(device_manager::snapshotCompass(), settings.compass_cal_h0);
             if (health == compass_qmc5883l::CompassHealth::DISTURBANCE) {
                 text = "Compass: interference"; color = 0xFF4444;
             } else if (quality_poor) {
@@ -1346,12 +1347,12 @@ void updateRadarDisplay() {
 
     // Update center reference to current GPS position (if valid)
     // This makes the user always at the center, and waypoints move relative to user
-    if (dev.last_gps_data.valid) {
-        ui.center_lat = dev.last_gps_data.lat;
-        ui.center_lon = dev.last_gps_data.lon;
+    if (gps.valid) {
+        ui.center_lat = gps.lat;
+        ui.center_lon = gps.lon;
     }
 
-    // Heading (ui.current_heading) is driven entirely by compass via COMPASS_UPDATE queue.
+    // Heading (ui.current_heading) is driven entirely by the compass via a latest-value mailbox (task_manager drainSensorMailboxes()).
     // The I2C Task reads the QMC5883L every 100ms and queues the heading to the UI Task.
     // No GPS involvement — compass controls orientation always, moving or stationary.
 

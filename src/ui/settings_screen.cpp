@@ -108,7 +108,7 @@ static void beginTumblePhase() {
 }
 
 static void calTimerCb(lv_timer_t*) {
-    const CompassData& cd = device_manager::getDeviceState().last_compass_data;
+    const CompassData cd = device_manager::snapshotCompass();
     if (cd.last_update_ms == 0) return;
     if (cd.last_update_ms == g_cal_last_sample_ms) return;  // no new sample since last tick
     g_cal_last_sample_ms = cd.last_update_ms;

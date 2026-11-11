@@ -114,7 +114,7 @@ enum class UIUpdateType {
     SENSOR_DATA,
     NETWORK_INFO,
     MEMORY_STATS,
-    RADAR_REFRESH,
+    RADAR_REFRESH,         // Legacy -- use requestRadarRefresh() (sensor data no longer rides the FIFO)
     ZOOM_CHANGE,           // Cycle zoom level forward (button single press)
     ZOOM_CHANGE_REVERSE,   // Cycle zoom level backward (button double press)
     SETTINGS_SCREEN,       // Open settings screen (button long press)
@@ -124,7 +124,7 @@ enum class UIUpdateType {
     LOAD_RADAR_SCREEN,     // Transition from loading screen to radar screen (queued from setup())
     LOAD_AP_SCREEN,        // Transition from loading screen to AP upload mode screen
     LOAD_WIFI_SCREEN,      // Transition from loading screen to WiFi STA mode screen
-    COMPASS_UPDATE,        // Update heading from compass (queued from I2C Task)
+    COMPASS_UPDATE,        // Legacy/unused -- heading travels via a latest-value mailbox
     BEACON_DBM_UPDATE,     // Update beacon dBm label (DEV mode, 50m zoom only)
     DEV_MODE_CHANGE        // Show/hide DEV label when dev mode is toggled at runtime
 };
@@ -233,6 +233,15 @@ bool queueI2CRequest(const I2CRequest& req);
  * @return true if queued successfully, false if queue full
  */
 bool queueUIUpdate(const UIUpdate& update);
+
+// Ask the System Task to persist the current GPS position (hot/warm-start state) at its next GPS
+// sample -- used on standby entry. Non-blocking, any task; skipped if no valid fix or the device
+// has not moved since the last save.
+void requestGpsSave();
+
+// Ask the UI Task to repaint the radar at its next loop. Latest-value flag: never blocks, never
+// drops a user event, safe at any rate from any task. Replaces queueing RADAR_REFRESH.
+void requestRadarRefresh();
 
 /**
  * @brief Get current system statistics

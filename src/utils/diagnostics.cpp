@@ -379,27 +379,28 @@ void handleGPSCommand(const char* args) {
 
     if (strncmp(args, "status", 6) == 0 || strlen(args) == 0) {
         const device_manager::DeviceState& dev = device_manager::getDeviceState();
+        const GPSData gps = device_manager::snapshotGPS();  // torn-read-safe copy
 
         Serial.println("==== GPS Status ====");
         Serial.printf("GPS Module:      %s\n", dev.gps_ok ? "Initialized" : "Not initialized");
 
-        if (dev.last_gps_data.valid) {
+        if (gps.valid) {
             Serial.printf("Fix Status:      VALID\n");
-            Serial.printf("Latitude:        %.6f°\n", dev.last_gps_data.lat);
-            Serial.printf("Longitude:       %.6f°\n", dev.last_gps_data.lon);
-            Serial.printf("Altitude:        %.1f m\n", dev.last_gps_data.alt);
-            Serial.printf("Satellites:      %d\n", dev.last_gps_data.sats);
-            Serial.printf("HDOP:            %.1f\n", dev.last_gps_data.hdop);
+            Serial.printf("Latitude:        %.6f°\n", gps.lat);
+            Serial.printf("Longitude:       %.6f°\n", gps.lon);
+            Serial.printf("Altitude:        %.1f m\n", gps.alt);
+            Serial.printf("Satellites:      %d\n", gps.sats);
+            Serial.printf("HDOP:            %.1f\n", gps.hdop);
 
-            if (dev.last_gps_data.hasTime) {
+            if (gps.hasTime) {
                 Serial.printf("UTC Time:        %04d-%02d-%02d %02d:%02d:%02d\n",
-                              dev.last_gps_data.year, dev.last_gps_data.month,
-                              dev.last_gps_data.day, dev.last_gps_data.hour,
-                              dev.last_gps_data.minute, dev.last_gps_data.second);
+                              gps.year, gps.month,
+                              gps.day, gps.hour,
+                              gps.minute, gps.second);
             }
         } else {
             Serial.printf("Fix Status:      SEARCHING\n");
-            Serial.printf("Satellites:      %d (acquiring...)\n", dev.last_gps_data.sats);
+            Serial.printf("Satellites:      %d (acquiring...)\n", gps.sats);
             Serial.println("\nTroubleshooting:");
             Serial.println("  - Module needs OUTDOOR clear sky view");
             Serial.println("  - PPS LED flashing = normal (searching)");
@@ -524,18 +525,12 @@ void handleGPSCommand(const char* args) {
         while (*args == ' ') args++;
         if (strncmp(args, "full", 4) == 0) {
             Serial.println("[GPS] Setting Full Power mode (0x00)...");
-            if (gps_bh880::setPowerMode(0x00)) {
-                Serial.println("[GPS] CFG-PMS: Full Power — ACK OK");
-            } else {
-                Serial.println("[GPS] CFG-PMS: Full Power — ACK timeout (command may still apply)");
-            }
+            gps_bh880::requestPowerMode(0x00);
+            Serial.println("[GPS] Queued for the System Task (watch for the ACK/NAK line within ~100ms)");
         } else if (strncmp(args, "agg1", 4) == 0) {
             Serial.println("[GPS] Setting Aggressive 1Hz mode (0x02)...");
-            if (gps_bh880::setPowerMode(0x02)) {
-                Serial.println("[GPS] CFG-PMS: Aggressive 1Hz — ACK OK");
-            } else {
-                Serial.println("[GPS] CFG-PMS: Aggressive 1Hz — ACK timeout (command may still apply)");
-            }
+            gps_bh880::requestPowerMode(0x02);
+            Serial.println("[GPS] Queued for the System Task (watch for the ACK/NAK line within ~100ms)");
         } else if (strncmp(args, "interval", 8) == 0) {
             args += 8;
             while (*args == ' ') args++;
@@ -547,11 +542,8 @@ void handleGPSCommand(const char* args) {
             }
             Serial.printf("[GPS] Setting Interval mode: period=%ums, onTime=%ums...\n", period, ontime);
             Serial.println("[GPS] WARNING: M10 ACKs but ignores interval mode - use agg1 for actual power saving");
-            if (gps_bh880::setPowerMode(0x01, period, ontime)) {
-                Serial.printf("[GPS] CFG-PMS: Interval %ums/%ums — ACK OK (but M10 ignores this mode)\n", ontime, period);
-            } else {
-                Serial.printf("[GPS] CFG-PMS: Interval %ums/%ums — ACK timeout\n", ontime, period);
-            }
+            gps_bh880::requestPowerMode(0x01, period, ontime);
+            Serial.println("[GPS] Queued for the System Task (watch for the ACK/NAK line within ~100ms)");
         } else {
             Serial.println("Usage: gps power <mode>");
             Serial.println("  gps power full                       - Full power (10Hz, normal)");
