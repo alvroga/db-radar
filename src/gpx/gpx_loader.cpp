@@ -9,6 +9,8 @@
 #include <stdio.h>
 #include <unistd.h>
 #include <algorithm>
+#include <math.h>
+#include "esp_timer.h"
 
 namespace gpx_loader {
 
@@ -29,12 +31,69 @@ static bool g_index_available = false;
 
 // distance/entry_idx scratch for closest-N selection, allocated once in
 // PSRAM (see plan §3). Indexed 1:1 with gpx_index entries.
-struct DistEntry { double dist; int idx; };
+struct DistEntry { float dist; int idx; };  // dist = squared equirectangular degrees^2 (ranking only, not metres)
 static DistEntry* g_scratch = nullptr;
 
 // slot -> index-entry id for the current working set, so found-state and a
 // future delta-reselect can map back to the PSRAM index. -1 = empty/unset.
 static int g_slot_source[ui_manager::RadarConfig::MAX_WAYPOINTS];
+
+// Closest-N ranking. Only ordering matters here (never displayed), so use a
+// float squared equirectangular distance instead of per-entry double haversine,
+// and nth_element (O(n)) instead of partial_sort. Slot order downstream is
+// irrelevant (see selectAndMaterialize). Near the selection boundary, entries
+// whose true distances differ by well under the equirectangular error may
+// swap vs. a haversine oracle; at working-set radii this is sub-metre.
+static void rankByDistance(double clat, double clon, int n) {
+    const float clat_f = (float)clat, clon_f = (float)clon;
+    const float kx = cosf((float)(clat * M_PI / 180.0));
+    for (int i = 0; i < n; i++) {
+        const gpx_index::IndexEntry& e = gpx_index::getEntry(i);
+        float dy = e.lat - clat_f;
+        float dx = e.lon - clon_f;
+        if (dx > 180.0f) dx -= 360.0f; else if (dx < -180.0f) dx += 360.0f;
+        dx *= kx;
+        g_scratch[i].dist = dx * dx + dy * dy;
+        g_scratch[i].idx = i;
+    }
+}
+
+static void selectClosest(int want, int n) {
+    if (want < n) {
+        std::nth_element(g_scratch, g_scratch + want, g_scratch + n,
+                         [](const DistEntry& a, const DistEntry& b) { return a.dist < b.dist; });
+    }
+}
+
+// Line reader for the GPX parsers. Ends a line at \n, \r, EOF, when the buffer
+// is full (the char that didn't fit starts the next line - nothing is dropped),
+// and - so minified single-line GPX works - right after any '>' that is
+// immediately followed by '<' (tag boundary). Every parser branch handles one
+// field per line, which is exactly what this yields for minified files.
+// Tracks the byte offset of each line start itself (no ftell/ungetc games).
+struct LineReader {
+    FILE* f; long pos; int pend;
+    explicit LineReader(FILE* fp) : f(fp), pos(ftell(fp)), pend(-2) {}
+    int get() { if (pend != -2) { int c = pend; pend = -2; return c; } return fgetc(f); }
+    // Returns true when EOF was reached (the returned line may be partial/empty).
+    bool readLine(char* buf, int cap, long* start) {
+        int len = 0;
+        *start = pos;
+        while (true) {
+            int ch = get();
+            if (ch == EOF) { buf[len] = '\0'; return true; }
+            pos++;
+            if (ch == '\n' || ch == '\r') { buf[len] = '\0'; return false; }
+            if (len >= cap - 1) { pend = ch; pos--; buf[len] = '\0'; return false; }
+            buf[len++] = (char)ch;
+            if (ch == '>') {
+                int nx = get();
+                pend = nx;
+                if (nx == '<') { buf[len] = '\0'; return false; }
+            }
+        }
+    }
+};
 
 // Helper function forward declarations
 static bool extractAttribute(const char* tag_content, const char* attr_name, char* output, size_t output_size);
@@ -170,14 +229,11 @@ int reselect(double center_lat, double center_lon) {
         return waypoints_loaded;
     }
 
-    for (int i = 0; i < n; i++) {
-        const gpx_index::IndexEntry& e = gpx_index::getEntry(i);
-        g_scratch[i].dist = geo::haversineMeters(center_lat, center_lon, e.lat, e.lon);
-        g_scratch[i].idx = i;
-    }
+    int64_t t_rank0 = esp_timer_get_time();
+    rankByDistance(center_lat, center_lon, n);
     int want = n < ui_manager::RadarConfig::MAX_WAYPOINTS ? n : ui_manager::RadarConfig::MAX_WAYPOINTS;
-    std::partial_sort(g_scratch, g_scratch + want, g_scratch + n,
-                       [](const DistEntry& a, const DistEntry& b) { return a.dist < b.dist; });
+    selectClosest(want, n);
+    int64_t rank_us = esp_timer_get_time() - t_rank0;
 
     // Which of the `want` new winners are already sitting in some slot
     // (kept in place, no reparse) vs. which existing slots are now free.
@@ -301,8 +357,8 @@ int reselect(double center_lat, double center_lon) {
 
     waypoints_loaded = want;
     if (changed > 0) {
-        Serial.printf("[GPX_LOADER] Reselect: %d/%d slots changed (center %.6f, %.6f)\n",
-                      changed, want, center_lat, center_lon);
+        Serial.printf("[GPX_LOADER] Reselect: %d/%d slots changed (center %.6f, %.6f), rank %lld us over %d entries\n",
+                      changed, want, center_lat, center_lon, (long long)rank_us, n);
     }
     return waypoints_loaded;
 }
@@ -327,17 +383,12 @@ static int buildFileIndex(const char* filepath, uint16_t file_id) {
 
     int count = 0;
     char line[512];
-    int line_len = 0;
-    long line_start = ftell(file);
-    int _ch;
+    long line_start = 0;
+    LineReader lr(file);
 
     while (true) {
-        if (line_len == 0) line_start = ftell(file);
-        _ch = fgetc(file);
-        char c = (_ch == EOF) ? '\n' : (char)_ch;
-
-        if (_ch == EOF || c == '\n' || c == '\r' || line_len >= 511) {
-            line[line_len] = '\0';
+        bool at_eof = lr.readLine(line, sizeof(line), &line_start);
+        {
 
             if (strstr(line, "<wpt") && strstr(line, "lat=")) {
                 char lat_s[32] = {0};
@@ -354,10 +405,7 @@ static int buildFileIndex(const char* filepath, uint16_t file_id) {
                 }
             }
 
-            line_len = 0;
-            if (_ch == EOF) break;
-        } else {
-            line[line_len++] = c;
+            if (at_eof) break;
         }
     }
 
@@ -381,15 +429,10 @@ static int selectAndMaterialize(double center_lat, double center_lon) {
         return 0;
     }
 
-    for (int i = 0; i < n; i++) {
-        const gpx_index::IndexEntry& e = gpx_index::getEntry(i);
-        g_scratch[i].dist = geo::haversineMeters(center_lat, center_lon, e.lat, e.lon);
-        g_scratch[i].idx = i;
-    }
+    rankByDistance(center_lat, center_lon, n);
 
     int want = n < ui_manager::RadarConfig::MAX_WAYPOINTS ? n : ui_manager::RadarConfig::MAX_WAYPOINTS;
-    std::partial_sort(g_scratch, g_scratch + want, g_scratch + n,
-                       [](const DistEntry& a, const DistEntry& b) { return a.dist < b.dist; });
+    selectClosest(want, n);
 
     struct Winner { int entry_idx; int slot; };
     static Winner winners[ui_manager::RadarConfig::MAX_WAYPOINTS];
@@ -473,26 +516,44 @@ static int selectAndMaterialize(double center_lat, double center_lon) {
 // just scoped to one waypoint and committing into out_wp instead of
 // ui.waypoints[waypoints_loaded].
 static bool parseOneWaypointAt(FILE* file, ui_manager::Waypoint& out_wp) {
-    char line[512];
-    int line_len = 0;
-
+    // Working buffers (~2.4KB) live on the heap (PSRAM preferred), not on the
+    // System Task's stack. Reference-to-array keeps sizeof() meaning the array.
+    struct ParseBufs {
+        char line[1024];
+        char wpt_lat[32];
+        char wpt_lon[32];
+        char wp_name[48];
+        char wp_display_name[64];
+        char wp_desc[1024];
+        char wp_hint[256];
+    };
+    struct BufsGuard {
+        ParseBufs* p;
+        BufsGuard() : p((ParseBufs*)heap_caps_calloc(1, sizeof(ParseBufs), MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)) {
+            if (!p) p = (ParseBufs*)heap_caps_calloc(1, sizeof(ParseBufs), MALLOC_CAP_8BIT);
+        }
+        ~BufsGuard() { heap_caps_free(p); }
+    } guard;
+    if (!guard.p) {
+        Serial.println("[GPX_LOADER] ERROR: parse buffer alloc failed");
+        return false;
+    }
+    char (&line)[1024] = guard.p->line;
+    char (&wpt_lat)[32] = guard.p->wpt_lat;
+    char (&wpt_lon)[32] = guard.p->wpt_lon;
+    char (&wp_name)[48] = guard.p->wp_name;
+    char (&wp_display_name)[64] = guard.p->wp_display_name;
+    char (&wp_desc)[1024] = guard.p->wp_desc;
+    char (&wp_hint)[256] = guard.p->wp_hint;
     bool in_wpt = false;
-    char wpt_lat[32] = {0};
-    char wpt_lon[32] = {0};
-    char wp_name[48] = {0};
-    char wp_display_name[64] = {0};
-    char wp_desc[1024] = {0};
-    char wp_hint[256] = {0};
     bool in_short_desc = false;
     bool in_long_desc = false;
 
-    int _ch;
+    LineReader lr(file);
     while (true) {
-        _ch = fgetc(file);
-        char c = (_ch == EOF) ? '\n' : (char)_ch;
-
-        if (_ch == EOF || c == '\n' || c == '\r' || line_len >= 511) {
-            line[line_len] = '\0';
+        long line_start_unused;
+        bool at_eof = lr.readLine(line, sizeof(line), &line_start_unused);
+        {
 
             if (strstr(line, "<wpt") && strstr(line, "lat=")) {
                 in_wpt = true;
@@ -670,10 +731,7 @@ static bool parseOneWaypointAt(FILE* file, ui_manager::Waypoint& out_wp) {
                 }
             }
 
-            line_len = 0;
-            if (_ch == EOF) return false;  // hit EOF before </wpt> — truncated/malformed
-        } else {
-            line[line_len++] = c;
+            if (at_eof) return false;  // hit EOF before </wpt> — truncated/malformed
         }
     }
 }
@@ -787,7 +845,6 @@ int parseGPXFile(const char* filepath) {
 
     // Stateful line-by-line parser — tracks context inside <wpt>...</wpt>
     char line[512];  // Larger buffer for geocaching lines (URLs in descriptions)
-    int line_len = 0;
 
     // Per-waypoint state
     bool in_wpt = false;
@@ -802,13 +859,11 @@ int parseGPXFile(const char* filepath) {
 
     // Geocaching.com GPX files end with </wpt></gpx> with NO trailing newline.
     // Treat EOF as a final newline so the last buffered chunk is always processed.
-    int _ch;
+    LineReader lr(file);
     while (waypoints_loaded < ui_manager::RadarConfig::MAX_WAYPOINTS) {
-        _ch = fgetc(file);
-        char c = (_ch == EOF) ? '\n' : (char)_ch;
-
-        if (_ch == EOF || c == '\n' || c == '\r' || line_len >= 511) {
-            line[line_len] = '\0';
+        long line_start_unused;
+        bool at_eof = lr.readLine(line, sizeof(line), &line_start_unused);
+        {
 
             if (strstr(line, "<wpt") && strstr(line, "lat=")) {
                 // New waypoint — reset state
@@ -1000,10 +1055,7 @@ int parseGPXFile(const char* filepath) {
                 }
             }
 
-            line_len = 0;
-            if (_ch == EOF) break;  // Exit after flushing final line (no trailing newline in geocaching GPX)
-        } else {
-            line[line_len++] = c;
+            if (at_eof) break;  // Exit after flushing final line (no trailing newline in geocaching GPX)
         }
     }
 
