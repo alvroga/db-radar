@@ -11,7 +11,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-**B4: RTC survives reboots; bounded boot-failure recovery (2026-11-10, built, not hardware-verified)**
+**B5: GPX upload and OTA safety (2026-11-10, built, not hardware-verified)**
+
+- #9 `upload_handler`: streams to `<gpx>/_upload.tmp` and renames into place only when complete, so a dropped
+  connection, full disk or failed write leaves any existing same-name file intact (before: `fopen(final,"wb")`
+  truncated it immediately, then deleted it on a receive error). `fwrite` and `fclose` are now checked. 4KB internal
+  heap buffer (was 512B on the stack) = 8x fewer FFat writes. Rejects with `507` when `content_len + 32KB` exceeds
+  free space (no credit for a same-name file being replaced; the checked write is the backstop). FATFS `rename`
+  won't overwrite, so the old file is removed just before the rename (a two-metadata-op window; the full new file
+  already sits under the temp name). The temp name has no `.gpx` suffix, so loader/index/list ignore it.
+- #18 `ota_upload_handler`: the one-shot `ota_already_triggered` guard used to be set *before* any work, so one
+  failed upload locked OTA out until a manual reboot. It is now set only after `esp_ota_set_boot_partition`
+  succeeds; a separate `ota_in_progress` flag blocks concurrent POSTs and is cleared on every failure path. Image
+  size is checked against the target partition up front (`413`), and empty uploads are rejected.
+- Still open: `/update` has no authentication.
+- Build: flash +~990 B vs B4 (1,724,051), RAM unchanged.
+
+**B4: RTC survives reboots; bounded boot-failure recovery (2026-11-10, 94efdff; RTC keep verified, GPS sync + fault-inject pending)**
 
 - #10: `initRTC()` used to overwrite the RTC with the *compile time on every boot*, discarding NTP/GPS-synced
   time. New `rtc::set_from_compile_time_if_stale()` seeds only if the RTC is invalid (RAM magic lost / implausible)

@@ -1046,6 +1046,16 @@ static const char OTA_HTML[] =
 // Security helper
 // ============================================================================
 
+// httpd_resp_send_err() only knows a fixed enum (no 413/507), so send an arbitrary status
+// line ourselves. Returns ESP_FAIL so the caller can `return` it directly: a non-OK return from
+// a handler makes httpd close the socket, which also discards the unread request body.
+static esp_err_t send_status_err(httpd_req_t* req, const char* status, const char* msg) {
+    httpd_resp_set_status(req, status);
+    httpd_resp_set_type(req, "text/plain");
+    httpd_resp_send(req, msg, HTTPD_RESP_USE_STRLEN);
+    return ESP_FAIL;
+}
+
 static bool is_safe_filename(const char* name) {
     if (!name || *name == '\0') return false;
     if (strstr(name, "..") != nullptr) return false;
@@ -1163,30 +1173,54 @@ static esp_err_t ota_page_handler(httpd_req_t* req) {
 // One-shot guard — resets on reboot. Prevents a browser retry or stale tab from
 // re-flashing the device after a successful OTA without user intent.
 static bool ota_already_triggered = false;
+// Set while an upload is being received, so two concurrent POSTs can't both write the partition.
+static bool ota_in_progress = false;
 
 static esp_err_t ota_upload_handler(httpd_req_t* req) {
+    // A successful OTA reboots, so this flag is only ever set on the way to esp_restart().
+    // A *failed* attempt must stay retryable: previously the one-shot flag was set before any
+    // work, so one dropped connection locked the device out of OTA until a manual reboot.
     if (ota_already_triggered) {
         Serial.println("[OTA] BLOCKED: second POST ignored — OTA already completed this session");
         httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
                             "OTA already completed. Device is rebooting or has rebooted.");
         return ESP_FAIL;
     }
-    ota_already_triggered = true;
+    if (ota_in_progress) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "An OTA upload is already in progress.");
+        return ESP_FAIL;
+    }
+    ota_in_progress = true;
 
     Serial.printf("[OTA] POST /update - receiving firmware (%d bytes)\n", req->content_len);
 
     const esp_partition_t* update_part = esp_ota_get_next_update_partition(nullptr);
     if (!update_part) {
         Serial.println("[OTA] ERROR: no OTA partition found — check partitions_ota.csv");
+        ota_in_progress = false;
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "No OTA partition");
         return ESP_FAIL;
     }
-    Serial.printf("[OTA] Writing to partition: %s at 0x%x\n",
-                  update_part->label, update_part->address);
+    Serial.printf("[OTA] Writing to partition: %s at 0x%x (size %u)\n",
+                  update_part->label, update_part->address, (unsigned)update_part->size);
+
+    if (req->content_len <= 0) {
+        ota_in_progress = false;
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Empty firmware upload");
+        return ESP_FAIL;
+    }
+    if ((size_t)req->content_len > update_part->size) {
+        Serial.printf("[OTA] REJECTED: image %d B > partition %u B\n", req->content_len,
+                      (unsigned)update_part->size);
+        ota_in_progress = false;
+        return send_status_err(req, "413 Payload Too Large",
+                               "Firmware image is larger than the OTA partition.");
+    }
 
     esp_ota_handle_t ota_handle = 0;
     if (esp_ota_begin(update_part, OTA_WITH_SEQUENTIAL_WRITES, &ota_handle) != ESP_OK) {
         Serial.println("[OTA] ERROR: esp_ota_begin failed");
+        ota_in_progress = false;
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "OTA begin failed");
         return ESP_FAIL;
     }
@@ -1200,12 +1234,14 @@ static esp_err_t ota_upload_handler(httpd_req_t* req) {
         if (n <= 0) {
             Serial.println("[OTA] ERROR: receive error or timeout");
             esp_ota_abort(ota_handle);
+            ota_in_progress = false;
             httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Receive error");
             return ESP_FAIL;
         }
         if (esp_ota_write(ota_handle, buf, (size_t)n) != ESP_OK) {
             Serial.println("[OTA] ERROR: esp_ota_write failed");
             esp_ota_abort(ota_handle);
+            ota_in_progress = false;
             httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Write failed");
             return ESP_FAIL;
         }
@@ -1218,15 +1254,18 @@ static esp_err_t ota_upload_handler(httpd_req_t* req) {
 
     if (esp_ota_end(ota_handle) != ESP_OK) {
         Serial.println("[OTA] ERROR: esp_ota_end failed (bad image?)");
+        ota_in_progress = false;
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "OTA end failed (bad image)");
         return ESP_FAIL;
     }
     if (esp_ota_set_boot_partition(update_part) != ESP_OK) {
         Serial.println("[OTA] ERROR: esp_ota_set_boot_partition failed");
+        ota_in_progress = false;
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Set boot partition failed");
         return ESP_FAIL;
     }
 
+    ota_already_triggered = true;  // success: from here the only way out is the reboot below
     Serial.printf("[OTA] Success - %d bytes flashed. Rebooting into radar mode...\n", written);
 
     // Invalidate stamp + clear WiFi boot flags atomically.
@@ -1278,29 +1317,77 @@ static esp_err_t upload_handler(httpd_req_t* req) {
 
     char filepath[256];
     snprintf(filepath, sizeof(filepath), "%s/%s", GPX_FOLDER, filename);
+    // Written under a temp name and renamed into place only once complete, so a dropped
+    // connection, a full disk or a failed write can never destroy an existing good file or
+    // leave a truncated .gpx behind (the temp name doesn't end in ".gpx", so the loader,
+    // index and list handler all ignore it).
+    char tmppath[256];
+    snprintf(tmppath, sizeof(tmppath), "%s/_upload.tmp", GPX_FOLDER);
 
-    FILE* f = fopen(filepath, "wb");
+    // Free-space check. FAT slack (cluster rounding, wear-levelling) means "free >= size"
+    // isn't enough, so keep a margin. Deliberately conservative for a same-name replace: the
+    // temp copy coexists with the old file until the rename, so the old file's space is NOT
+    // credited. The checked fwrite below remains the real backstop.
+    {
+        uint64_t total_bytes = 0, free_bytes = 0;
+        if (esp_vfs_fat_info("/ffat", &total_bytes, &free_bytes) == ESP_OK) {
+            constexpr uint64_t MARGIN = 32 * 1024;
+            if ((uint64_t)req->content_len + MARGIN > free_bytes) {
+                Serial.printf("[GPX_SERVER] Upload rejected: %s needs %d B, only %llu B free\n",
+                              filename, (int)req->content_len, (unsigned long long)free_bytes);
+                return send_status_err(req, "507 Insufficient Storage",
+                                       "Not enough free space on the device. Delete some GPX files and retry.");
+            }
+        }
+    }
+
+    // Heap buffer: 4KB is too big for the 8KB httpd task stack once the dispatch/lwIP frames
+    // are counted, and larger writes mean far fewer FFat flash operations (each one briefly
+    // stalls both cores -- the cause of the known upload display glitch).
+    constexpr size_t BUF_SIZE = 4096;
+    char* buf = (char*)heap_caps_malloc(BUF_SIZE, MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT);
+    if (!buf) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Out of memory");
+        return ESP_FAIL;
+    }
+
+    remove(tmppath);  // leftover from an interrupted earlier upload, if any
+    FILE* f = fopen(tmppath, "wb");
     if (!f) {
+        free(buf);
         httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Failed to create file");
         return ESP_FAIL;
     }
 
-    char buf[512];
     int remaining = (int)req->content_len;
+    const char* fail_msg = nullptr;
     while (remaining > 0) {
-        int chunk = (remaining < (int)sizeof(buf)) ? remaining : (int)sizeof(buf);
+        int chunk = (remaining < (int)BUF_SIZE) ? remaining : (int)BUF_SIZE;
         int n = httpd_req_recv(req, buf, (size_t)chunk);
-        if (n <= 0) {
-            fclose(f);
-            remove(filepath);
-            httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Receive error");
-            return ESP_FAIL;
-        }
-        fwrite(buf, 1, (size_t)n, f);
+        if (n <= 0) { fail_msg = "Receive error"; break; }
+        if (fwrite(buf, 1, (size_t)n, f) != (size_t)n) { fail_msg = "Write failed (storage full?)"; break; }
         remaining -= n;
     }
-    fclose(f);
+    free(buf);
+    // fclose flushes the last buffered chunk -- a failure here is a failed write too.
+    if (fclose(f) != 0 && !fail_msg) fail_msg = "Write failed (storage full?)";
 
+    if (fail_msg) {
+        remove(tmppath);
+        Serial.printf("[GPX_SERVER] Upload FAILED: %s (%s) -- existing file untouched\n", filename, fail_msg);
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, fail_msg);
+        return ESP_FAIL;
+    }
+
+    // FATFS rename() refuses to overwrite (FR_EXIST), so remove the old file first. The only
+    // window where neither exists is these two metadata ops; the complete new file is already
+    // safely on flash under the temp name.
+    remove(filepath);
+    if (rename(tmppath, filepath) != 0) {
+        Serial.printf("[GPX_SERVER] Upload FAILED: rename %s -> %s\n", tmppath, filepath);
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Could not finalise file");
+        return ESP_FAIL;
+    }
     Serial.printf("[GPX_SERVER] Upload OK: %s (%d bytes)\n", filename, (int)req->content_len);
 
     // Deliberately does NOT reload here — see reload_handler()'s comment. The
