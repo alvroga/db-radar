@@ -313,6 +313,24 @@ arrives and turn it into a field-verified procedure.
 
 ---
 
+### TODO: Hardware-verify the B5 failure paths (GPX upload + OTA) — deferred (2026-11-11)
+
+B5 (ca6813b) made GPX upload write to a temp file and rename into place, added a free-space check, and made a
+failed OTA retryable. Only the normal upload path has been verified on hardware. Still to run, from any terminal
+on the radar's WiFi (AP: `192.168.4.1`; serial output may be dead while WiFi is active, so judge by curl output
+and the portal file list):
+1. **Dropped upload keeps the old file:** upload a small file, start a throttled upload of a big file to the same
+   name (`curl --limit-rate 200k`), Ctrl-C mid-way; the original must still download at its old size.
+2. **Full storage gives 507:** the endpoint caps one file at 5MB, so fill the ~7.59MB with two ~4.9MB uploads;
+   the third must be rejected with `507`, then deleting the fill files restores free space.
+3. **Failed OTA can be retried:** POST a garbage `.bin` to `/update` (must fail without rebooting), then POST a real
+   `firmware.bin` (must be accepted). Optionally an image >4MB must return `413`.
+
+Also still unverified from the same fixes track: `-DBOOT_GUARD_FAULT_TEST` fault injection (B4), compass after
+standby wake, BE-881 compass calibration. Detail: CHANGELOG.md B5 entry.
+
+---
+
 ## Resolved
 
 ### FT-10: Touch Dead/Intermittent on Some Boards — CST820 Auto-Sleep — Resolved (2026-08-21)
