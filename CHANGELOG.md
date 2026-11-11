@@ -11,7 +11,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-**B6: cross-task correctness (2026-11-10, built, not hardware-verified)**
+**B7: GPX loader speed and robustness (2026-11-11, 29208cb, hardware-verified)**
+
+- #15 closest-N ranking (`rankByDistance`/`selectClosest`, `gpx_loader.cpp`): float squared-equirectangular distance
+  instead of per-entry double haversine, `nth_element` instead of `partial_sort`; scratch entry is `float` (was
+  `double`). Measured on hardware: ~1 ms to rank 1,079-1,579 entries, independent of how far the center moves; a
+  full 200-slot reselect costs 111 ms (minified file) to 468 ms (pretty-printed), dominated by FFat re-parsing. No
+  pre-change timing was captured, so no speedup figure is claimed. Entries within the equirectangular error of the
+  200th-closest boundary may swap vs. a haversine oracle (sub-metre at working-set radii).
+- #19 `LineReader`: replaces three copies of the 511-char line loop. A full buffer now splits without dropping the
+  char; a line also ends after any `>` directly followed by `<`, so minified single-line GPX works (578-waypoint
+  one-line Barcelona file indexed fully and materialized 200/200 slots). `parseOneWaypointAt`'s ~2.4KB of buffers
+  moved from the System Task stack to PSRAM heap (line buffer 512 -> 1024). SYS task free-stack minimum after a
+  full reselect: 3,344 B (no pre-change baseline).
+- Build: flash 1,725,115 B (+308 vs B6), RAM 168,488 B (unchanged). Not checked: waypoint name shown on tap for a
+  Barcelona point.
+
+**B6: cross-task correctness (2026-11-10, 45abf2c; hardware-verified 2026-11-11)**
 
 - #6 `attemptTaskRecovery()` (vTaskSuspend/Resume of a "hung" task) removed: it cannot unblock a task waiting on a
   mutex/driver call and could suspend one *holding* the I2C or display mutex. Replaced by `logTaskStall()` (state,
