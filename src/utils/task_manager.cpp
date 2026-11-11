@@ -1486,7 +1486,17 @@ static void updateStatusLabels() {
             // First fix (updates_received <= 1) is always allowed to establish initial position
             constexpr float MAX_HDOP_ACCEPT = 10.0f;
             bool hdop_acceptable = isnan(gps_data.hdop) || gps_data.hdop <= MAX_HDOP_ACCEPT;
-            gps_position_valid = gps_position_valid && (quality.updates_received <= 1 || hdop_acceptable);
+            // The first-fix exemption must key on "first VALID fix", not "first sample":
+            // updates_received counts every sample including empty ones (0 sats), so it is
+            // long past 1 by the time a cold start (e.g. after travelling far from the last
+            // saved fix) produces its first real solution -- often with HDOP > 10 for a
+            // while. Rejecting that left last_gps_data invalid: UI stuck on "Searching",
+            // position never updated, module LED blinking, until a reboot got a hot start.
+            static bool s_have_accepted_fix = false;
+            const bool first_valid_fix = gps_data.valid && !s_have_accepted_fix;
+            gps_position_valid = gps_position_valid &&
+                                 (quality.updates_received <= 1 || hdop_acceptable || first_valid_fix);
+            if (gps_data.valid && gps_position_valid) s_have_accepted_fix = true;
             // Rejection logging is edge-triggered + throttled, never once-per-sample.
             //
             // Sampling runs at 10Hz (GPS_UPDATE_INTERVAL_MS = 100), and a poor-sky condition
@@ -1532,8 +1542,8 @@ static void updateStatusLabels() {
                     if (!s_reported_rejecting && s_consec_bad >= STABLE_SAMPLES) {
                         s_reported_rejecting = true;
                         s_last_reject_log    = now;
-                        Serial.printf("[GPS] REJECTED (%s): HDOP=%.1f (>%.0f) — holding last good position\n",
-                                      reason, gps_data.hdop, MAX_HDOP_ACCEPT);
+                        Serial.printf("[GPS] REJECTED (%s): HDOP=%.1f (>%.0f) sats=%d valid=%d — holding last good position\n",
+                                      reason, gps_data.hdop, MAX_HDOP_ACCEPT, gps_data.sats, (int)gps_data.valid);
                     } else if (s_reported_rejecting && (now - s_last_reject_log >= REJECT_LOG_INTERVAL_MS)) {
                         s_last_reject_log = now;
                         Serial.printf("[GPS] REJECTED (%s): still poor, %lu samples, HDOP=%.1f\n",
@@ -1788,8 +1798,10 @@ static void updateStatusLabels() {
                     s_last_compass_read = compass_now;
 
                     CompassData compass_data;
+                    static uint32_t s_nodata_since = 0;  // start of current "no new sample" streak
                     if (compass_qmc5883l::read(compass_data)) {
                         s_compass_fail_count = 0;
+                        s_nodata_since = 0;
                         device_manager::DeviceState& mutable_state = const_cast<device_manager::DeviceState&>(compass_dev_state);
                         mutable_state.last_compass_data = compass_data;
 
@@ -1823,12 +1835,34 @@ static void updateStatusLabels() {
                             upd.timestamp = compass_now;
                             queueUIUpdate(upd);
                         }
+                    } else if (compass_qmc5883l::lastReadWasNoData()) {
+                        // Bus is fine, chip just has no new sample yet (DRDY clear). Not a
+                        // fault: don't count it toward the soft-reset trigger. Track how long
+                        // it has been stuck so a chip that NEVER reports data is still caught.
+                        if (s_nodata_since == 0) s_nodata_since = compass_now;
+                        if (compass_now - s_nodata_since > 2000) {
+                            s_nodata_since = 0;
+                            s_compass_fail_count = 5;  // fall through to the reset path next tick
+                        }
                     } else {
                         s_compass_fail_count++;
-                        if (s_compass_fail_count >= 5) {
-                            Serial.println("[COMPASS] 5 consecutive failures — attempting soft reset");
-                            s_compass_fail_count = 0;
+                    }
+                    if (s_compass_fail_count >= 5) {
+                        // Rate-limited: this path used to print + reset ~10x/second when the
+                        // chip never recovered (seen after standby wake), flooding serial and
+                        // loading the shared I2C bus the touch controller is on.
+                        static uint32_t s_last_compass_reset_log = 0;
+                        static uint32_t s_suppressed_resets = 0;
+                        s_compass_fail_count = 0;
+                        if (compass_now - s_last_compass_reset_log >= 10000 || s_last_compass_reset_log == 0) {
+                            Serial.printf("[COMPASS] 5 consecutive failures — soft reset (status=0x%02X, no_data=%d, %lu more resets suppressed)\n",
+                                          compass_qmc5883l::lastStatus(), (int)compass_qmc5883l::lastReadWasNoData(),
+                                          (unsigned long)s_suppressed_resets);
+                            s_last_compass_reset_log = compass_now;
+                            s_suppressed_resets = 0;
                             compass_qmc5883l::reset();
+                        } else {
+                            s_suppressed_resets++;  // back off: at most one reset per 10s
                         }
                     }
 

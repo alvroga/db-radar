@@ -135,14 +135,18 @@ void debugPrintStatus() {
     Serial.println("====================================");
 }
 
-bool readRaw(int16_t& x, int16_t& y, int16_t& z, bool& overflow) {
+bool readRaw(int16_t& x, int16_t& y, int16_t& z, bool& overflow, bool* no_data, uint8_t* status_out) {
+    if (no_data) *no_data = false;
+    if (status_out) *status_out = 0xFF;
     if (!initialized) return false;
 
     uint8_t status = 0;
     if (!i2c_manager::readByte(i2c_manager::COMPASS_DEVICE_QMCP, REG_STATUS, status)) {
         return false;
     }
+    if (status_out) *status_out = status;
     if (!(status & STATUS_DRDY)) {
+        if (no_data) *no_data = true;
         return false;  // No new data available
     }
 

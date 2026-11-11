@@ -47,6 +47,11 @@ namespace compass_qmc5883l {
     bool begin(ChipType chip = ChipType::QMC5883L);  // Init the given chip; see compass_hmc5883l.h for the HMC5883L register differences
     bool reset();                    // Soft-reset chip then re-run begin() for whichever ChipType was last passed to begin() (recovers from I2C bus collisions)
     bool read(CompassData& out);     // Read XYZ, compute heading, check status
+    // After a read() that returned false: true if it was only "no new sample yet" (bus fine,
+    // DRDY clear) rather than a bus/communication fault. Callers must not count it as a failure.
+    bool lastReadWasNoData();
+    // Status register byte from the most recent read() (0xFF = the status read itself failed).
+    uint8_t lastStatus();
     bool isReady();                  // Check data-ready bit in STATUS register
 
     // Which chip begin() was last told to talk to. For callers outside this dispatch

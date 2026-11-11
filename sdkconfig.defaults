@@ -16,6 +16,9 @@ CONFIG_ESPTOOLPY_FLASHFREQ_80M=y
 # suspend/resume opcode; on a chip that doesn't, this is a plausible and sufficient cause of
 # that crash. Given it never fixed the problem it was added for, there's no upside left to
 # balance against that risk. Do not re-add without a specific reason and a fresh field test.
+# CONFIG_LCD_RGB_RESTART_IN_VSYNC — tried 2026-11-10 (reset the RGB GDMA channel every VBlank) as a
+# fix for the GPX-upload display glitch; field result: glitch unchanged, display felt glitchier in
+# general. Reverted. Do not re-add without a new reason (see ADR-0028 verification section).
 CONFIG_SPIRAM=y
 CONFIG_SPIRAM_MODE_OCT=y
 CONFIG_SPIRAM_SPEED_80M=y

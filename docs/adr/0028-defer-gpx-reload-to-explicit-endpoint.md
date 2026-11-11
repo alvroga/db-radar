@@ -85,3 +85,11 @@ may still be reducing frequency or severity to some degree; this wasn't isolated
 separately from the O(N²) fix in the same test, so no claim is made either way. The corruption is
 now being treated as accepted, expected behavior (documented in the UI) rather than something to
 keep pursuing.
+
+**Second attempt, 2026-11-10: `CONFIG_LCD_RGB_RESTART_IN_VSYNC=y` — no improvement, reverted.** Reasoning
+at the time: the option resets the RGB panel's GDMA channel every VBlank, which should make a
+flash-write-induced DMA desync self-heal within a frame. Same GPX upload/delete on hardware before and
+after: the glitch during upload was unchanged, and the display felt glitchier overall. Reverted the
+same day; `sdkconfig.defaults` keeps a comment so it isn't retried without a new reason. The remaining
+untried option is running the DMA refill path from IRAM/internal RAM (`CONFIG_LCD_RGB_ISR_IRAM_SAFE`,
+parked in the 2026-11-10 fixes plan).

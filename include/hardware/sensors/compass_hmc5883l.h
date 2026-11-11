@@ -22,7 +22,10 @@ namespace compass_hmc5883l {
     // see the comment in the .cpp). overflow is true if any axis hit the ADC's saturation
     // sentinel (-4096 per datasheet), not a hardware-reported single-bit flag like the
     // QMC5883L's STATUS_OVL.
-    bool readRaw(int16_t& x, int16_t& y, int16_t& z, bool& overflow);
+    // no_data (optional): set true when the bus read worked but the chip has no new sample
+    // (DRDY clear) -- NOT a fault. status_out (optional): last status byte read, 0xFF on bus error.
+    bool readRaw(int16_t& x, int16_t& y, int16_t& z, bool& overflow,
+                 bool* no_data = nullptr, uint8_t* status_out = nullptr);
 
     // Prints chip presence/ID/config/status for the 'compass status' serial command.
     // Self-contained (doesn't expose this file's register map) — diagnostics.cpp just

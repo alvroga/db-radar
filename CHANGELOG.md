@@ -9,6 +9,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+**B2 result: `CONFIG_LCD_RGB_RESTART_IN_VSYNC` did not fix the GPX-upload glitch — reverted (2026-11-10)**
+
+Hardware A/B with the same upload/delete: glitch unchanged, display felt glitchier overall. Reverted;
+details in ADR-0028's verification section.
+
+**GPS: first valid fix is no longer rejected by the HDOP gate (2026-11-10, built, not hardware-verified)**
+
+Symptom (field): module LED blinking (fix) but UI stuck on "GPS: Searching..." and position never updated
+until a reboot, after travelling ~9,000 km from the last saved fix (cold start). Cause: the HDOP>10
+rejection (`task_manager.cpp`) was exempt only for `quality.updates_received <= 1`, but that counter
+counts every sample including empty ones, so the exemption was gone before the first real solution
+arrived; a cold start's early fixes often have HDOP>10, so every sample was rejected and
+`last_gps_data` never became valid. Now the first valid fix is always accepted. The `REJECTED` log line
+also prints sats/valid. Not changed (noted): `gps_quality::update()` sets `position_stable` from the
+input's jump flag instead of the one it just computed, so the position-jump rejection never fires;
+enabling it is a behaviour change that needs its own test.
+
+**Compass failure/reset loop no longer floods serial or the I2C bus (2026-11-10, built, not hardware-verified)**
+
+After a standby wake with a BE-881 the compass reported 5 failures every ~100ms, each triggering a soft
+reset and 4 serial lines (~10 resets/s). `read()` returned `false` for both bus errors and "no new sample
+yet" (DRDY clear) and the System Task counted both as failures. Now: no-data is tracked separately
+(`compass_qmc5883l::lastReadWasNoData()`/`lastStatus()`), only counts toward a reset after 2s of
+continuous no-data, resets are limited to one per 10s, and the log line shows the status byte plus how
+many resets were suppressed. **Root cause of the post-wake failure found the same day**: `compass_qmc5883l::reset()`'s QMC5883P
+branch set the dispatcher's `initialized = false`, re-initialised the chip, and never set it back, so
+every later `read()` returned false at its first line (log showed `status=0xFF, no_data=0`, and
+`i2c_fails=0` because no transaction was attempted). Every standby wake on a BE-881 therefore left the
+compass dead until reboot. Fixed with `initialized = ok;`. The throttling/no-data split stays as a
+safety net.
+
 ### Added
 
 **B1: observability + honest standby docs (2026-11-10, built, not yet hardware-verified)**

@@ -127,6 +127,11 @@ bool reset() {
         // that duplicating the sequence here would just be another place to get it wrong.
         initialized = false;
         bool ok = compass_qmc5883p::reset();
+        // Must be restored here: this dispatcher's `initialized` gates read(), and only
+        // begin() sets it. Without this, any reset (incl. the one standby wake does) left
+        // read() returning false forever on a BE-881 -- a dead compass that re-triggered
+        // the 5-failure reset loop every ~100ms.
+        initialized = ok;
         return ok;
     }
 
@@ -159,15 +164,22 @@ bool isReady() {
     return (status & STATUS_DRDY) != 0;
 }
 
+static bool g_last_no_data = false;
+static uint8_t g_last_status = 0xFF;
+bool lastReadWasNoData() { return g_last_no_data; }
+uint8_t lastStatus() { return g_last_status; }
+
 bool read(CompassData& out) {
+    g_last_no_data = false;
+    g_last_status = 0xFF;
     if (!initialized) return false;
 
     if (active_chip == ChipType::HMC5883L) {
-        if (!compass_hmc5883l::readRaw(out.x_raw, out.y_raw, out.z_raw, out.overflow)) {
+        if (!compass_hmc5883l::readRaw(out.x_raw, out.y_raw, out.z_raw, out.overflow, &g_last_no_data, &g_last_status)) {
             return false;
         }
     } else if (active_chip == ChipType::QMC5883P) {
-        if (!compass_qmc5883p::readRaw(out.x_raw, out.y_raw, out.z_raw, out.overflow)) {
+        if (!compass_qmc5883p::readRaw(out.x_raw, out.y_raw, out.z_raw, out.overflow, &g_last_no_data, &g_last_status)) {
             return false;
         }
     } else {
@@ -177,7 +189,9 @@ bool read(CompassData& out) {
             return false;
         }
 
+        g_last_status = status;
         if (!(status & STATUS_DRDY)) {
+            g_last_no_data = true;
             return false;  // No new data available
         }
 

@@ -24,7 +24,10 @@ namespace compass_qmc5883p {
     // Raw axis values, already in X/Y/Z order (data registers 0x01-0x06 are natively
     // X,Y,Z — no reordering needed, unlike the HMC5883L). overflow is the hardware OVFL
     // bit (status register 0x09, bit1).
-    bool readRaw(int16_t& x, int16_t& y, int16_t& z, bool& overflow);
+    // no_data (optional): set true when the bus read worked but the chip has no new sample
+    // (DRDY clear) -- NOT a fault. status_out (optional): last status byte read, 0xFF on bus error.
+    bool readRaw(int16_t& x, int16_t& y, int16_t& z, bool& overflow,
+                 bool* no_data = nullptr, uint8_t* status_out = nullptr);
 
     // Prints chip presence/ID/mode/range/status for the 'compass status' serial command.
     // Self-contained (doesn't expose this file's register map) — diagnostics.cpp just
