@@ -29,6 +29,7 @@
 #include "hardware/sensors/battery.h"
 #include "utils/watchdog.h"
 #include "utils/boot_info.h"
+#include "utils/boot_guard.h"
 #include "hardware/connectivity/beacon_proximity.h"
 
 // Pumps LVGL alongside a loading-screen status update, so the boot spinner keeps
@@ -202,7 +203,7 @@ extern "C" void app_main() {
     device_manager::Config dev_config;
     if (!device_manager::initializeAll(dev_config)) {
         Serial.println("[ERROR] Device initialization failed");
-        while (1) { delay(1000); }
+        boot_guard::fatal("device initialization failed");
     }
     Serial.printf("[T+%08lu] BOOT: Phase 2 - Hardware initialized\n", millis());
 
@@ -318,7 +319,7 @@ extern "C" void app_main() {
     if (!ui_manager::init(ui_config)) {
         Serial.println("[ERROR] UI initialization failed");
         system_logger::error("BOOT", "UI manager initialization FAILED");
-        while (1) { delay(1000); }
+        boot_guard::fatal("UI manager init failed");
     }
     system_logger::info("BOOT", "Phase 6 - UI manager initialized");
 
@@ -378,7 +379,7 @@ extern "C" void app_main() {
         setLoadingStatus("Calibrating compass...");
         if (!navigation::init()) {
             Serial.println("[ERROR] Navigation initialization failed");
-            while (1) { delay(1000); }
+            boot_guard::fatal("navigation init failed");
         }
     } else {
         Serial.println("[MAIN] WiFi boot mode — skipping settings screen and navigation init");
@@ -389,7 +390,7 @@ extern "C" void app_main() {
     diagnostics::Config diag_config;
     if (!diagnostics::init(diag_config)) {
         Serial.println("[ERROR] Diagnostics initialization failed");
-        while (1) { delay(1000); }
+        boot_guard::fatal("diagnostics init failed");
     }
 
     // Initialize standby manager
@@ -518,7 +519,7 @@ extern "C" void app_main() {
     if (!task_manager::init()) {
         Serial.println("[ERROR] Task manager initialization failed");
         system_logger::error("BOOT", "Task manager init FAILED");
-        while (1) { delay(1000); }
+        boot_guard::fatal("task manager init failed");
     }
     Serial.println("[TASK] Task manager initialized successfully");
     system_logger::info("BOOT", "Task manager queues and mutexes created");
@@ -536,7 +537,7 @@ extern "C" void app_main() {
     if (!task_manager::startTasks()) {
         Serial.println("[ERROR] Failed to start tasks");
         system_logger::error("BOOT", "FreeRTOS tasks start FAILED");
-        while (1) { delay(1000); }
+        boot_guard::fatal("task start failed");
     }
     Serial.println("[TASK] FreeRTOS tasks started successfully");
     system_logger::info("BOOT", "Phase 9 - All FreeRTOS tasks started");
@@ -597,6 +598,7 @@ extern "C" void app_main() {
     // reverts to the previous partition on the next reboot.
     esp_ota_mark_app_valid_cancel_rollback();
     Serial.printf("[OTA] Firmware %s marked valid — rollback cancelled\n", FW_VERSION);
+    boot_guard::markBootOk();  // reset the consecutive-failed-boot counter
 
     // Tasks own everything — app_main releases its 8KB stack
     Serial.println("[MAIN] FreeRTOS tasks running — app_main exiting");

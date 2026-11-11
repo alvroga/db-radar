@@ -20,6 +20,10 @@ bool begin(uint8_t i2c_addr = 0x51);
 bool read(Time& t);
 bool set(const Time& t);
 bool set_from_compile_time();
+// Seeds the RTC from the build time ONLY if it is invalid (never set / lost power) or more than
+// 24h older than the build (freshly flashed with a stale RTC). A valid, newer RTC is left alone,
+// so synced time survives reboots. Returns false only if the RTC could not be read AND written.
+bool set_from_compile_time_if_stale(bool* was_set = nullptr);
 bool set_from_epoch(uint32_t epoch, int tz_offset_minutes = 0);
 bool is_initialized();
 void clear_initialized();

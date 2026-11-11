@@ -80,7 +80,7 @@ void clear_initialized() {
     i2c_manager::write(i2c_manager::RTC_DEVICE, REG_RAM, &z, 1);
 }
 
-bool set_from_compile_time() {
+static bool compile_time(Time& t) {
     char mon[4]; int dd, yy; int hh, mm, ss;
     if (sscanf(__DATE__, "%3s %d %d", mon, &dd, &yy) != 3) return false;
     if (sscanf(__TIME__, "%d:%d:%d", &hh, &mm, &ss) != 3)   return false;
@@ -89,8 +89,46 @@ bool set_from_compile_time() {
     const char* p = strstr(names, mon);
     int mo = p ? (int)((p - names)/3 + 1) : 1;
 
-    Time t{yy, mo, dd, hh, mm, ss, 0, true};
+    t = Time{yy, mo, dd, hh, mm, ss, 0, true};
+    return true;
+}
+
+// Seconds since 2000-01-01 (civil calendar, no timezone) -- only used to compare two Times.
+static int64_t seconds_key(const Time& t) {
+    int y = t.year, m = t.month;
+    y -= (m <= 2);
+    int64_t era = (y >= 0 ? y : y - 399) / 400;
+    int64_t yoe = y - era * 400;
+    int64_t doy = (153 * (m + (m > 2 ? -3 : 9)) + 2) / 5 + t.day - 1;
+    int64_t doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+    int64_t days = era * 146097 + doe;
+    return days * 86400 + t.hour * 3600 + t.minute * 60 + t.second;
+}
+
+bool set_from_compile_time() {
+    Time t{};
+    if (!compile_time(t)) return false;
     return set(t);
+}
+
+bool set_from_compile_time_if_stale(bool* was_set) {
+    if (was_set) *was_set = false;
+    Time build{};
+    if (!compile_time(build)) return false;
+
+    Time now{};
+    // read() is valid only if the time is plausible AND the RAM magic survived (i.e. the RTC
+    // kept power since it was last set). Dead coin cell / first boot -> invalid -> seed it.
+    if (read(now) && now.valid) {
+        // 24h tolerance: the build host's clock is in its own timezone, while the RTC may
+        // hold NTP/GPS-synced time for another one (up to +-14h apart). Without slack, a
+        // correctly-set RTC could look "older than the build" and be overwritten.
+        constexpr int64_t SKEW_S = 24 * 3600;
+        if (seconds_key(now) + SKEW_S >= seconds_key(build)) return true;  // keep it
+    }
+    bool ok = set(build);
+    if (ok && was_set) *was_set = true;
+    return ok;
 }
 
 bool set_from_epoch(uint32_t epoch, int tz_offset_minutes) {

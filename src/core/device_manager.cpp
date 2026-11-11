@@ -1,4 +1,5 @@
 #include "device_manager.h"
+#include "utils/boot_guard.h"
 #include "system_config.h"
 #include "lcd_st7701.h"
 #include "cst820.h"
@@ -127,10 +128,15 @@ bool initializeAll(const Config& config) {
     static i2c_manager::exio::State exio_state;  // Static to persist across function calls
     g_device_state.exio_ok = initEXIO(exio_state);
     g_device_state.exio_state = &exio_state;
+#ifdef BOOT_GUARD_FAULT_TEST
+    // Fault injection for boot_guard: build with -DBOOT_GUARD_FAULT_TEST to force this halt
+    // path (expect 3 reboots, then a permanent halt message every 5s).
+    g_device_state.exio_ok = false;
+#endif
     if (!g_device_state.exio_ok) {
         Serial.println("[ERROR] EXIO initialization failed - SYSTEM HALTED");
         Serial.println("[ERROR] This will cause buzzer stuck ON and no LCD display");
-        while(1) { delay(1000); } // Halt system to prevent damage
+        boot_guard::fatal("IO expander init failed");  // bounded reboot-retry, then halt
     }
     Serial.printf("[DEVICE] EXIO initialization complete, final state: 0x%02X\n", exio_state.out);
 
@@ -281,11 +287,15 @@ bool initEXIO(i2c_manager::exio::State& state) {
 bool initRTC() {
     rtc::begin(0x51);
 
-    // Always update RTC with compile time to ensure current time
-    if (rtc::set_from_compile_time()) {
-        Serial.println("[RTC] Updated from compile time");
+    // Seed from compile time only if the RTC is invalid or stale; never clobber a valid,
+    // synced time on every boot (that threw away NTP/GPS time and skewed the GPS hot/warm
+    // start age below).
+    bool seeded = false;
+    if (rtc::set_from_compile_time_if_stale(&seeded)) {
+        Serial.println(seeded ? "[RTC] Invalid/stale - seeded from compile time"
+                              : "[RTC] Valid time kept");
     } else {
-        Serial.println("[RTC] Failed to set from compile time");
+        Serial.println("[RTC] Failed to read or set RTC");
         return false;
     }
 
@@ -372,7 +382,9 @@ bool initGPS() {
             current_time = mktime(&tm_time);
         }
 
-        if (current_time > 0 && saved_fix_time > 0) {
+        // RTC earlier than the saved fix means the clock is untrustworthy (seeded/unsynced);
+        // treat it like "RTC unavailable" (warm start) rather than guessing an age.
+        if (current_time > 0 && saved_fix_time > 0 && current_time >= saved_fix_time) {
             uint32_t seconds_since_fix = current_time - saved_fix_time;
             uint32_t hours_since_fix = seconds_since_fix / 3600;
 
@@ -389,7 +401,7 @@ bool initGPS() {
                 Serial.println("[GPS] Data >24h old - cold start (TTFF ~28s)");
             }
         } else {
-            Serial.println("[GPS] RTC unavailable - warm start with saved position");
+            Serial.println("[GPS] RTC unavailable/behind saved fix - warm start with saved position");
             gps_bh880::warmStart();
         }
 

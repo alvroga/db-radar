@@ -11,7 +11,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-**B3: atomic IO-expander output + I2C failure logging off the bus lock (2026-11-10, built, not hardware-verified)**
+**B4: RTC survives reboots; bounded boot-failure recovery (2026-11-10, built, not hardware-verified)**
+
+- #10: `initRTC()` used to overwrite the RTC with the *compile time on every boot*, discarding NTP/GPS-synced
+  time. New `rtc::set_from_compile_time_if_stale()` seeds only if the RTC is invalid (RAM magic lost / implausible)
+  or >24h older than the build (24h slack covers build-host vs. local timezone skew).
+- GPS hot/warm-start age (`device_manager::initGPS`): the RTC is now only trusted if it is not behind the saved
+  fix; otherwise warm start. Previously `current_time - saved_fix_time` was an unsigned subtraction that wrapped
+  when the RTC was behind (always the case right after the old compile-time overwrite) and forced a cold start.
+  Known, left alone: the saved fix time is GPS-UTC while the RTC is local time, so the age can be off by the
+  timezone offset (only matters at the 4h/24h thresholds).
+- #7: the seven boot `while (1) { delay(1000); }` halts now call `boot_guard::fatal()`: reboot (2s delay) up to
+  3 consecutive times, then halt with a repeating message. Counter is `RTC_NOINIT_ATTR` (survives `esp_restart`,
+  reset by power cycle, no NVS needed at the earliest halt site); cleared by `boot_guard::markBootOk()` at the end
+  of a successful boot. Fault injection: build with `-DBOOT_GUARD_FAULT_TEST` (forces the EXIO halt path).
+- Build: flash +1,188 B (1,723,063), RAM unchanged.
+
+**B3: atomic IO-expander output + I2C failure logging off the bus lock (2026-11-10, hardware-verified, 0e11469)**
 
 - `i2c_manager::exio` now owns one shadow of the OUTPUT register; new `update(mask,bits)`, `pulseLow(pin,ms)`,
   `shadow()`, `readOutputChecked()`. `buzzer.cpp` no longer re-reads the register before each set;
