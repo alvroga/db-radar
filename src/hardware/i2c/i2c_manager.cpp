@@ -268,14 +268,15 @@ bool init(const Config& config) {
 bool read(DeviceHandle& dev, uint8_t reg, uint8_t* data, size_t len, int retries) {
     if (dev._handle == nullptr) return false;
 
-    g_stats.total_ops++;
-
     // Serialize all bus access — prevents UI Task (touch) colliding with System Task (compass)
     if (g_bus_mutex == nullptr ||
         xSemaphoreTakeRecursive(g_bus_mutex, pdMS_TO_TICKS(200)) != pdTRUE) {
-        g_stats.failed_ops++;
+        // No lock held here, so use atomics for the two counters that can move concurrently.
+        __atomic_fetch_add(&g_stats.total_ops, 1, __ATOMIC_RELAXED);
+        __atomic_fetch_add(&g_stats.failed_ops, 1, __ATOMIC_RELAXED);
         return false;
     }
+    g_stats.total_ops++;
 
     bool success = false;
     esp_err_t last_err = ESP_OK;
@@ -302,9 +303,24 @@ bool read(DeviceHandle& dev, uint8_t reg, uint8_t* data, size_t len, int retries
         last_err = err;
     }
 
-    // Latency watch: a transaction taking >20ms is the earliest signal of a
-    // degrading (not yet fully wedged) bus — log it regardless of outcome.
-    // See docs/i2c.md, "Known Historical Issues" (FT-06 freeze investigation).
+    // Counters are updated while still holding the bus mutex (they used to be bumped after
+    // releasing it, racing every other task). Logging is deliberately AFTER the release:
+    // system_logger can do SD I/O, and doing that while holding the bus lock stalled every
+    // other I2C user (touch, compass, buzzer) for the duration of a failure log.
+    recordDeviceOp(dev, success, total_us);
+    uint32_t consec_after;
+    if (!success) {
+        g_stats.failed_ops++;
+        consec_after = ++g_stats.consecutive_failures;
+    } else {
+        g_stats.consecutive_failures = 0;
+        consec_after = 0;
+    }
+    xSemaphoreGiveRecursive(g_bus_mutex);
+
+    // Latency watch: a transaction taking >20ms is the earliest signal of a degrading (not yet
+    // fully wedged) bus -- log it regardless of outcome. See docs/i2c.md, "Known Historical
+    // Issues" (FT-06 freeze investigation).
     if (total_us > 20000) {
         system_logger::logf(system_logger::Level::WARN, "I2C",
             "SLOW %s reg=0x%02X %s dur=%luus task=%s",
@@ -319,16 +335,7 @@ bool read(DeviceHandle& dev, uint8_t reg, uint8_t* data, size_t len, int retries
         system_logger::logf(system_logger::Level::WARN, "I2C",
             "FAIL %s reg=0x%02X read err=%s dur=%luus task=%s consec=%lu",
             dev.name, reg, esp_err_to_name(last_err), (unsigned long)total_us,
-            pcTaskGetName(nullptr), (unsigned long)(g_stats.consecutive_failures + 1));
-    }
-
-    recordDeviceOp(dev, success, total_us);
-    xSemaphoreGiveRecursive(g_bus_mutex);
-    if (!success) {
-        g_stats.failed_ops++;
-        g_stats.consecutive_failures++;
-    } else {
-        g_stats.consecutive_failures = 0;
+            pcTaskGetName(nullptr), (unsigned long)consec_after);
     }
     return success;
 }
@@ -344,13 +351,13 @@ bool write(DeviceHandle& dev, uint8_t reg, const uint8_t* data, size_t len, int 
     buf[0] = reg;
     memcpy(buf + 1, data, len);
 
-    g_stats.total_ops++;
-
     if (g_bus_mutex == nullptr ||
         xSemaphoreTakeRecursive(g_bus_mutex, pdMS_TO_TICKS(200)) != pdTRUE) {
-        g_stats.failed_ops++;
+        __atomic_fetch_add(&g_stats.total_ops, 1, __ATOMIC_RELAXED);
+        __atomic_fetch_add(&g_stats.failed_ops, 1, __ATOMIC_RELAXED);
         return false;
     }
+    g_stats.total_ops++;
 
     bool success = false;
     esp_err_t last_err = ESP_OK;
@@ -376,7 +383,24 @@ bool write(DeviceHandle& dev, uint8_t reg, const uint8_t* data, size_t len, int 
         last_err = err;
     }
 
-    // Latency watch — see the matching comment in read() above.
+    // Counters are updated while still holding the bus mutex (they used to be bumped after
+    // releasing it, racing every other task). Logging is deliberately AFTER the release:
+    // system_logger can do SD I/O, and doing that while holding the bus lock stalled every
+    // other I2C user (touch, compass, buzzer) for the duration of a failure log.
+    recordDeviceOp(dev, success, total_us);
+    uint32_t consec_after;
+    if (!success) {
+        g_stats.failed_ops++;
+        consec_after = ++g_stats.consecutive_failures;
+    } else {
+        g_stats.consecutive_failures = 0;
+        consec_after = 0;
+    }
+    xSemaphoreGiveRecursive(g_bus_mutex);
+
+    // Latency watch: a transaction taking >20ms is the earliest signal of a degrading (not yet
+    // fully wedged) bus -- log it regardless of outcome. See docs/i2c.md, "Known Historical
+    // Issues" (FT-06 freeze investigation).
     if (total_us > 20000) {
         system_logger::logf(system_logger::Level::WARN, "I2C",
             "SLOW %s reg=0x%02X %s dur=%luus task=%s",
@@ -391,16 +415,7 @@ bool write(DeviceHandle& dev, uint8_t reg, const uint8_t* data, size_t len, int 
         system_logger::logf(system_logger::Level::WARN, "I2C",
             "FAIL %s reg=0x%02X write err=%s dur=%luus task=%s consec=%lu",
             dev.name, reg, esp_err_to_name(last_err), (unsigned long)total_us,
-            pcTaskGetName(nullptr), (unsigned long)(g_stats.consecutive_failures + 1));
-    }
-
-    recordDeviceOp(dev, success, total_us);
-    xSemaphoreGiveRecursive(g_bus_mutex);
-    if (!success) {
-        g_stats.failed_ops++;
-        g_stats.consecutive_failures++;
-    } else {
-        g_stats.consecutive_failures = 0;
+            pcTaskGetName(nullptr), (unsigned long)consec_after);
     }
     return success;
 }
@@ -581,6 +596,11 @@ const Stats& getStats() { return g_stats; }
 // ============================================================================
 namespace exio {
 
+// Single source of truth for the TCA9554 OUTPUT register. Only changed under g_bus_mutex, and
+// only after a successful write, so a failed write can never leave it claiming a pin state the
+// hardware doesn't have (which a later unrelated update() would then silently apply).
+static uint8_t g_exio_shadow = 0xFF;
+
 bool begin(State& state) {
     Serial.println("[EXIO] Starting initialization...");
 
@@ -598,24 +618,55 @@ bool begin(State& state) {
         state.out = 0xFF;
     }
 
+    g_exio_shadow = state.out;
     Serial.printf("[EXIO] Initialized, state: 0x%02X\n", state.out);
     return true;
 }
 
+bool update(uint8_t mask, uint8_t bits) {
+    if (g_bus_mutex == nullptr ||
+        xSemaphoreTakeRecursive(g_bus_mutex, pdMS_TO_TICKS(200)) != pdTRUE) return false;
+    uint8_t next = (uint8_t)((g_exio_shadow & ~mask) | (bits & mask));
+    bool ok = writeByte(EXIO_DEVICE, REG_OUTPUT, next);
+    if (ok) g_exio_shadow = next;
+    xSemaphoreGiveRecursive(g_bus_mutex);
+    return ok;
+}
+
 bool set(Pin pin, bool high, State& state) {
     if (pin > 7) return false;
+    uint8_t m = (uint8_t)(1u << pin);
+    bool ok = update(m, high ? m : 0);
+    state.out = g_exio_shadow;
+    return ok;
+}
 
-    if (high) {
-        state.out |= (1u << pin);
-    } else {
-        state.out &= ~(1u << pin);
-    }
+bool pulseLow(Pin pin, uint32_t low_ms) {
+    if (pin > 7) return false;
+    if (g_bus_mutex == nullptr ||
+        xSemaphoreTakeRecursive(g_bus_mutex, pdMS_TO_TICKS(200)) != pdTRUE) return false;
+    uint8_t m = (uint8_t)(1u << pin);
+    bool ok = update(m, 0);
+    vTaskDelay(pdMS_TO_TICKS(low_ms));
+    // Always attempt to release the line, even if asserting it failed.
+    ok &= update(m, m);
+    xSemaphoreGiveRecursive(g_bus_mutex);
+    return ok;
+}
 
-    return writeByte(EXIO_DEVICE, REG_OUTPUT, state.out);
+uint8_t shadow() { return g_exio_shadow; }
+
+bool readOutputChecked(uint8_t& readback, uint8_t& shadow_out) {
+    if (g_bus_mutex == nullptr ||
+        xSemaphoreTakeRecursive(g_bus_mutex, pdMS_TO_TICKS(200)) != pdTRUE) return false;
+    bool ok = readByte(EXIO_DEVICE, REG_OUTPUT, readback);
+    shadow_out = g_exio_shadow;
+    xSemaphoreGiveRecursive(g_bus_mutex);
+    return ok;
 }
 
 bool writeOutput(const State& state) {
-    return writeByte(EXIO_DEVICE, REG_OUTPUT, state.out);
+    return update(0xFF, state.out);
 }
 
 bool readInput(uint8_t& value) {

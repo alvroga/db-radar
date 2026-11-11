@@ -54,6 +54,14 @@ i2c_manager::exio::begin(state);
 i2c_manager::exio::set(i2c_manager::exio::BUZZER, false, state);
 ```
 
+**Output register ownership (2026-11-10).** `i2c_manager` keeps the single shadow of the TCA9554 OUTPUT
+register. All changes go through `exio::update(mask, bits)` / `exio::set()` / `exio::pulseLow()`, which do the
+read-modify-write atomically under the bus mutex and commit the shadow only after a successful write. Do
+**not** read the register, edit it and `rawWrite(REG_OUTPUT, ...)` it back: that is how standby's TP_RST pulse
+could write back a stale buzzer bit and leave the buzzer stuck on (or the buzzer's own write clear TP_RST
+mid-pulse). The `State` argument of `set()` is just a mirror of the shadow.
+
+
 Pin map (`i2c_manager::exio::Pin`) — this is the corrected mapping; see "Critical pin-mapping history" below for why it's called out:
 
 ```cpp

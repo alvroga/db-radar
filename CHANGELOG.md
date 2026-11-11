@@ -11,6 +11,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+**B3: atomic IO-expander output + I2C failure logging off the bus lock (2026-11-10, built, not hardware-verified)**
+
+- `i2c_manager::exio` now owns one shadow of the OUTPUT register; new `update(mask,bits)`, `pulseLow(pin,ms)`,
+  `shadow()`, `readOutputChecked()`. `buzzer.cpp` no longer re-reads the register before each set;
+  `standby_manager.cpp` and the touch-recovery path in `device_manager.cpp` use `pulseLow(TP_RST)` instead of
+  read + two `rawWrite(REG_OUTPUT)` of a stale snapshot (which could revert a concurrent buzzer change).
+  The EXIO canary compares against the single shadow, sampled together with the readback.
+- `i2c_manager.cpp` `read()`/`write()`: failure logging (Serial + system_logger, which can touch SD) moved
+  after the bus mutex release; op/fail counters now updated under the lock (or atomically on the
+  mutex-timeout path).
+- Build: flash 1,721,875 B (+372 vs previous), RAM 168,392 B unchanged.
+
 **B2 result: `CONFIG_LCD_RGB_RESTART_IN_VSYNC` did not fix the GPX-upload glitch — reverted (2026-11-10)**
 
 Hardware A/B with the same upload/delete: glitch unchanged, display felt glitchier overall. Reverted;

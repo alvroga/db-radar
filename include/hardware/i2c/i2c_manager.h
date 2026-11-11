@@ -121,7 +121,15 @@ namespace exio {
     };
 
     bool begin(State& state);
-    bool set(Pin pin, bool high, State& state);
+    // ONE shadow of the output register lives in i2c_manager (seeded by begin()); every
+    // output change goes through update()/set()/pulseLow() so the read-modify-write is atomic
+    // under the bus mutex. Callers must NOT read the register, edit it and write it back
+    // themselves (rawWrite(REG_OUTPUT, ...)) -- that raced the buzzer and could leave it stuck on.
+    bool update(uint8_t mask, uint8_t bits);       // out = (out & ~mask) | (bits & mask)
+    bool set(Pin pin, bool high, State& state);    // thin wrapper; also mirrors shadow into `state`
+    bool pulseLow(Pin pin, uint32_t low_ms);       // drive low, wait, drive high; holds the bus mutex throughout
+    uint8_t shadow();                              // last value successfully written
+    bool readOutputChecked(uint8_t& readback, uint8_t& shadow_out); // for the canary: consistent pair
     bool writeOutput(const State& state);
     bool readInput(uint8_t& value);
     bool readOutput(uint8_t& value);

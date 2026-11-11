@@ -626,8 +626,12 @@ static void systemTask(void* parameter) {
 
             uint8_t cfg_readback = 0xFF;
             uint8_t out_readback = 0xFF;
+            uint8_t out_shadow = 0xFF;
             bool cfg_ok = i2c_manager::exio::rawRead(i2c_manager::exio::REG_CONFIG, cfg_readback);
-            bool out_ok = i2c_manager::exio::readOutput(out_readback);
+            // Readback and shadow sampled together under the bus mutex, so a buzzer change
+            // between the two can't produce a false mismatch. The shadow is i2c_manager's
+            // single copy (the per-module State copies are only mirrors).
+            bool out_ok = i2c_manager::exio::readOutputChecked(out_readback, out_shadow);
 
             if (cfg_ok && cfg_readback != 0x00) {
                 char msg[96];
@@ -635,10 +639,10 @@ static void systemTask(void* parameter) {
                 system_logger::error("EXIO_CANARY", msg);
                 Serial.printf("[EXIO] CANARY MISMATCH: %s\n", msg);
             }
-            if (out_ok && out_readback != dev_state.exio_state->out) {
+            if (out_ok && out_readback != out_shadow) {
                 char msg[96];
                 snprintf(msg, sizeof(msg), "OUTPUT readback=0x%02X, shadow=0x%02X",
-                         out_readback, dev_state.exio_state->out);
+                         out_readback, out_shadow);
                 system_logger::error("EXIO_CANARY", msg);
                 Serial.printf("[EXIO] CANARY MISMATCH: %s\n", msg);
             }

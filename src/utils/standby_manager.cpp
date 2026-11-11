@@ -356,18 +356,10 @@ static void restoreActivePowerSettings() {
     delay(20);
 
     // Toggle TP_RST (EXIO pin 1, active-low) to hard-reset the CST820.
-    // Read current EXIO output state first so we preserve all other pin states.
-    uint8_t exio_out = 0xFF;  // Safe default: all pins high (inactive)
-    if (!i2c_manager::exio::readOutput(exio_out)) {
-        Serial.println("[STANDBY] ⚠ EXIO read failed — using default 0xFF for TP_RST");
-    }
-    // Assert TP_RST low
-    bool rst_ok = i2c_manager::exio::rawWrite(i2c_manager::exio::REG_OUTPUT,
-                                              exio_out & ~(1u << (uint8_t)i2c_manager::exio::TP_RST));
-    delay(15);
-    // Deassert TP_RST high
-    rst_ok &= i2c_manager::exio::rawWrite(i2c_manager::exio::REG_OUTPUT,
-                                           exio_out | (1u << (uint8_t)i2c_manager::exio::TP_RST));
+    // pulseLow() changes ONLY the TP_RST bit, atomically under the bus mutex, so a buzzer
+    // change landing mid-pulse is neither lost nor reverted (the old read/rawWrite pair wrote
+    // back a stale snapshot of every other pin).
+    bool rst_ok = i2c_manager::exio::pulseLow(i2c_manager::exio::TP_RST, 15);
     delay(100);  // CST820 needs ~100ms to boot after reset
 
     if (rst_ok) {

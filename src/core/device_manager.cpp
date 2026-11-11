@@ -855,15 +855,11 @@ bool initTouch() {
             // not respond to any amount of bus recovery — only its own reset line
             // clears it.
             Serial.println("[TOUCH] Still not found after bus reinit — trying CST820 hardware reset (TP_RST)");
-            uint8_t exio_out = 0xFF;  // Safe default: all pins high (inactive)
-            if (!i2c_manager::exio::readOutput(exio_out)) {
-                Serial.println("[TOUCH] EXIO read failed — using default 0xFF for TP_RST");
+            // Atomic single-bit pulse (see exio::pulseLow) -- never write back a stale
+            // snapshot of the other pins, which could revert a concurrent buzzer change.
+            if (!i2c_manager::exio::pulseLow(i2c_manager::exio::TP_RST, 15)) {
+                Serial.println("[TOUCH] EXIO TP_RST pulse failed");
             }
-            i2c_manager::exio::rawWrite(i2c_manager::exio::REG_OUTPUT,
-                                         exio_out & ~(1u << (uint8_t)i2c_manager::exio::TP_RST));
-            delay(15);
-            i2c_manager::exio::rawWrite(i2c_manager::exio::REG_OUTPUT,
-                                         exio_out | (1u << (uint8_t)i2c_manager::exio::TP_RST));
             delay(100);  // CST820 needs ~100ms to boot after reset
 
             if (!cst820_begin(0x15)) {

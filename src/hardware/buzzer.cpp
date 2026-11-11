@@ -75,14 +75,9 @@ bool isButtonSoundEnabled() {
 void on() {
     if (!g_state.initialized) return;
 
-    // Read current EXIO state (i2c_manager handles mutex internally)
-    uint8_t current_output;
-    if (!i2c_manager::exio::readOutput(current_output)) {
-        return;
-    }
-
-    // Set buzzer pin HIGH (active high)
-    g_state.exio_state.out = current_output;
+    // Set buzzer pin HIGH (active high). set() is an atomic read-modify-write on i2c_manager's
+    // single output shadow -- no separate read-then-write here (that raced standby's TP_RST
+    // pulse and could leave the buzzer stuck on).
     if (i2c_manager::exio::set(i2c_manager::exio::BUZZER, true, g_state.exio_state)) {
         g_state.buzzer_on = true;
     }
@@ -91,14 +86,7 @@ void on() {
 void off() {
     if (!g_state.initialized) return;
 
-    // Read current EXIO state (i2c_manager handles mutex internally)
-    uint8_t current_output;
-    if (!i2c_manager::exio::readOutput(current_output)) {
-        return;
-    }
-
-    // Set buzzer pin LOW
-    g_state.exio_state.out = current_output;
+    // Set buzzer pin LOW (atomic, see on())
     if (i2c_manager::exio::set(i2c_manager::exio::BUZZER, false, g_state.exio_state)) {
         g_state.buzzer_on = false;
         g_state.off_time_ms = 0;
